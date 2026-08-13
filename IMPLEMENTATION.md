@@ -1,0 +1,529 @@
+# Implementation Specification
+
+Detailed build spec for the bus dispatch pilot. A coding agent should treat
+this as the source of truth; `README.md` is the human-facing summary,
+`PROGRESS.md` tracks status, `AGENTS.md` has the commands/conventions.
+
+## 1. Scope
+
+Build the app end-to-end (Phases 0-6 in `PROGRESS.md`):
+
+1. Ingest CTA GTFS static into SQLite.
+2. Poll + decode GTFS-RT (VehiclePositions + TripUpdates) behind a provider
+   abstraction.
+3. Join realtime to schedule; compute per-terminal snapshots (incoming,
+   layovers, interventions).
+4. Serve REST + WebSocket; render a mobile-first React UI with a live
+   min:sec layover countdown and hold recommendations.
+
+Do **not** implement auth, multi-user roles, or the proprietary-DB adapter.
+Leave the provider interface ready for it, but only ship the GTFS-RT adapter.
+
+## 2. Tooling
+
+- Node 18+ (LTS), npm.
+- TypeScript **strict** everywhere. No `any` except at the GTFS-RT protobuf
+  boundary (wrap and normalize into `shared/types.ts`).
+- npm workspaces: `shared/`, `server/`, `web/`.
+- Server: `express`, `better-sqlite3`, `gtfs-realtime-bindings`, `ws`, `zod`,
+  `dotenv`, `adm-zip`, `csv-parse` (or `fast-csv`), `node-fetch` (or global
+  `fetch`).
+- Web: `react`, `react-dom`, `react-router-dom`, Vite.
+- Dev/test: `tsx` (server watch), `vitest`, `eslint` + `@typescript-eslint`.
+
+Root scripts (also in `AGENTS.md`): `dev`, `build`, `lint`, `typecheck`,
+`test`.
+
+## 3. Repository layout
+
+```
+shared/types.ts            # all DTOs + AppConfig + zod schemas (see §4)
+server/src/
+  index.ts                 # express + ws + static serving + scheduler
+  config.ts                # load/save AppConfig (SQLite settings), zod validate, env seed
+  db/schema.ts             # DDL (§5)
+  db/staticLoader.ts       # parse -> SQLite, derive block_trips
+  gtfs/static.ts           # download/unzip/parse GTFS CSVs
+  gtfs/time.ts             # service-day time helpers (§6)
+  gtfs/realtime.ts         # HTTP fetch + protobuf decode
+  providers/types.ts       # RealtimeProvider interface (§7)
+  providers/gtfsrt.ts      # GTFS-RT adapter (§7)
+  engine/terminal.ts       # terminal resolution (§8.1)
+  engine/headway.ts        # departures, vehicle assignment, scheduled headway (§8.2)
+  engine/interventions.ts  # rules (§8.4)
+  engine/engine.ts         # orchestrator -> TerminalSnapshot[] (§8.5)
+  api/routes.ts            # REST (§9)
+  api/ws.ts                # WebSocket broadcast (§9)
+web/src/
+  main.tsx, App.tsx, api.ts
+  pages/Terminals.tsx, pages/TerminalView.tsx
+  components/BusCard.tsx, LayoverCard.tsx, InterventionCard.tsx,
+             RouteGroup.tsx, Countdown.tsx
+  hooks/useStream.ts, hooks/useCountdown.ts
+```
+
+## 4. Shared types
+
+Authoritative DTOs. Server and web import from `shared/types.ts`.
+
+```ts
+export interface Terminal {
+  id: string;
+  name: string;
+  stopIds: string[];          // GTFS stop_id(s); co-located terminals use >1
+  routeIds?: string[];        // optional filter; undefined = all routes at stop
+}
+
+export interface Stop {
+  stopId: string;
+  stopCode?: string;
+  stopName: string;
+  lat: number;
+  lon: number;
+}
+
+export interface VehiclePosition {
+  vehicleId: string;
+  tripId?: string;
+  routeId?: string;
+  stopId?: string;
+  stopSequence?: number;
+  lat?: number;
+  lon?: number;
+  timestamp: number;          // unix seconds
+}
+
+export interface StopTimePrediction {
+  stopId: string;
+  stopSequence: number;
+  arrivalDelay?: number;      // seconds (signed)
+  departureDelay?: number;    // seconds (signed)
+  arrivalTime?: number;       // unix seconds
+  departureTime?: number;     // unix seconds
+}
+
+export interface TripUpdateInfo {
+  tripId: string;
+  vehicleId?: string;
+  routeId?: string;
+  delay?: number;             // trip-level seconds (signed)
+  stopTimeUpdates: StopTimePrediction[];
+  timestamp: number;          // unix seconds
+}
+
+export interface IncomingBus {
+  routeId: string;
+  routeShortName: string;
+  tripId: string;
+  vehicleId?: string;
+  scheduledArrival: number;   // service-day seconds
+  predictedArrival: number;   // service-day seconds
+  etaSeconds: number;         // predictedArrival - nowSvc (>= 0)
+  delaySeconds: number;       // predictedArrival - scheduledArrival
+}
+
+export interface HoldOverride {
+  holdSeconds: number;        // additional seconds
+  effectiveDeparture: number; // service-day seconds (scheduled + hold)
+  rule: 'leader' | 'follower';
+  reason: string;
+}
+
+export interface LayoverBus {
+  routeId: string;
+  routeShortName: string;
+  tripId: string;             // next outbound trip (from block chain)
+  vehicleId?: string;
+  scheduledDeparture: number; // service-day seconds
+  predictedDeparture: number; // service-day seconds (incl. hold)
+  countdownSeconds: number;   // scheduledDeparture - nowSvc (timer target)
+  hold?: HoldOverride;
+  minRestAdvisory?: boolean;
+}
+
+export type InterventionRule =
+  | 'hold_leader' | 'hold_follower' | 'gap_alert' | 'min_rest';
+
+export interface Intervention {
+  id: string;
+  terminalId: string;
+  routeId: string;
+  rule: InterventionRule;
+  vehicleId?: string;         // the bus to hold / affected
+  leaderVehicleId?: string;
+  followerVehicleId?: string;
+  holdSeconds: number;        // 0 for passive alerts
+  reason: string;
+  until?: number;             // service-day seconds
+  generatedAt: number;        // unix seconds
+}
+
+export interface RouteState {
+  routeId: string;
+  routeShortName: string;
+  incoming: IncomingBus[];
+  layovers: LayoverBus[];
+  interventions: Intervention[];
+}
+
+export interface TerminalSnapshot {
+  terminalId: string;
+  generatedAt: number;        // unix seconds
+  routes: RouteState[];
+}
+
+export interface AppConfig {
+  realtime: {
+    vehiclePositionsUrl: string;
+    tripUpdatesUrl: string;
+    apiKey?: string;
+  };
+  staticGtfsUrl: string;
+  refreshIntervalSeconds: number;   // 10
+  staticRefreshHours: number;       // 24
+  minRestMinutes: number;           // 5
+  gapFactor: number;                // 1.5
+  bunchFactor: number;              // 0.5
+  holdFraction: number;             // 0.5
+  maxHoldMinutes: number;           // 10
+  leadTimeMinutes: number;          // 5
+  lookaheadMinutes: number;         // 90
+  terminals: Terminal[];            // auto-discovered, then editable
+}
+```
+
+Config is validated with `zod` (a single schema in `shared/types.ts` or
+`server/src/config.ts`). Env vars (`CTA_STATIC_URL`, `CTA_VP_URL`,
+`CTA_TU_URL`, `CTA_API_KEY`, `PORT`, `DB_PATH`, `STATIC_GTFS_PATH`) seed the
+initial defaults only.
+
+## 5. SQLite schema
+
+`DB_PATH` (default `./data/dispatch.db`). WAL mode. `better-sqlite3` sync.
+
+```sql
+CREATE TABLE IF NOT EXISTS stops (
+  stop_id TEXT PRIMARY KEY,
+  stop_code TEXT,
+  stop_name TEXT,
+  parent_station TEXT,
+  lat REAL,
+  lon REAL
+);
+
+CREATE TABLE IF NOT EXISTS routes (
+  route_id TEXT PRIMARY KEY,
+  agency_id TEXT,
+  short_name TEXT,
+  long_name TEXT,
+  type INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trips (
+  trip_id TEXT PRIMARY KEY,
+  route_id TEXT,
+  service_id TEXT,
+  block_id TEXT,
+  direction_id INTEGER,
+  headsign TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
+CREATE INDEX IF NOT EXISTS idx_trips_block ON trips(block_id);
+
+CREATE TABLE IF NOT EXISTS stop_times (
+  trip_id TEXT,
+  stop_sequence INTEGER,
+  stop_id TEXT,
+  arrival_time INTEGER,   -- service-day seconds (§6)
+  departure_time INTEGER, -- service-day seconds (§6)
+  pickup_type INTEGER,
+  drop_off_type INTEGER,
+  PRIMARY KEY (trip_id, stop_sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_st_trip ON stop_times(trip_id);
+CREATE INDEX IF NOT EXISTS idx_st_stop ON stop_times(stop_id);
+
+CREATE TABLE IF NOT EXISTS calendar (
+  service_id TEXT PRIMARY KEY,
+  monday INTEGER, tuesday INTEGER, wednesday INTEGER, thursday INTEGER,
+  friday INTEGER, saturday INTEGER, sunday INTEGER,
+  start_date TEXT, end_date TEXT
+);
+
+CREATE TABLE IF NOT EXISTS calendar_dates (
+  service_id TEXT,
+  date TEXT,
+  exception_type INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_cd_date ON calendar_dates(date);
+
+CREATE TABLE IF NOT EXISTS block_trips (
+  block_id TEXT,
+  seq INTEGER,
+  trip_id TEXT,
+  start_time INTEGER,   -- service-day seconds of trip's first departure
+  route_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bt_block ON block_trips(block_id);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT
+);
+```
+
+`stop_times` holds **normalized** service-day seconds (not raw `HH:MM:SS`).
+Only rows for the active service day are needed by the engine, but load the
+whole feed into SQLite (read-only reference).
+
+## 6. Time model (critical)
+
+GTFS times are `HH:MM:SS` and may exceed `24:00:00` (trips running past
+midnight belong to the *previous* calendar day's service).
+
+We normalize everything to **seconds since service-day start**, where the
+start is **auto-detected from the GTFS stop_times** (not configured).
+
+### 6.1 Detect service-day start (`gtfs/time.ts`)
+
+1. For every trip, take its first `departure_time` and last `arrival_time`
+   (raw seconds, may exceed `86400`) and reduce modulo 86400 to a
+   `[start, end)` active interval on a 24h circle; if `end <= start` the trip
+   crosses midnight (covers `[start, 86400)` + `[0, end)`).
+2. Bucket the circle into minutes; mark buckets covered by any trip's active
+   interval.
+3. Find the longest run of zero-coverage minutes (the overnight lull).
+   Service-day start = the first minute after the lull.
+4. Fallback: no zero-coverage gap (24h operation) -> use the least-covered
+   minute as the lull; still ambiguous -> default `03:00`.
+
+Store `serviceDayStartSeconds` in `settings` at load. Derived, not
+user-editable; keep an emergency override key for troubleshooting.
+
+### 6.2 Normalization
+
+```
+svcSeconds(raw) = raw - serviceDayStartSeconds
+if svcSeconds < 0: svcSeconds += 86400
+```
+
+Apply to every stop_time at load. At runtime:
+
+```
+nowSvc = localSecondsSinceMidnight(now) - serviceDayStartSeconds
+if nowSvc < 0: nowSvc += 86400
+```
+
+Late-night trips (e.g. `25:30` -> `81000`) land near the *end* of the same
+service day as "now" shortly after midnight, so ordering, `departure -
+nowSvc`, and countdowns need no date/wrap special-casing.
+
+All engine math uses service-day seconds. `unix` timestamps appear only in
+DTOs for display/debugging.
+
+### 6.3 Active service day
+
+Map `nowSvc` to a calendar date: if `now` (wall clock) precedes the service-
+day start, the active service day is *yesterday's* calendar date; otherwise
+today's. Active `service_id`s = calendar (weekday flag true AND date in
+`[start_date, end_date]`) ∪ calendar_dates(`exception_type=1`) −
+calendar_dates(`exception_type=2`).
+
+## 7. Realtime provider abstraction
+
+```ts
+// providers/types.ts
+export interface RealtimeSnapshot {
+  timestamp: number;                 // unix seconds
+  vehicles: VehiclePosition[];
+  tripUpdates: TripUpdateInfo[];
+}
+
+export interface RealtimeProvider {
+  fetch(): Promise<RealtimeSnapshot>;
+}
+```
+
+`providers/gtfsrt.ts` implements it:
+
+- GET `vehiclePositionsUrl` and `tripUpdatesUrl`, appending
+  `?key=<apiKey>` (the CTA `transitdata` endpoints require the key). Load the
+  key from `.env` (`CTA_API_KEY`); never log or expose it.
+- Decode `FeedMessage` via `gtfs-realtime-bindings`.
+- VehiclePositions: `entity.vehicle` -> `vehicle.id`, `vehicle.trip.trip_id`,
+  `vehicle.trip.route_id`, `vehicle.position` (lat/lon/bearing),
+  `vehicle.current_stop_sequence`, `vehicle.stop_id`, `vehicle.timestamp`.
+- TripUpdates: `entity.trip_update` -> `trip_update.trip.trip_id`,
+  `trip_update.vehicle.id`, `trip_update.delay` (signed seconds),
+  `trip_update.stop_time_update[]` -> `stop_id`, `stop_sequence`,
+  `arrival.delay/time`, `departure.delay/time`.
+- Drop entities lacking `trip_id` or `vehicle_id`. Convert all `delay`/`time`
+  to seconds. Note `time` in GTFS-RT is POSIX time (seconds).
+- Never throw the whole poll; return what parsed and log skipped entities.
+
+The `fetch()` is called by the scheduler; a provider swap only changes this
+file.
+
+## 8. Engine algorithm
+
+`engine/engine.ts` exposes `async refresh(): Promise<TerminalSnapshot[]>`.
+Called by the scheduler on a `setInterval(refreshIntervalSeconds)`, and the
+snapshots are cached in memory + broadcast over WS + served by REST.
+
+### 8.1 Terminal resolution (`terminal.ts`)
+
+For a `Terminal` (stopIds S) and route R:
+
+- **Outbound trips** (departures): trips of R whose *first* `stop_times` row
+  (min `stop_sequence`) has `stop_id ∈ S` and `pickup_type != 1`.
+- **Inbound trips** (arrivals): trips of R whose *last* `stop_times` row (max
+  `stop_sequence`) has `stop_id ∈ S` and `drop_off_type != 1`.
+
+Auto-discovery (run once after static load, then stored as `terminals`
+config): for every route, its first stop and last stop are terminal
+candidates; group by `stop_id` (name from `stop_name`, coordinates from
+`stops`). A candidate terminal lists the routes that originate there. The
+user can later merge multiple `stop_id`s into one terminal and filter by
+route.
+
+### 8.2 Departures + vehicle assignment (`headway.ts`)
+
+For each terminal route in the lookahead window `[nowSvc, nowSvc +
+lookaheadMinutes*60]`, produce ordered outbound departures. For each
+departure trip T:
+
+1. `scheduledDeparture = stop_times.departure_time` at S for T.
+2. **Assign vehicle**: build `tripId -> vehicleId` from realtime tripUpdates
+   + vehiclePositions. Walk the block chain: `block_trips` gives, for each
+   trip, its next trip (same `block_id`, `seq+1`). A vehicle currently on
+   trip X will operate `nextTrip(X)`. So the vehicle for outbound T =
+   vehicle currently on `prevTrip(T)`, or vehicle already assigned to T by
+   realtime (rare).
+3. **Classify** the vehicle:
+   - `incoming`: vehicle's current trip is `prevTrip(T)` and its predicted
+     arrival at S is in the future.
+   - `layover`: predicted arrival at S is in the past (or vehicle position is
+     at S with no active inbound trip). This bus gets a countdown + hold
+     evaluation.
+   - `unknown`: no realtime data — treat as `layover` with predicted =
+     scheduled (on-time assumption).
+
+### 8.3 Predicted times
+
+`predictedArrival(V, terminalStop)`: prefer the inbound trip's
+`stop_time_update` for `terminalStop` — `arrivalTime` (absolute) else
+`scheduledArrival + arrivalDelay`; else trip-level `delay` applied to
+`scheduledArrival`; else `scheduledArrival`.
+
+`predictedDeparture(V, T)` for a layover bus =
+`max(predictedArrival(V, S), nowSvc) + minRestMinutes*60`. For a bus already
+laid over with no realtime signal, use `scheduledDeparture`.
+
+ETA for an incoming bus = `predictedArrival - nowSvc`.
+
+### 8.4 Intervention rules (`interventions.ts`)
+
+Inputs: ordered departures for a route at a terminal, each with
+`scheduledDeparture` (L_d, F_d) and `predictedDeparture`.
+
+For each consecutive pair (leader L, follower F):
+
+```
+H = F_d - L_d                              // scheduled headway
+P = predictedDeparture(F) - predictedDeparture(L)   // predicted headway
+```
+
+Guard: if `H <= 0` (duplicate/back-to-back schedules), skip the pair (or
+floor H at a small epsilon; skipping is simpler).
+
+- **hold_leader** (gap): if `P > gapFactor * H` AND leader is `layover` AND
+  `nowSvc >= L_d - leadTimeMinutes*60`:
+  `holdSeconds = min(holdFraction * (P - H), maxHoldMinutes*60)`.
+  Emit intervention targeting the leader, `until = L_d + holdSeconds`.
+  Attach `HoldOverride` to the leader's `LayoverBus`.
+- **hold_follower** (bunch): if `P < bunchFactor * H`:
+  `holdSeconds = min(bunchFactor*H - P, maxHoldMinutes*60)`.
+  Emit intervention targeting the follower.
+- **gap_alert**: if `P > gapFactor * H` AND leader has already departed
+  (`predictedDeparture(L) <= nowSvc` or `incoming`/gone): passive flag.
+- **min_rest**: for each layover bus, if
+  `predictedDeparture - predictedArrival < minRestMinutes*60`, set
+  `minRestAdvisory` + passive intervention.
+
+Important: compute holds independently from raw predicted departures — do
+**not** cascade a held departure into subsequent pairs (documented
+limitation).
+
+### 8.5 Snapshot assembly
+
+For each terminal: group by route, build `RouteState` (incoming sorted by ETA,
+layovers sorted by scheduled departure, interventions). Compute `nowSvc` once
+per refresh. Derive `countdownSeconds = scheduledDeparture - nowSvc` (the
+timer always targets scheduled time; the hold is a separate badge).
+
+## 9. API + WebSocket
+
+- `GET /api/health` -> `{ ok, lastRefreshAt, staticLoadedAt }`.
+- `GET /api/terminals` -> `{ terminals: Terminal[], routes: {routeId, shortName, terminalIds[]}[] }`.
+- `GET /api/terminals/:id` -> latest `TerminalSnapshot` (optionally
+  `?route=R` filters to one route).
+- `GET /api/config` -> `AppConfig` (redact `apiKey`).
+- `PUT /api/config` -> validate (zod) + persist to `settings` + apply.
+- `POST /api/static/reload` -> re-download + reload static (manual trigger).
+- `WS /api/ws` -> on connect sends current snapshot; on each refresh sends
+  the updated snapshots (message `{ type: 'snapshots', snapshots: [...] }`).
+
+## 10. Frontend
+
+Mobile-first (max-width container, large tap targets). `react-router-dom`:
+
+- `/` -> `Terminals.tsx`: list terminals grouped by route; tap to open.
+- `/terminal/:id` -> `TerminalView.tsx`: sections per route — **Incoming**
+  (route, run, `Countdown` to ETA, delay badge), **Laying over** (route,
+  vehicle, `Countdown` to scheduled departure, hold badge if held), and
+  **Interventions** (`InterventionCard`: "Hold <vehicle> until hh:mm (+N min)"
+  + reason).
+
+`hooks/useCountdown(seconds)` ticks every second and renders `MM:SS`
+(color: green > 2 min, amber 0-2 min, red < 0).
+
+`hooks/useStream.ts`: open WS, fall back to 10s polling of
+`GET /api/terminals/:id` if WS fails.
+
+Header shows last-updated time and data-source status.
+
+## 11. Testing (vitest)
+
+- `gtfs/time.test.ts`: `24:00:00+` wrap, service-day start offset, midnight
+  rollover.
+- `staticLoader` round-trip with a tiny synthetic GTFS (hand-written
+  `routes`, `trips`, `stop_times`, `calendar`).
+- `block_trips` derivation: chaining across a 2-trip block.
+- Realtime decode: synthetic `FeedMessage` protobuf -> normalized DTO.
+- Engine (synthetic schedule + synthetic realtime):
+  - hold_leader fires when `P > 1.5H` within lead window; hold =
+    `0.5*(P-H)`, capped by `maxHoldMinutes`.
+  - hold_follower fires when `P < 0.5H`.
+  - no fire when leader already departed (gap_alert instead).
+  - no fire below thresholds.
+  - `min_rest` advisory when layover < rest.
+  - countdownSeconds = scheduled - now (not held departure).
+
+## 12. Definition of done
+
+1. `npm run typecheck`, `npm run lint`, `npm test` all pass.
+2. `npm run dev` loads CTA static (or synthetic fixture), polls GTFS-RT, and
+   serves the UI.
+3. Terminal auto-discovery produces a list grouped by route.
+4. Terminal view shows incoming ETA, layover countdowns, and hold badges.
+5. Leader/follower holds, gap alerts, and min-rest advisories are emitted per
+   the formulas in §8.4 and covered by tests.
+6. `PUT /api/config` updates rules live; persisted in SQLite.
+7. `npm run build && npm start` serves the built web bundle from the server.
+
+## 13. Sequencing
+
+Implement in PROGRESS phase order (0 -> 6). Commit working checkpoints at each
+phase boundary. Default feed URLs are the CTA `transitdata` endpoints (key
+required; see `.env.example`); the provider must work with any URL/key in
+`.env`.

@@ -1,0 +1,30 @@
+{
+  "name": "dispatch",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run typecheck && npm run build -w web && npm run build -w server",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
+    "test": "vitest run",
+    "start": "npm run start -w server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.24.2",
+    "eslint": "^9.18.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^2.1.8"
+  }
+}
