@@ -8,7 +8,7 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 0 — Repo scaffolding
 - [x] Phase 1 — GTFS static ingestion
 - [x] Phase 2 — GTFS-RT ingestion + provider abstraction
-- [ ] Phase 3 — Join engine (terminal + headway + interventions)
+- [x] Phase 3 — Join engine (terminal + headway + interventions)
 - [ ] Phase 4 — API + WebSocket
 - [ ] Phase 5 — Web frontend
 - [ ] Phase 6 — Config UI + deployment polish
@@ -58,22 +58,22 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Phase 3 — Join engine
 
-- [ ] `server/src/engine/terminal.ts` — resolve a terminal: which trips
+- [x] `server/src/engine/terminal.ts` — resolve a terminal: which trips
       depart/arrive at its `stop_id`s, per route (first/last stop detection).
-- [ ] `server/src/engine/headway.ts` — ordered outbound departures for a
+- [x] `server/src/engine/headway.ts` — ordered outbound departures for a
       route/terminal in the lookahead window; assign vehicles via
       block trip chaining + realtime trip assignment; classify each as
       `layover` vs `incoming`; compute scheduled headway `H` per pair.
-- [ ] Predicted departure: from TripUpdate terminal stop prediction, else
+- [x] Predicted departure: from TripUpdate terminal stop prediction, else
       `max(predicted_arrival, now) + min_rest`.
-- [ ] `server/src/engine/interventions.ts` — unified headway rule using
+- [x] `server/src/engine/interventions.ts` — unified headway rule using
       scheduled headway per pair: `P > gap_factor*H` -> hold leader;
       `P < bunch_factor*H` -> hold follower; plus gap alert + min-rest
       advisory. Emit `Intervention` DTOs with `hold_minutes`, `reason`,
       `expires_at`.
-- [ ] `server/src/engine/engine.ts` — orchestrates refresh -> normalized
+- [x] `server/src/engine/engine.ts` — orchestrates refresh -> normalized
       `TerminalSnapshot` for each configured terminal.
-- [ ] Tests: synthetic schedule + synthetic realtime fixtures for each rule
+- [x] Tests: synthetic schedule + synthetic realtime fixtures for each rule
       (incl. lead-time window, max-hold cap, below-threshold no-op).
 
 ## Phase 4 — API + WebSocket

@@ -85,8 +85,8 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
         st.stopId,
         normalizeServiceSeconds(st.arrivalTime, gtfs.serviceDayStartSeconds),
         normalizeServiceSeconds(st.departureTime, gtfs.serviceDayStartSeconds),
-        st.pickupType ?? null,
-        st.dropOffType ?? null,
+        st.pickupType ?? 0,
+        st.dropOffType ?? 0,
       );
     }
     for (const cal of gtfs.calendar) {
