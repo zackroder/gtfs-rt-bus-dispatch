@@ -1,8 +1,154 @@
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { getConfig, putConfig, reloadStatic } from '../api';
+import { appConfigSchema, type AppConfig } from '../../../shared/types';
+
 export default function ConfigPage() {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [terminalsJson, setTerminalsJson] = useState('');
+  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    getConfig()
+      .then((cfg) => {
+        setConfig(cfg);
+        setTerminalsJson(JSON.stringify(cfg.terminals, null, 2));
+      })
+      .catch((err: unknown) =>
+        setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) }),
+      );
+  }, []);
+
+  if (!config) return <div className="loading">Loading settings…</div>;
+
+  const setNumber = (key: keyof AppConfig, value: string) => {
+    setConfig({ ...config, [key]: Number(value) });
+  };
+
+  const setUrl = (key: 'vehiclePositionsUrl' | 'tripUpdatesUrl', value: string) => {
+    setConfig({ ...config, realtime: { ...config.realtime, [key]: value } });
+  };
+
+  const save = async () => {
+    try {
+      let terminals: AppConfig['terminals'];
+      try {
+        terminals = JSON.parse(terminalsJson) as AppConfig['terminals'];
+      } catch {
+        throw new Error('Terminals JSON is not valid');
+      }
+      const candidate = appConfigSchema.parse({ ...config, terminals });
+      const saved = await putConfig(candidate);
+      setConfig(saved);
+      setMessage({ kind: 'ok', text: 'Saved. Rule changes apply on the next refresh.' });
+    } catch (err) {
+      setMessage({
+        kind: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const reload = async () => {
+    try {
+      await reloadStatic();
+      setMessage({ kind: 'ok', text: 'Static GTFS reload triggered.' });
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const numeric = (value: number) => String(value);
+  const rows: Array<[string, keyof AppConfig]> = [
+    ['Refresh interval (s)', 'refreshIntervalSeconds'],
+    ['Static refresh (h)', 'staticRefreshHours'],
+    ['Min rest (min)', 'minRestMinutes'],
+    ['Gap factor', 'gapFactor'],
+    ['Bunch factor', 'bunchFactor'],
+    ['Hold fraction', 'holdFraction'],
+    ['Max hold (min)', 'maxHoldMinutes'],
+    ['Lead time (min)', 'leadTimeMinutes'],
+    ['Lookahead (min)', 'lookaheadMinutes'],
+  ];
+
   return (
     <div className="config-page">
+      <header className="page-header">
+        <Link to="/">← Terminals</Link>
+      </header>
       <h1>Settings</h1>
-      <p>Loading…</p>
+
+      <section className="route-group">
+        <h2>Rule parameters</h2>
+        {rows.map(([label, key]) => (
+          <div className="form-row" key={key}>
+            <label htmlFor={key}>{label}</label>
+            <input
+              id={key}
+              type="number"
+              step="any"
+              value={numeric(config[key] as number)}
+              onChange={(e) => setNumber(key, e.target.value)}
+            />
+          </div>
+        ))}
+      </section>
+
+      <section className="route-group">
+        <h2>Data sources</h2>
+        <div className="form-row">
+          <label htmlFor="vp">Vehicle positions URL</label>
+          <input
+            id="vp"
+            type="text"
+            value={config.realtime.vehiclePositionsUrl}
+            onChange={(e) => setUrl('vehiclePositionsUrl', e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="tu">Trip updates URL</label>
+          <input
+            id="tu"
+            type="text"
+            value={config.realtime.tripUpdatesUrl}
+            onChange={(e) => setUrl('tripUpdatesUrl', e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="apiKey">API key</label>
+          <input
+            id="apiKey"
+            type="password"
+            placeholder="unchanged"
+            value={config.realtime.apiKey ?? ''}
+            onChange={(e) =>
+              setConfig({
+                ...config,
+                realtime: { ...config.realtime, apiKey: e.target.value || undefined },
+              })
+            }
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="static">Static GTFS URL</label>
+          <input
+            id="static"
+            type="text"
+            value={config.staticGtfsUrl}
+            onChange={(e) => setConfig({ ...config, staticGtfsUrl: e.target.value })}
+          />
+        </div>
+      </section>
+
+      <section className="route-group">
+        <h2>Terminals (JSON)</h2>
+        <textarea value={terminalsJson} onChange={(e) => setTerminalsJson(e.target.value)} />
+      </section>
+
+      {message && <div className={message.kind === 'ok' ? 'ok-msg' : 'error'}>{message.text}</div>}
+
+      <button onClick={() => void save()}>Save settings</button>
+      <button onClick={() => void reload()}>Reload static GTFS</button>
     </div>
   );
 }

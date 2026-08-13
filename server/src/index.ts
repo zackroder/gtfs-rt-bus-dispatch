@@ -17,7 +17,6 @@ import {
   activeServiceIds,
   getServiceDayStart,
   getStaticLoadedAt,
-  nowServiceSeconds,
 } from './gtfs/time';
 import type { AppConfig, TerminalSnapshot } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';

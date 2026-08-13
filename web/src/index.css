@@ -228,6 +228,50 @@ h3 {
   text-decoration: none;
 }
 
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 8px;
+}
+
+.page-header a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.source {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.source-websocket {
+  background: #dcfce7;
+  color: var(--ok);
+}
+
+.source-polling {
+  background: #fef3c7;
+  color: var(--warn);
+}
+
+.updated {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ok-msg {
+  color: var(--ok);
+  font-weight: 600;
+  padding: 8px 0;
+}
+
 .loading,
 .error,
 .empty {

@@ -10,8 +10,8 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 2 — GTFS-RT ingestion + provider abstraction
 - [x] Phase 3 — Join engine (terminal + headway + interventions)
 - [x] Phase 4 — API + WebSocket
-- [ ] Phase 5 — Web frontend
-- [ ] Phase 6 — Config UI + deployment polish
+- [x] Phase 5 — Web frontend
+- [x] Phase 6 — Config UI + deployment polish
 
 ---
 
@@ -89,24 +89,24 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Phase 5 — Web frontend
 
-- [ ] `web/` Vite + React + TS, mobile-first layout.
-- [ ] `web/src/api.ts` — REST client + WS client with polling fallback.
-- [ ] `web/src/pages/Terminals.tsx` — terminal list grouped by route.
-- [ ] `web/src/pages/TerminalView.tsx` — incoming (ETA), layovers
+- [x] `web/` Vite + React + TS, mobile-first layout.
+- [x] `web/src/api.ts` — REST client + WS client with polling fallback.
+- [x] `web/src/pages/Terminals.tsx` — terminal list grouped by route.
+- [x] `web/src/pages/TerminalView.tsx` — incoming (ETA), layovers
       (scheduled departures + hold badges), interventions (action cards).
-- [ ] Layover countdown: `Countdown` component (min:sec to scheduled
+- [x] Layover countdown: `Countdown` component (min:sec to scheduled
       departure, green/amber/red states) + hold-override badge on held buses.
-- [ ] Components: `BusCard`, `InterventionCard`, `RouteGroup`,
+- [x] Components: `BusCard`, `InterventionCard`, `RouteGroup`,
       `Countdown`; `hooks/useStream.ts`.
-- [ ] Wire to `/api` + WS; last-updated + data-source status in header.
+- [x] Wire to `/api` + WS; last-updated + data-source status in header.
 
 ## Phase 6 — Config UI + deployment polish
 
-- [ ] Settings page for rule params + terminals curation + feed URLs/keys.
-- [ ] `npm run build && npm start` serving static bundle.
-- [ ] Deployment notes verified on Render/Fly/Railway (persistent disk,
+- [x] Settings page for rule params + terminals curation + feed URLs/keys.
+- [x] `npm run build && npm start` serving static bundle.
+- [x] Deployment notes verified on Render/Fly/Railway (persistent disk,
       env config).
-- [ ] Optional: manual "reload static" trigger endpoint.
+- [x] Optional: manual "reload static" trigger endpoint.
 
 ---
 
