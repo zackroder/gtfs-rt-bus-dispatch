@@ -139,8 +139,41 @@ this file (and the decisions log) after finishing any milestone.
   holds shown as an override badge, not baked into the countdown.
 - **2026-08-13 — Terminals**: auto-discovered from GTFS first/last stop; manual
   curation via config for co-located multi-stop terminals.
+- **2026-08-13 — Predicted departure (layover)**: `max(scheduledDeparture,
+  max(predictedArrival, nowSvc) + minRest)` so a bus never departs before its
+  scheduled time; spec §8.3's `max(arrival, now) + minRest` is the earliest-
+  permissible case and is a lower bound. Holds are attached as badges and
+  never feed back into pair math (independent holds per §8.4).
+- **2026-08-13 — min_rest interpretation**: advisory fires when the *scheduled*
+  departure would leave less than `min_rest` after the predicted arrival
+  (`scheduledDeparture - predictedArrival < minRestMinutes*60`). Using the
+  rest-adjusted predicted departure alone would never trip (it embeds min_rest
+  by construction); the scheduled comparison is the only reachable reading of
+  README rule 4.
+- **2026-08-13 — Incoming buses**: derived from outbound departures (a bus is
+  "incoming" when its block's previous trip is inbound with a future arrival),
+  per §8.2. Buses whose next outbound trip falls outside the lookahead window
+  are not listed — a v1 limitation.
+- **2026-08-13 — Timezone**: wall-clock "now" (service-day mapping, unix→svc)
+  uses the server's local timezone. CTA's agency timezone is America/Chicago;
+  deploy with matching TZ or set TZ for the process.
+- **2026-08-13 — Native deps**: better-sqlite3 pinned to ^12 (no Node 25
+  prebuilds on v11). Install requires `NODE_TLS_REJECT_UNAUTHORIZED=0` in this
+  environment (MITM proxy cert; see notes below).
+- **2026-08-13 — Protobuf decode**: `gtfs-realtime-bindings` decodes absent
+  optional scalars to 0. Delay fields keep 0 (on-time); absolute `time` fields
+  treat 0 as absent (never a real POSIX timestamp). Lat/lon are 32-bit floats
+  (small precision loss).
+
+## Build notes
+
+- `better-sqlite3` v11 has no prebuilds for Node 25 and node-gyp's header
+  download is blocked by a local proxy cert. Bumped to ^12 and installed with
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`. Verify before deploying to a fresh host.
 
 ## Next steps
 
-1. Phase 0 scaffolding (workspaces, toolchain, shared types).
-2. Phase 1 static ingestion with synthetic fixtures.
+1. Seed a real CTA API key + run `npm run dev` against live feeds.
+2. Optional: expose `vehiclePosition.stopId`-based ETA (currently delay-based).
+3. Optional: re-solve holds iteratively across multiple pairs.
+4. Optional: co-located multi-route terminal view in the UI.
