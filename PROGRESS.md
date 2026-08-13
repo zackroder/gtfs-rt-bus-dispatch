@@ -9,7 +9,7 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 1 — GTFS static ingestion
 - [x] Phase 2 — GTFS-RT ingestion + provider abstraction
 - [x] Phase 3 — Join engine (terminal + headway + interventions)
-- [ ] Phase 4 — API + WebSocket
+- [x] Phase 4 — API + WebSocket
 - [ ] Phase 5 — Web frontend
 - [ ] Phase 6 — Config UI + deployment polish
 
@@ -78,13 +78,13 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Phase 4 — API + WebSocket
 
-- [ ] `server/src/config.ts` — load/save runtime config in SQLite
+- [x] `server/src/config.ts` — load/save runtime config in SQLite
       `settings` table; zod validation; seed from env.
-- [ ] `server/src/api/routes.ts` — `/api/health`, `/api/terminals`,
+- [x] `server/src/api/routes.ts` — `/api/health`, `/api/terminals`,
       `/api/terminals/:id`, `/api/config` (GET/PUT).
-- [ ] `server/src/api/ws.ts` — broadcast snapshots on each refresh tick;
+- [x] `server/src/api/ws.ts` — broadcast snapshots on each refresh tick;
       client subscribe by terminal.
-- [ ] Wire refresh scheduler: on tick -> poll provider -> run engine ->
+- [x] Wire refresh scheduler: on tick -> poll provider -> run engine ->
       persist snapshot -> WS broadcast.
 
 ## Phase 5 — Web frontend
