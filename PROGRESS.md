@@ -5,9 +5,9 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Status
 
-- [ ] Phase 0 — Repo scaffolding
-- [ ] Phase 1 — GTFS static ingestion
-- [ ] Phase 2 — GTFS-RT ingestion + provider abstraction
+- [x] Phase 0 — Repo scaffolding
+- [x] Phase 1 — GTFS static ingestion
+- [x] Phase 2 — GTFS-RT ingestion + provider abstraction
 - [ ] Phase 3 — Join engine (terminal + headway + interventions)
 - [ ] Phase 4 — API + WebSocket
 - [ ] Phase 5 — Web frontend
@@ -17,44 +17,44 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Phase 0 — Repo scaffolding
 
-- [ ] Monorepo layout: `server/`, `web/`, `shared/`, root `package.json`
+- [x] Monorepo layout: `server/`, `web/`, `shared/`, root `package.json`
       with npm workspaces or a single package with scripts.
-- [ ] Toolchain: TypeScript (strict), Vite (web), tsx (server dev), Vitest,
+- [x] Toolchain: TypeScript (strict), Vite (web), tsx (server dev), Vitest,
       ESLint. Root scripts: `dev`, `build`, `lint`, `typecheck`, `test`.
-- [ ] `shared/types.ts` — normalized DTOs: `Terminal`, `VehicleSnapshot`,
+- [x] `shared/types.ts` — normalized DTOs: `Terminal`, `VehicleSnapshot`,
       `TripUpdateInfo`, `OutboundDeparture`, `IncomingBus`, `LayoverBus`,
       `Intervention`, `TerminalSnapshot`, `AppConfig`.
-- [ ] `.env.example` + `.gitignore` (ignore `.env`, `data/`, `dist/`,
+- [x] `.env.example` + `.gitignore` (ignore `.env`, `data/`, `dist/`,
       `node_modules/`).
-- [ ] `server/src/index.ts` skeleton: Express + `ws` + a `setInterval`
+- [x] `server/src/index.ts` skeleton: Express + `ws` + a `setInterval`
       refresh scheduler, health endpoint.
 
 ## Phase 1 — GTFS static ingestion
 
-- [ ] `server/src/gtfs/static.ts` — download + unzip GTFS, parse CSV
+- [x] `server/src/gtfs/static.ts` — download + unzip GTFS, parse CSV
       (stops, routes, trips, stop_times, calendar, calendar_dates).
-- [ ] Time handling: auto-detect service-day start from stop_times
+- [x] Time handling: auto-detect service-day start from stop_times
       (largest overnight gap in trip activity; fallback 03:00); convert
       `HH:MM:SS` (incl. `>24:00:00`) to "seconds since service-day start"
       integers; document wrap behavior.
-- [ ] `server/src/db/schema.ts` — create tables + indexes
+- [x] `server/src/db/schema.ts` — create tables + indexes
       (`stop_times(stop_id)`, `stop_times(trip_id)`, `trips(route_id)`).
-- [ ] `server/src/db/staticLoader.ts` — load parsed CSV into SQLite;
+- [x] `server/src/db/staticLoader.ts` — load parsed CSV into SQLite;
       derive `block_trips(block_id, seq, trip_id, start_time, route_id)`.
-- [ ] Service-day resolution helper (calendar + calendar_dates -> active
+- [x] Service-day resolution helper (calendar + calendar_dates -> active
       service_ids for a date).
-- [ ] Tests: synthetic GTFS fixtures -> loader round-trip.
+- [x] Tests: synthetic GTFS fixtures -> loader round-trip.
 
 ## Phase 2 — GTFS-RT ingestion + provider abstraction
 
-- [ ] `server/src/providers/types.ts` — `RealtimeProvider` /
+- [x] `server/src/providers/types.ts` — `RealtimeProvider` /
       `StaticProvider` interfaces + normalized realtime DTOs
       (vehicle position, per-stop predictions, trip delay).
-- [ ] `server/src/gtfs/realtime.ts` — poll feed URLs, decode
+- [x] `server/src/gtfs/realtime.ts` — poll feed URLs, decode
       `gtfs-realtime-bindings` protobuf for TripUpdates + VehiclePositions.
-- [ ] `server/src/providers/gtfsrt.ts` — default provider implementing
+- [x] `server/src/providers/gtfsrt.ts` — default provider implementing
       `RealtimeProvider` (API key auth via query/header as CTA requires).
-- [ ] Tests: decode synthetic protobuf fixture -> normalized DTO.
+- [x] Tests: decode synthetic protobuf fixture -> normalized DTO.
 
 ## Phase 3 — Join engine
 
