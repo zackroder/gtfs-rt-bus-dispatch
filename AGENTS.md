@@ -98,7 +98,7 @@ shared/
 
 Static (loaded from GTFS, read-only):
 - `stops(stop_id, stop_code, stop_name, parent_station, lat, lon)`
-- `routes(route_id, agency_id, short_name, long_name, type)`
+- `routes(route_id, agency_id, short_name, long_name, type, color, text_color)` — `color`/`text_color` are GTFS 6-digit hex, used for the route badge
 - `trips(trip_id, route_id, service_id, block_id, direction_id, headsign)`
 - `stop_times(trip_id, stop_sequence, stop_id, arrival_time, departure_time, pickup_type, drop_off_type)` — indexed on `stop_id` and `trip_id`
 - `calendar(service_id, monday..sunday, start_date, end_date)`

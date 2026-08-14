@@ -293,6 +293,13 @@ I/O) so it can be reviewed and unit-tested in isolation.
   vehicle's current stop resolved from VP (`stopId`, else `tripId` +
   `currentStopSequence` → stop_times). Stop names are cached in the engine
   (`stopNamesCache`, invalidated on static reload).
+- **2026-08-14 — Route badges + sorted home**: routes carry GTFS
+  `route_color`/`route_text_color` end-to-end (parse → `routes.color`/
+  `text_color` → `RouteState`/terminals API → `RouteBadge` component). Route
+  headers (home + terminal view) render a colored badge with the route number
+  plus the long name; the inbound "Next trip" line uses a mini badge. `routes`
+  gains `color`/`text_color` columns (migration adds them to existing DBs).
+  `GET /api/terminals` now sorts routes numeric-aware by short name.
 
 ## Build notes
 

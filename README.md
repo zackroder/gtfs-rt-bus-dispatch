@@ -19,7 +19,8 @@ rather than letting it pile into one.
 
 ## Features
 
-- **Terminal selector** — pick a terminal, grouped/sorted by route.
+- **Terminal selector** — pick a terminal, grouped/sorted by route number, with
+  each route shown as a GTFS-colored badge and name.
 - **Inbound view** — buses inbound to the terminal showing scheduled vs
   estimated arrival (red when late) and the next trip's destination/departure.
 - **Layover view** — buses resting at the terminal showing recorded vs

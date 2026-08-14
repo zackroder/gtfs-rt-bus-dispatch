@@ -179,6 +179,9 @@ export interface Intervention {
 export interface RouteState {
   routeId: string;
   routeShortName: string;
+  routeLongName?: string;
+  color?: string;       // GTFS 6-digit hex, for the route badge
+  textColor?: string;   // GTFS 6-digit hex
   incoming: IncomingBus[];
   layovers: LayoverBus[];
   departed: DepartedBus[];
@@ -232,7 +235,9 @@ CREATE TABLE IF NOT EXISTS routes (
   agency_id TEXT,
   short_name TEXT,
   long_name TEXT,
-  type INTEGER
+  type INTEGER,
+  color TEXT,        -- GTFS 6-digit hex (route_color), used for the badge
+  text_color TEXT    -- GTFS 6-digit hex (route_text_color)
 );
 
 CREATE TABLE IF NOT EXISTS trips (
@@ -514,7 +519,7 @@ For each terminal: group by route; build `RouteState`:
 ## 9. API + WebSocket
 
 - `GET /api/health` -> `{ ok, lastRefreshAt, staticLoadedAt }`.
-- `GET /api/terminals` -> `{ terminals: Terminal[], routes: {routeId, shortName, terminalIds[]}[] }`.
+- `GET /api/terminals` -> `{ terminals: Terminal[], routes: {routeId, shortName, longName?, color?, textColor?, terminalIds[]}[] }`, sorted by route number (numeric-aware).
 - `GET /api/terminals/:id` -> latest `TerminalSnapshot` (optionally
   `?route=R` filters to one route).
 - `GET /api/config` -> `AppConfig` (redact `apiKey`).
@@ -527,7 +532,8 @@ For each terminal: group by route; build `RouteState`:
 
 Mobile-first (max-width container, large tap targets). `react-router-dom`:
 
-- `/` -> `Terminals.tsx`: list terminals grouped by route; tap to open.
+- `/` -> `Terminals.tsx`: list terminals grouped by route (sorted by route
+  number, numeric-aware, server-side); tap to open.
 - `/terminal/:id` -> `TerminalView.tsx`: sections per route — **Inbound
   vehicles** (scheduled + estimated arrival, estimated red when late, next-trip
   destination and departure), **Laying over** (recorded vs scheduled arrival
@@ -535,6 +541,11 @@ Mobile-first (max-width container, large tap targets). `react-router-dom`:
   badge if held), **Recently departed** (recorded vs scheduled departure,
   purple when held, destination and current stop from VP), and **Interventions**
   (`InterventionCard`: "Hold <vehicle> until hh:mm (+N min)" + reason).
+
+Every route header (home + terminal view) and the inbound "Next trip" line
+render a `RouteBadge` — a rounded pill with the route number on the GTFS
+`route_color` background (text `route_text_color`, else auto-contrast
+black/white). Headers put the route long name next to the badge.
 
 `hooks/useCountdown(seconds)` ticks every second and renders `MM:SS`
 (color: green > 2 min, amber 0-2 min, red < 0).
