@@ -53,7 +53,6 @@ export function RouteGroup({
             <BusCard
               key={`${bus.tripId}-${bus.vehicleId ?? ''}`}
               bus={bus}
-              generatedAt={generatedAt}
               serviceDayStartSeconds={serviceDayStartSeconds}
             />
           ))}

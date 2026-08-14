@@ -15,10 +15,16 @@ export function DepartedCard({
         <span className="run">{bus.tripId}</span>
       </div>
       <div className="card-side">
-        <span className="departs">
+        <span className={`departs ${bus.held ? 'held' : ''}`}>
           dep {formatClock(bus.departureSeconds, serviceDayStartSeconds)}
         </span>
+        <span className="arrival">
+          sched {formatClock(bus.scheduledDeparture, serviceDayStartSeconds)}
+        </span>
+      </div>
+      <div className="card-detail">
         <span className="next-trip">to {bus.headsign ?? bus.routeShortName}</span>
+        <span className="current-stop">now at {bus.currentStop ?? '—'}</span>
       </div>
     </div>
   );

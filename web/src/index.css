@@ -108,7 +108,8 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   font-size: 12px;
   color: var(--muted);
   border-top: 1px solid var(--border);
@@ -124,6 +125,11 @@ h3 {
   font-size: 12px;
   color: var(--muted);
   display: block;
+}
+
+.arrival.late {
+  color: var(--late);
+  font-weight: 700;
 }
 
 .route {
@@ -209,6 +215,11 @@ h3 {
   font-size: 12px;
   color: var(--muted);
   display: block;
+}
+
+.departs.held {
+  color: var(--hold);
+  font-weight: 700;
 }
 
 .intervention {
