@@ -1,6 +1,7 @@
 import type { Database } from 'better-sqlite3';
 import type {
   AppConfig,
+  DepartedBus,
   HoldOverride,
   IncomingBus,
   Intervention,
@@ -14,6 +15,14 @@ import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeco
 import { buildDepartures, type OutboundDeparture, type RunRecord } from './headway';
 import { decideTriplets, type TripletDecision } from './dispatch';
 import { outboundRoutesAtTerminal, routeShortName } from './terminal';
+
+const RECENT_DEPARTURE_SECONDS = 30 * 60;
+
+function destinationOf(headsign: string | undefined, routeShortName: string): string {
+  if (!headsign) return routeShortName;
+  const prefix = `${routeShortName} `;
+  return headsign.startsWith(prefix) ? headsign.slice(prefix.length) : headsign;
+}
 
 interface RefreshContext {
   rt: RealtimeSnapshot;
@@ -52,7 +61,12 @@ export class Engine {
     for (const terminal of config.terminals) {
       const routes = this.buildRouteStates(terminal, ctx);
       if (routes.length === 0) continue;
-      snapshots.push({ terminalId: terminal.id, generatedAt: ctx.generatedAt, routes });
+      snapshots.push({
+        terminalId: terminal.id,
+        generatedAt: ctx.generatedAt,
+        serviceDayStartSeconds: ctx.serviceDayStartSeconds,
+        routes,
+      });
     }
     return snapshots;
   }
@@ -77,6 +91,7 @@ export class Engine {
         lookaheadSeconds: ctx.lookaheadSeconds,
         serviceDayStartSeconds: ctx.serviceDayStartSeconds,
         minRestSeconds: ctx.minRestSeconds,
+        layoverProximityMeters: config.layoverProximityMeters,
         activeServiceIds: ctx.activeServiceIds,
         rt: ctx.rt,
         ledger: this.ledger,
@@ -115,6 +130,7 @@ export class Engine {
       const shortName = routeShortName(this.db, routeId);
       const incoming: IncomingBus[] = [];
       const layovers: LayoverBus[] = [];
+      const departed: DepartedBus[] = [];
       for (const departure of departures) {
         if (departure.state === 'incoming') {
           incoming.push({
@@ -126,6 +142,11 @@ export class Engine {
             predictedArrival: departure.predictedArrival,
             etaSeconds: Math.max(0, departure.predictedArrival - ctx.nowSvc),
             delaySeconds: departure.predictedArrival - departure.scheduledArrival,
+            nextTripId: departure.tripId,
+            nextDestination: destinationOf(departure.headsign, shortName),
+            scheduledDeparture: departure.scheduledDeparture,
+            expectedDeparture: departure.edt,
+            restDelayed: departure.edt > departure.scheduledDeparture,
           });
         } else if (departure.state === 'layover') {
           const predictedDeparture = departure.hold
@@ -144,12 +165,34 @@ export class Engine {
             hold: departure.hold,
             restDelayed: departure.edt > departure.scheduledDeparture,
           });
+        } else if (
+          departure.state === 'departed' &&
+          departure.departedSeconds !== undefined &&
+          departure.departedSeconds >= ctx.nowSvc - RECENT_DEPARTURE_SECONDS
+        ) {
+          departed.push({
+            routeId,
+            routeShortName: shortName,
+            tripId: departure.tripId,
+            vehicleId: departure.vehicleId,
+            headsign: destinationOf(departure.headsign, shortName),
+            scheduledDeparture: departure.scheduledDeparture,
+            departureSeconds: departure.departedSeconds,
+          });
         }
       }
       incoming.sort((a, b) => a.etaSeconds - b.etaSeconds);
       layovers.sort((a, b) => a.predictedDeparture - b.predictedDeparture);
+      departed.sort((a, b) => b.departureSeconds - a.departureSeconds);
 
-      states.push({ routeId, routeShortName: shortName, incoming, layovers, interventions });
+      states.push({
+        routeId,
+        routeShortName: shortName,
+        incoming,
+        layovers,
+        departed,
+        interventions,
+      });
     }
     return states;
   }

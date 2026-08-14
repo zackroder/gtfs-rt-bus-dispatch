@@ -19,6 +19,7 @@ const baseConfig: AppConfig = {
   maxHoldMinutes: 10,
   leadTimeMinutes: 5,
   lookaheadMinutes: 90,
+  layoverProximityMeters: 300,
   terminals: [
     { id: 'T1', name: 'Terminal 1', stopIds: ['S1'], routeIds: ['1'] },
     { id: 'T2', name: 'Terminal 2', stopIds: ['S2'], routeIds: ['2'] },
@@ -44,7 +45,8 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
         ? ({
             terminalId: 'T1',
             generatedAt: 1700000000,
-            routes: [{ routeId: '1', routeShortName: 'R1', incoming: [], layovers: [], interventions: [] }],
+            serviceDayStartSeconds: 0,
+            routes: [{ routeId: '1', routeShortName: 'R1', incoming: [], layovers: [], departed: [], interventions: [] }],
           } satisfies TerminalSnapshot)
         : undefined,
     getHealth: () => ({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 }),

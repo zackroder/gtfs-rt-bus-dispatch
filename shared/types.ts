@@ -47,12 +47,27 @@ export interface TripUpdateInfo {
 export interface IncomingBus {
   routeId: string;
   routeShortName: string;
-  tripId: string;
+  tripId: string;             // current inbound trip
   vehicleId?: string;
   scheduledArrival: number;
   predictedArrival: number;
   etaSeconds: number;
   delaySeconds: number;
+  nextTripId: string;         // outbound trip the vehicle will operate next
+  nextDestination: string;    // headsign destination (route prefix stripped)
+  scheduledDeparture: number;
+  expectedDeparture: number;  // EDT of the next trip
+  restDelayed?: boolean;
+}
+
+export interface DepartedBus {
+  routeId: string;
+  routeShortName: string;
+  tripId: string;
+  vehicleId?: string;
+  headsign?: string;
+  scheduledDeparture: number;
+  departureSeconds: number;   // recorded actual departure
 }
 
 export interface HoldOverride {
@@ -96,12 +111,14 @@ export interface RouteState {
   routeShortName: string;
   incoming: IncomingBus[];
   layovers: LayoverBus[];
+  departed: DepartedBus[];
   interventions: Intervention[];
 }
 
 export interface TerminalSnapshot {
   terminalId: string;
-  generatedAt: number;
+  generatedAt: number;        // unix seconds
+  serviceDayStartSeconds: number;
   routes: RouteState[];
 }
 
@@ -118,6 +135,7 @@ export interface AppConfig {
   maxHoldMinutes: number;
   leadTimeMinutes: number;
   lookaheadMinutes: number;
+  layoverProximityMeters: number;
   terminals: Terminal[];
 }
 
@@ -141,5 +159,6 @@ export const appConfigSchema = z.object({
   maxHoldMinutes: z.number().int().min(0).max(600),
   leadTimeMinutes: z.number().int().min(0).max(600),
   lookaheadMinutes: z.number().int().min(5).max(1440),
+  layoverProximityMeters: z.number().int().min(0).max(5000).default(300),
   terminals: z.array(terminalSchema),
 });

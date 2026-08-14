@@ -127,6 +127,7 @@ function makeEngine(): Engine {
     maxHoldMinutes: 10,
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
+    layoverProximityMeters: 300,
     terminals: [{ id: 'T', name: 'Terminal', stopIds: ['T'], routeIds: ['1'] }],
   };
   return new Engine(db, () => cfg);
@@ -247,5 +248,55 @@ describe('engine triplet dispatch', () => {
     expect(d3.predictedArrival).toBe(svc('08:18'));
     expect(d3.etaSeconds).toBe(svc('08:18') - svc('08:08'));
     expect(d3.delaySeconds).toBe(0);
+    expect(d3.nextTripId).toBe('D3');
+    expect(d3.scheduledDeparture).toBe(svc('08:20'));
+    expect(d3.expectedDeparture).toBe(svc('08:23'));
+    expect(d3.restDelayed).toBe(true);
+  });
+
+  it('confirms a layover when the vehicle is within the terminal buffer', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      vehicles: [{ vehicleId: 'V2', tripId: 'P2', lat: 41.8001, lon: -87.6001, timestamp: unixAt('08:08') }],
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        arrUpdate('P1', 'V1'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(true);
+  });
+
+  it('drops a layover whose vehicle is beyond the terminal buffer', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      vehicles: [{ vehicleId: 'V2', tripId: 'P2', lat: 41.95, lon: -87.75, timestamp: unixAt('08:08') }],
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        arrUpdate('P1', 'V1'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+  });
+
+  it('lists recently departed buses with their recorded departure time', () => {
+    const engine = makeEngine();
+    const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    const d1 = route.departed.find((d) => d.tripId === 'D1')!;
+    expect(d1.departureSeconds).toBe(svc('08:05'));
+    expect(d1.vehicleId).toBe('V1');
+    expect(d1.scheduledDeparture).toBe(svc('08:10'));
   });
 });

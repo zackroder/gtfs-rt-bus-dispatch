@@ -7,6 +7,8 @@ import { outboundTrips } from './terminal';
 
 export type VehicleState = 'incoming' | 'layover' | 'departed';
 
+export const PAST_WINDOW_SECONDS = 30 * 60;
+
 export interface RunRecord {
   arrivalSeconds?: number;
   departureSeconds?: number;
@@ -18,6 +20,7 @@ export interface OutboundDeparture {
   routeId: string;
   vehicleId?: string;
   prevTripId?: string;
+  headsign?: string;
   scheduledDeparture: number;
   scheduledArrival: number;
   predictedArrival: number;
@@ -37,6 +40,7 @@ export interface BuildDeparturesOptions {
   lookaheadSeconds: number;
   serviceDayStartSeconds: number;
   minRestSeconds: number;
+  layoverProximityMeters: number;
   activeServiceIds: Set<string>;
   rt: RealtimeSnapshot;
   ledger: Map<string, RunRecord>;
@@ -147,13 +151,23 @@ export function departureObserved(
   return { departed: false };
 }
 
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (d: number): number => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export function buildDepartures(db: Database, opts: BuildDeparturesOptions): OutboundDeparture[] {
   const outbound = outboundTrips(
     db,
     opts.routeId,
     opts.terminal.stopIds,
     opts.activeServiceIds,
-    opts.nowSvc - opts.lookaheadSeconds,
+    opts.nowSvc - PAST_WINDOW_SECONDS,
     opts.nowSvc + opts.lookaheadSeconds,
   );
   if (outbound.length === 0) return [];
@@ -169,6 +183,17 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   }
   const vehicleToTrip = new Map<string, string>();
   for (const [trip, vehicle] of tripToVehicle) vehicleToTrip.set(vehicle, trip);
+
+  const vehiclePositions = new Map<string, { lat?: number; lon?: number }>();
+  for (const vehicle of opts.rt.vehicles) {
+    if (vehicle.vehicleId) vehiclePositions.set(vehicle.vehicleId, { lat: vehicle.lat, lon: vehicle.lon });
+  }
+
+  const terminalCoords = db
+    .prepare(
+      `SELECT stop_id, lat, lon FROM stops WHERE stop_id IN (${opts.terminal.stopIds.map(() => '?').join(',')})`,
+    )
+    .all(...opts.terminal.stopIds) as Array<{ stop_id: string; lat: number; lon: number }>;
 
   const departures: OutboundDeparture[] = [];
   for (const ob of outbound) {
@@ -220,12 +245,23 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const departed = record?.departureSeconds !== undefined || departureObs.departed;
     const onPrevLeg =
       vehicleId !== undefined && prevTripId !== undefined && currentTrip === prevTripId;
-    const observed =
-      hasArrivalInfo || record?.arrivalSeconds !== undefined || vehicleId !== undefined;
+    const position = vehicleId ? vehiclePositions.get(vehicleId) : undefined;
+    const withinBuffer =
+      position && position.lat !== undefined && position.lon !== undefined
+        ? terminalCoords.some(
+            ({ lat, lon }) =>
+              haversineMeters(position.lat!, position.lon!, lat, lon) <=
+              opts.layoverProximityMeters,
+          )
+        : undefined;
+    const atTerminal =
+      withinBuffer === true ||
+      (withinBuffer === undefined &&
+        (predictedArrival <= opts.nowSvc || record?.arrivalSeconds !== undefined));
     let state: VehicleState;
     if (departed) state = 'departed';
     else if (onPrevLeg && predictedArrival > opts.nowSvc) state = 'incoming';
-    else if (observed || ob.departureTime >= opts.nowSvc) state = 'layover';
+    else if (vehicleId !== undefined && atTerminal) state = 'layover';
     else state = 'departed';
 
     departures.push({
@@ -233,6 +269,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       routeId: opts.routeId,
       vehicleId,
       prevTripId,
+      headsign: ob.headsign,
       scheduledDeparture: ob.departureTime,
       scheduledArrival,
       predictedArrival,
