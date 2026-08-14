@@ -9,6 +9,7 @@ import type {
   RouteState,
   Terminal,
   TerminalSnapshot,
+  VehiclePositionInfo,
 } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
 import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeconds, unixToServiceSeconds } from '../gtfs/time';
@@ -28,12 +29,6 @@ import { outboundRoutesAtTerminal, routeShortName } from './terminal';
 
 const RECENT_DEPARTURE_SECONDS = 30 * 60;
 
-function destinationOf(headsign: string | undefined, routeShortName: string): string {
-  if (!headsign) return routeShortName;
-  const prefix = `${routeShortName} `;
-  return headsign.startsWith(prefix) ? headsign.slice(prefix.length) : headsign;
-}
-
 interface RefreshContext {
   rt: RealtimeSnapshot;
   nowSvc: number;
@@ -42,6 +37,7 @@ interface RefreshContext {
   minRestSeconds: number;
   serviceDayStartSeconds: number;
   generatedAt: number;
+  vpCurrentStop: Map<string, string>;
 }
 
 export class Engine {
@@ -49,6 +45,7 @@ export class Engine {
   private vehicleLastTrip = new Map<string, string>();
   private blockChainsCache?: BlockChains;
   private tripEndsCache?: Map<string, TripEnd>;
+  private stopNamesCache?: Map<string, string>;
 
   constructor(
     private db: Database,
@@ -58,6 +55,7 @@ export class Engine {
   invalidateStaticCaches(): void {
     this.blockChainsCache = undefined;
     this.tripEndsCache = undefined;
+    this.stopNamesCache = undefined;
   }
 
   private blockChains(): BlockChains {
@@ -70,6 +68,27 @@ export class Engine {
     return this.tripEndsCache;
   }
 
+  private stopNames(): Map<string, string> {
+    if (!this.stopNamesCache) {
+      const rows = this.db
+        .prepare('SELECT stop_id, stop_name FROM stops')
+        .all() as Array<{ stop_id: string; stop_name: string }>;
+      this.stopNamesCache = new Map(rows.map((r) => [r.stop_id, r.stop_name]));
+    }
+    return this.stopNamesCache;
+  }
+
+  private vehicleCurrentStop(vp: VehiclePositionInfo): string | undefined {
+    let stopId = vp.stopId;
+    if (!stopId && vp.tripId && vp.currentStopSequence !== undefined) {
+      const row = this.db
+        .prepare('SELECT stop_id FROM stop_times WHERE trip_id = ? AND stop_sequence = ?')
+        .get(vp.tripId, vp.currentStopSequence) as { stop_id?: string } | undefined;
+      stopId = row?.stop_id;
+    }
+    return stopId ? this.stopNames().get(stopId) : undefined;
+  }
+
   refresh(rt: RealtimeSnapshot, now: Date = new Date(), terminalIds?: Set<string>): TerminalSnapshot[] {
     const config = this.getConfig();
     const serviceDayStartSeconds = getServiceDayStart(this.db);
@@ -77,6 +96,11 @@ export class Engine {
     this.recordFacts(rt, nowSvc, serviceDayStartSeconds);
 
     const activeDate = activeServiceDate(now, serviceDayStartSeconds);
+    const vpCurrentStop = new Map<string, string>();
+    for (const vp of rt.vehiclePositions) {
+      const name = this.vehicleCurrentStop(vp);
+      if (name) vpCurrentStop.set(vp.vehicleId, name);
+    }
     const ctx: RefreshContext = {
       rt,
       nowSvc,
@@ -85,6 +109,7 @@ export class Engine {
       minRestSeconds: config.minRestMinutes * 60,
       serviceDayStartSeconds,
       generatedAt: Math.floor(now.getTime() / 1000),
+      vpCurrentStop,
     };
 
     const wanted = terminalIds ?? new Set(config.terminals.map((t) => t.id));
@@ -250,7 +275,7 @@ export class Engine {
             etaSeconds: Math.max(0, departure.predictedArrival - ctx.nowSvc),
             delaySeconds: departure.predictedArrival - departure.scheduledArrival,
             nextTripId: departure.tripId,
-            nextDestination: destinationOf(departure.headsign, shortName),
+            nextDestination: this.tripEnds().get(departure.tripId)?.lastStopName ?? shortName,
             scheduledDeparture: departure.scheduledDeparture,
             expectedDeparture: departure.edt,
             restDelayed: departure.edt > departure.scheduledDeparture,
@@ -265,6 +290,7 @@ export class Engine {
             tripId: departure.tripId,
             vehicleId: departure.vehicleId,
             scheduledDeparture: departure.scheduledDeparture,
+            scheduledArrival: departure.scheduledArrival,
             terminalArrival: departure.terminalArrival ?? 0,
             expectedDeparture: departure.edt,
             predictedDeparture,
@@ -282,9 +308,13 @@ export class Engine {
             routeShortName: shortName,
             tripId: departure.tripId,
             vehicleId: departure.vehicleId,
-            headsign: destinationOf(departure.headsign, shortName),
+            headsign: this.tripEnds().get(departure.tripId)?.lastStopName ?? shortName,
             scheduledDeparture: departure.scheduledDeparture,
             departureSeconds: departure.departedSeconds,
+            held: departure.hold !== undefined,
+            currentStop: departure.vehicleId
+              ? ctx.vpCurrentStop.get(departure.vehicleId)
+              : undefined,
           });
         }
       }

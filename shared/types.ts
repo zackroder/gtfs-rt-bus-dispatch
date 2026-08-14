@@ -51,7 +51,7 @@ export interface IncomingBus {
   etaSeconds: number;
   delaySeconds: number;
   nextTripId: string;         // outbound trip the vehicle will operate next
-  nextDestination: string;    // headsign destination (route prefix stripped)
+  nextDestination: string;    // last stop name of the next trip
   scheduledDeparture: number;
   expectedDeparture: number;  // EDT of the next trip
   restDelayed?: boolean;
@@ -62,9 +62,11 @@ export interface DepartedBus {
   routeShortName: string;
   tripId: string;
   vehicleId?: string;
-  headsign?: string;
+  headsign?: string;          // last stop name of the departed trip
   scheduledDeparture: number;
   departureSeconds: number;   // recorded actual departure
+  held?: boolean;             // the departure was held by a locked hold
+  currentStop?: string;       // stop name the vehicle is at now (from VP)
 }
 
 export interface HoldOverride {
@@ -79,6 +81,7 @@ export interface LayoverBus {
   tripId: string;
   vehicleId?: string;
   scheduledDeparture: number;
+  scheduledArrival: number;   // scheduled terminal arrival of the previous trip in block
   terminalArrival: number;
   expectedDeparture: number;
   predictedDeparture: number;

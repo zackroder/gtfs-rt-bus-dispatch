@@ -227,6 +227,7 @@ describe('engine triplet dispatch', () => {
     const route = route1(snapshot);
     const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
     expect(d3.terminalArrival).toBe(svc('08:18'));
+    expect(d3.scheduledArrival).toBe(svc('08:18'));
     expect(d3.expectedDeparture).toBe(svc('08:23'));
     expect(d3.restDelayed).toBe(true);
     expect(d3.countdownSeconds).toBe(svc('08:23') - svc('08:18'));
@@ -241,6 +242,7 @@ describe('engine triplet dispatch', () => {
     const route = route1(snapshot);
     const d4 = route.layovers.find((l) => l.tripId === 'D4')!;
     expect(d4.terminalArrival).toBe(svc('08:25'));
+    expect(d4.scheduledArrival).toBe(svc('08:25'));
     expect(d4.expectedDeparture).toBe(svc('08:30'));
     expect(d4.restDelayed).toBe(false);
     expect(d4.predictedDeparture).toBe(svc('08:30'));
@@ -263,6 +265,7 @@ describe('engine triplet dispatch', () => {
     expect(d3.etaSeconds).toBe(svc('08:18') - svc('08:08'));
     expect(d3.delaySeconds).toBe(0);
     expect(d3.nextTripId).toBe('D3');
+    expect(d3.nextDestination).toBe('Far Stop');
     expect(d3.scheduledDeparture).toBe(svc('08:20'));
     expect(d3.expectedDeparture).toBe(svc('08:23'));
     expect(d3.restDelayed).toBe(true);
@@ -286,6 +289,40 @@ describe('engine triplet dispatch', () => {
     expect(d1.departureSeconds).toBe(svc('08:05'));
     expect(d1.vehicleId).toBe('V1');
     expect(d1.scheduledDeparture).toBe(svc('08:10'));
+    expect(d1.headsign).toBe('Far Stop');
+    expect(d1.held).toBe(false);
+  });
+
+  it('marks a departed bus as held when it left under a locked hold', () => {
+    const engine = makeEngine();
+    const rt = stdRt();
+    engine.refresh(rt, nowAt('08:08'));
+    const later: RealtimeSnapshot = {
+      timestamp: unixAt('08:20'),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        depUpdate('D2', 'V2', '08:16'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+      vehiclePositions: [],
+    };
+    const snapshot = engine.refresh(later, nowAt('08:20'))[0]!;
+    const d2 = route1(snapshot).departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.held).toBe(true);
+    expect(d2.departureSeconds).toBe(svc('08:16'));
+  });
+
+  it('reports the vehicle current stop on a departed bus from VP', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:20'),
+      tripUpdates: [depUpdate('D1', 'V1', '08:05')],
+      vehiclePositions: [vpAtStop('V1', 'D1', 'B', '08:20', 1)],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:20'))[0]!;
+    const d1 = route1(snapshot).departed.find((d) => d.tripId === 'D1')!;
+    expect(d1.currentStop).toBe('Far Stop');
   });
 
   it('keeps a bus as layover when its terminal departure is still in the future', () => {
@@ -343,6 +380,7 @@ describe('engine triplet dispatch', () => {
     const snapshot = engine.refresh(withVp, nowAt('08:19'))[0]!;
     const d3 = route1(snapshot).layovers.find((l) => l.tripId === 'D3')!;
     expect(d3.terminalArrival).toBe(svc('08:19'));
+    expect(d3.scheduledArrival).toBe(svc('08:18'));
     expect(d3.expectedDeparture).toBe(svc('08:24'));
   });
 
