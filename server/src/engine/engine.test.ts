@@ -19,66 +19,100 @@ function nowAt(hhmm: string): Date {
   return new Date(2026, 7, 13, h!, m!, 0);
 }
 
-function delayUpdate(tripId: string, vehicleId: string, arrivalDelay: number): TripUpdateInfo {
+function unixAt(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return Math.floor(new Date(2026, 7, 13, h!, m!, 0).getTime() / 1000);
+}
+
+function arrUpdate(tripId: string, vehicleId: string): TripUpdateInfo {
   return {
     tripId,
     vehicleId,
-    stopTimeUpdates: [{ stopId: 'T', stopSequence: 99, arrivalDelay }],
+    stopTimeUpdates: [{ stopId: 'T', stopSequence: 99, arrivalDelay: 0 }],
     timestamp: 1700000000,
   };
 }
 
-function emptyRt(): RealtimeSnapshot {
-  return { timestamp: 1700000000, vehicles: [], tripUpdates: [] };
+function depUpdate(tripId: string, vehicleId: string, hhmm: string): TripUpdateInfo {
+  return {
+    tripId,
+    vehicleId,
+    stopTimeUpdates: [{ stopId: 'T', stopSequence: 0, departureTime: unixAt(hhmm) }],
+    timestamp: 1700000000,
+  };
 }
 
-function baseTrips(): TripSpec[] {
+function fixtureTrips(): TripSpec[] {
   return [
     {
-      tripId: 'L1',
+      tripId: 'P1',
       blockId: 'A',
       stopTimes: [
-        { stopId: 'T', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
-        { stopId: 'B', arr: '08:30:00', dep: '08:30:00', dropOff: 0 },
+        { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+        { stopId: 'T', arr: '08:02:00', dep: '08:02:00', dropOff: 0 },
       ],
     },
     {
-      tripId: 'L2',
+      tripId: 'D1',
       blockId: 'A',
       stopTimes: [
-        { stopId: 'B', arr: '08:45:00', dep: '08:45:00', pickup: 0 },
-        { stopId: 'T', arr: '09:10:00', dep: '09:10:00', dropOff: 0 },
+        { stopId: 'T', arr: '08:10:00', dep: '08:10:00', pickup: 0 },
+        { stopId: 'B', arr: '08:40:00', dep: '08:40:00', dropOff: 0 },
       ],
     },
     {
-      tripId: 'L3',
-      blockId: 'A',
-      stopTimes: [
-        { stopId: 'T', arr: '10:00:00', dep: '10:00:00', pickup: 0 },
-        { stopId: 'B', arr: '10:30:00', dep: '10:30:00', dropOff: 0 },
-      ],
-    },
-    {
-      tripId: 'F2',
+      tripId: 'P2',
       blockId: 'B',
       stopTimes: [
-        { stopId: 'B', arr: '09:30:00', dep: '09:30:00', pickup: 0 },
-        { stopId: 'T', arr: '10:00:00', dep: '10:00:00', dropOff: 0 },
+        { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+        { stopId: 'T', arr: '08:07:00', dep: '08:07:00', dropOff: 0 },
       ],
     },
     {
-      tripId: 'F3',
+      tripId: 'D2',
       blockId: 'B',
       stopTimes: [
-        { stopId: 'T', arr: '10:12:00', dep: '10:12:00', pickup: 0 },
-        { stopId: 'B', arr: '10:42:00', dep: '10:42:00', dropOff: 0 },
+        { stopId: 'T', arr: '08:11:00', dep: '08:11:00', pickup: 0 },
+        { stopId: 'B', arr: '08:41:00', dep: '08:41:00', dropOff: 0 },
+      ],
+    },
+    {
+      tripId: 'P3',
+      blockId: 'C',
+      stopTimes: [
+        { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+        { stopId: 'T', arr: '08:18:00', dep: '08:18:00', dropOff: 0 },
+      ],
+    },
+    {
+      tripId: 'D3',
+      blockId: 'C',
+      stopTimes: [
+        { stopId: 'T', arr: '08:20:00', dep: '08:20:00', pickup: 0 },
+        { stopId: 'B', arr: '08:50:00', dep: '08:50:00', dropOff: 0 },
+      ],
+    },
+    {
+      tripId: 'P4',
+      blockId: 'D',
+      stopTimes: [
+        { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+        { stopId: 'T', arr: '08:25:00', dep: '08:25:00', dropOff: 0 },
+      ],
+    },
+    {
+      tripId: 'D4',
+      blockId: 'D',
+      stopTimes: [
+        { stopId: 'T', arr: '08:30:00', dep: '08:30:00', pickup: 0 },
+        { stopId: 'B', arr: '09:00:00', dep: '09:00:00', dropOff: 0 },
       ],
     },
   ];
 }
 
-function makeEngine(trips: TripSpec[], rt: RealtimeSnapshot, config?: Partial<AppConfig>) {
-  const gtfs = syntheticGtfs({ trips });
+function makeEngine(): Engine {
+  const gtfs = syntheticGtfs({ trips: fixtureTrips() });
   const db = createDatabase(':memory:');
   loadStatic(db, gtfs);
   const cfg: AppConfig = {
@@ -90,135 +124,128 @@ function makeEngine(trips: TripSpec[], rt: RealtimeSnapshot, config?: Partial<Ap
     refreshIntervalSeconds: 10,
     staticRefreshHours: 24,
     minRestMinutes: 5,
-    gapFactor: 1.5,
-    bunchFactor: 0.5,
-    holdFraction: 0.5,
     maxHoldMinutes: 10,
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
     terminals: [{ id: 'T', name: 'Terminal', stopIds: ['T'], routeIds: ['1'] }],
-    ...config,
   };
-  const engine = new Engine(db, () => cfg);
-  return { engine, db, cfg };
+  return new Engine(db, () => cfg);
+}
+
+function stdRt(): RealtimeSnapshot {
+  return {
+    timestamp: unixAt('08:08'),
+    vehicles: [],
+    tripUpdates: [
+      depUpdate('D1', 'V1', '08:05'),
+      arrUpdate('P1', 'V1'),
+      arrUpdate('P2', 'V2'),
+      arrUpdate('P3', 'V3'),
+      arrUpdate('P4', 'V4'),
+    ],
+  };
 }
 
 function route1(snapshot: ReturnType<Engine['refresh']>[number]) {
   return snapshot.routes.find((r) => r.routeId === '1')!;
 }
 
-describe('engine interventions', () => {
-  it('emits hold_leader with capped hold and override badge when follower is late', () => {
-    const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
-      vehicles: [],
-      tripUpdates: [delayUpdate('F2', 'VF', 1800)],
-    };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:57'))[0]!;
-    const route = route1(snapshot);
+describe('engine triplet dispatch', () => {
+  it('holds the center to even headways and propagates the locked hold to the next triplet', () => {
+    const engine = makeEngine();
+    const rt = stdRt();
 
-    const hold = route.interventions.find((i) => i.rule === 'hold_leader');
-    expect(hold).toBeDefined();
-    expect(hold!.holdSeconds).toBe(600);
-    expect(hold!.until).toBe(svc('10:10'));
-    expect(hold!.vehicleId).toBeUndefined();
+    const first = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const routeA = route1(first);
+    expect(routeA.interventions).toHaveLength(1);
+    const hold = routeA.interventions[0]!;
+    expect(hold.rule).toBe('hold');
+    expect(hold.holdSeconds).toBe(120);
+    expect(hold.until).toBe(svc('08:14'));
+    expect(hold.vehicleId).toBe('V2');
 
-    const leader = route.layovers.find((l) => l.tripId === 'L3')!;
-    expect(leader.hold).toBeDefined();
-    expect(leader.hold!.holdSeconds).toBe(600);
-    expect(leader.hold!.rule).toBe('leader');
-    expect(leader.hold!.effectiveDeparture).toBe(svc('10:10'));
-    expect(leader.countdownSeconds).toBe(svc('10:00') - svc('09:57'));
+    const d2 = routeA.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.hold?.holdSeconds).toBe(120);
+    expect(d2.predictedDeparture).toBe(svc('08:14'));
 
-    const incoming = route.incoming.find((i) => i.tripId === 'F2')!;
-    expect(incoming.predictedArrival).toBe(svc('10:30'));
-    expect(incoming.delaySeconds).toBe(1800);
+    const second = engine.refresh(rt, nowAt('08:18'))[0]!;
+    const routeB = route1(second);
+    expect(routeB.interventions).toEqual([]);
+    const d2Later = routeB.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2Later.hold?.holdSeconds).toBe(120);
+    const d3 = routeB.layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.hold).toBeUndefined();
+    expect(d3.predictedDeparture).toBe(svc('08:23'));
   });
 
-  it('holds the follower to restore spacing when the leader is late', () => {
+  it('uses the leader recorded departure rather than its EDT in the triplet', () => {
+    const engine = makeEngine();
     const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
+      timestamp: unixAt('08:08'),
       vehicles: [],
-      tripUpdates: [delayUpdate('L2', 'VL', 3720), delayUpdate('F2', 'VF', 600)],
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:07'),
+        arrUpdate('P1', 'V1'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
     };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:57'))[0]!;
-    const route = route1(snapshot);
-
-    const hold = route.interventions.find((i) => i.rule === 'hold_follower');
-    expect(hold).toBeDefined();
-    expect(hold!.holdSeconds).toBe(480);
-    expect(hold!.until).toBe(svc('10:20'));
-    expect(hold!.vehicleId).toBe('VF');
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const hold = route1(snapshot).interventions[0]!;
+    expect(hold.holdSeconds).toBe(180);
+    expect(hold.until).toBe(svc('08:15'));
   });
 
-  it('caps follower hold at maxHoldMinutes', () => {
-    const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
-      vehicles: [],
-      tripUpdates: [delayUpdate('L2', 'VL', 3720)],
-    };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:57'))[0]!;
-    const route = route1(snapshot);
-
-    const hold = route.interventions.find((i) => i.rule === 'hold_follower');
-    expect(hold).toBeDefined();
-    expect(hold!.holdSeconds).toBe(600);
-    expect(hold!.until).toBe(svc('10:22'));
-  });
-
-  it('emits a passive gap alert instead of holding when the leader is still inbound', () => {
-    const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
-      vehicles: [],
-      tripUpdates: [delayUpdate('L2', 'VL', 3720), delayUpdate('F2', 'VF', 3300)],
-    };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:57'))[0]!;
-    const route = route1(snapshot);
-
-    const alert = route.interventions.find((i) => i.rule === 'gap_alert');
-    expect(alert).toBeDefined();
-    expect(alert!.holdSeconds).toBe(0);
-    expect(route.interventions.find((i) => i.rule === 'hold_leader')).toBeUndefined();
-  });
-
-  it('emits nothing when the predicted headway is within thresholds', () => {
-    const { engine } = makeEngine(baseTrips(), emptyRt());
-    const snapshot = engine.refresh(emptyRt(), nowAt('09:57'))[0]!;
+  it('does not fire before the trigger window opens from the EDT', () => {
+    const engine = makeEngine();
+    const snapshot = engine.refresh(stdRt(), nowAt('08:05'))[0]!;
     const route = route1(snapshot);
     expect(route.interventions).toEqual([]);
-    expect(route.layovers.find((l) => l.tripId === 'L3')!.hold).toBeUndefined();
   });
 
-  it('does not hold the leader before the lead-time window opens', () => {
-    const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
-      vehicles: [],
-      tripUpdates: [delayUpdate('F2', 'VF', 1800)],
-    };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:50'))[0]!;
+  it('marks a rest-delayed layover with the EDT past the scheduled time', () => {
+    const engine = makeEngine();
+    const rt = stdRt();
+    engine.refresh(rt, nowAt('08:08'));
+    const snapshot = engine.refresh(rt, nowAt('08:18'))[0]!;
     const route = route1(snapshot);
-    expect(route.interventions.find((i) => i.rule === 'hold_leader')).toBeUndefined();
+    const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.terminalArrival).toBe(svc('08:18'));
+    expect(d3.expectedDeparture).toBe(svc('08:23'));
+    expect(d3.restDelayed).toBe(true);
+    expect(d3.countdownSeconds).toBe(svc('08:23') - svc('08:18'));
   });
 
-  it('flags a min-rest advisory when the predicted layover is below the minimum', () => {
-    const rt: RealtimeSnapshot = {
-      timestamp: 1700000000,
-      vehicles: [],
-      tripUpdates: [delayUpdate('L2', 'VL', 2760)],
-    };
-    const { engine } = makeEngine(baseTrips(), rt);
-    const snapshot = engine.refresh(rt, nowAt('09:57'))[0]!;
+  it('keeps an on-time layover on its scheduled departure', () => {
+    const engine = makeEngine();
+    const rt = stdRt();
+    engine.refresh(rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:18'));
+    const snapshot = engine.refresh(rt, nowAt('08:25'))[0]!;
     const route = route1(snapshot);
+    const d4 = route.layovers.find((l) => l.tripId === 'D4')!;
+    expect(d4.terminalArrival).toBe(svc('08:25'));
+    expect(d4.expectedDeparture).toBe(svc('08:30'));
+    expect(d4.restDelayed).toBe(false);
+    expect(d4.predictedDeparture).toBe(svc('08:30'));
+  });
 
-    const advisory = route.interventions.find((i) => i.rule === 'min_rest');
-    expect(advisory).toBeDefined();
-    const layover = route.layovers.find((l) => l.tripId === 'L3')!;
-    expect(layover.minRestAdvisory).toBe(true);
-    expect(layover.hold).toBeUndefined();
+  it('counts down to the effective held departure', () => {
+    const engine = makeEngine();
+    const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.countdownSeconds).toBe(svc('08:14') - svc('08:08'));
+  });
+
+  it('exposes incoming buses with predicted arrival and ETA', () => {
+    const engine = makeEngine();
+    const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    const d3 = route.incoming.find((i) => i.tripId === 'P3')!;
+    expect(d3.predictedArrival).toBe(svc('08:18'));
+    expect(d3.etaSeconds).toBe(svc('08:18') - svc('08:08'));
+    expect(d3.delaySeconds).toBe(0);
   });
 });

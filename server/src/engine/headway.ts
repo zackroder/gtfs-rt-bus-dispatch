@@ -2,23 +2,32 @@ import type { Database } from 'better-sqlite3';
 import type { HoldOverride, Terminal } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
 import { unixToServiceSeconds } from '../gtfs/time';
+import { effectiveDeparture, expectedDepartureTime } from './dispatch';
 import { outboundTrips } from './terminal';
 
-export type VehicleState = 'incoming' | 'layover' | 'unknown';
+export type VehicleState = 'incoming' | 'layover' | 'departed';
+
+export interface RunRecord {
+  arrivalSeconds?: number;
+  departureSeconds?: number;
+  hold?: HoldOverride;
+}
 
 export interface OutboundDeparture {
   tripId: string;
   routeId: string;
-  scheduledDeparture: number;
-  predictedDeparture: number;
-  scheduledArrival: number;
-  predictedArrival: number;
-  hasArrivalInfo: boolean;
   vehicleId?: string;
   prevTripId?: string;
+  scheduledDeparture: number;
+  scheduledArrival: number;
+  predictedArrival: number;
+  terminalArrival?: number;
+  edt: number;
+  departedSeconds?: number;
   state: VehicleState;
   hold?: HoldOverride;
-  minRest: boolean;
+  hasArrivalInfo: boolean;
+  departureObs: { departed: boolean; departureSeconds?: number };
 }
 
 export interface BuildDeparturesOptions {
@@ -30,6 +39,7 @@ export interface BuildDeparturesOptions {
   minRestSeconds: number;
   activeServiceIds: Set<string>;
   rt: RealtimeSnapshot;
+  ledger: Map<string, RunRecord>;
 }
 
 export function buildBlockChains(
@@ -108,13 +118,42 @@ export function arrivalAtTerminal(
   return { scheduled, predicted: scheduled, known: false };
 }
 
+export function departureObserved(
+  rt: RealtimeSnapshot,
+  tripId: string,
+  stopIds: string[],
+  scheduledDeparture: number,
+  serviceDayStartSeconds: number,
+): { departed: boolean; departureSeconds?: number } {
+  const update = rt.tripUpdates.find((u) => u.tripId === tripId);
+  if (update) {
+    const terminal = update.stopTimeUpdates
+      .filter((u) => stopIds.includes(u.stopId))
+      .sort((a, b) => b.stopSequence - a.stopSequence)[0];
+    if (terminal?.departureTime !== undefined && terminal.departureTime > 0) {
+      return {
+        departed: true,
+        departureSeconds: unixToServiceSeconds(terminal.departureTime, serviceDayStartSeconds),
+      };
+    }
+    if (terminal?.departureDelay !== undefined) {
+      return { departed: true, departureSeconds: scheduledDeparture + terminal.departureDelay };
+    }
+  }
+  const vehicle = rt.vehicles.find((v) => v.tripId === tripId);
+  if (vehicle && vehicle.stopSequence !== undefined && vehicle.stopSequence > 0) {
+    return { departed: true };
+  }
+  return { departed: false };
+}
+
 export function buildDepartures(db: Database, opts: BuildDeparturesOptions): OutboundDeparture[] {
   const outbound = outboundTrips(
     db,
     opts.routeId,
     opts.terminal.stopIds,
     opts.activeServiceIds,
-    opts.nowSvc,
+    opts.nowSvc - opts.lookaheadSeconds,
     opts.nowSvc + opts.lookaheadSeconds,
   );
   if (outbound.length === 0) return [];
@@ -134,73 +173,81 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   const departures: OutboundDeparture[] = [];
   for (const ob of outbound) {
     const prevTripId = prevTrip.get(ob.tripId);
-    const vehicleId = tripToVehicle.get(ob.tripId) ?? (prevTripId ? tripToVehicle.get(prevTripId) : undefined);
+    const vehicleId =
+      tripToVehicle.get(ob.tripId) ?? (prevTripId ? tripToVehicle.get(prevTripId) : undefined);
     const currentTrip = vehicleId ? vehicleToTrip.get(vehicleId) : undefined;
 
-    let departure: OutboundDeparture;
+    let scheduledArrival = ob.departureTime;
+    let predictedArrival = ob.departureTime;
+    let hasArrivalInfo = false;
     if (vehicleId && (currentTrip === prevTripId || currentTrip === ob.tripId)) {
       const sourceTrip = currentTrip === prevTripId && prevTripId ? prevTripId : ob.tripId;
-      const arrival = arrivalAtTerminal(db, opts.rt, sourceTrip, opts.terminal.stopIds, opts.serviceDayStartSeconds);
-      const predictedArrival = arrival.predicted;
-      if (currentTrip === prevTripId && predictedArrival > opts.nowSvc) {
-        const predictedDeparture = Math.max(
-          ob.departureTime,
-          Math.max(predictedArrival, opts.nowSvc) + opts.minRestSeconds,
-        );
-        departure = {
-          tripId: ob.tripId,
-          routeId: opts.routeId,
-          scheduledDeparture: ob.departureTime,
-          predictedDeparture,
-          scheduledArrival: arrival.scheduled,
-          predictedArrival,
-          hasArrivalInfo: arrival.known,
-          vehicleId,
-          prevTripId,
-          state: 'incoming',
-          minRest: false,
-        };
-      } else {
-        const predictedDeparture = Math.max(
-          ob.departureTime,
-          Math.max(predictedArrival, opts.nowSvc) + opts.minRestSeconds,
-        );
-        departure = {
-          tripId: ob.tripId,
-          routeId: opts.routeId,
-          scheduledDeparture: ob.departureTime,
-          predictedDeparture,
-          scheduledArrival: arrival.scheduled,
-          predictedArrival,
-          hasArrivalInfo: arrival.known,
-          vehicleId,
-          prevTripId,
-          state: 'layover',
-          minRest: false,
-        };
-      }
-    } else {
-      const arrival = prevTripId
-        ? arrivalAtTerminal(db, opts.rt, prevTripId, opts.terminal.stopIds, opts.serviceDayStartSeconds)
-        : { scheduled: ob.departureTime, predicted: ob.departureTime, known: false };
-      departure = {
-        tripId: ob.tripId,
-        routeId: opts.routeId,
-        scheduledDeparture: ob.departureTime,
-        predictedDeparture: ob.departureTime,
-        scheduledArrival: arrival.scheduled,
-        predictedArrival: arrival.predicted,
-        hasArrivalInfo: false,
+      const arrival = arrivalAtTerminal(
+        db,
+        opts.rt,
+        sourceTrip,
+        opts.terminal.stopIds,
+        opts.serviceDayStartSeconds,
+      );
+      scheduledArrival = arrival.scheduled;
+      predictedArrival = arrival.predicted;
+      hasArrivalInfo = arrival.known;
+    } else if (prevTripId) {
+      const arrival = arrivalAtTerminal(
+        db,
+        opts.rt,
         prevTripId,
-        state: 'unknown',
-        minRest: false,
-      };
+        opts.terminal.stopIds,
+        opts.serviceDayStartSeconds,
+      );
+      scheduledArrival = arrival.scheduled;
+      predictedArrival = arrival.predicted;
+      hasArrivalInfo = arrival.known;
     }
-    departures.push(departure);
+
+    const record = opts.ledger.get(ob.tripId);
+    const terminalArrival = record?.arrivalSeconds ?? (hasArrivalInfo ? predictedArrival : undefined);
+    const edt = expectedDepartureTime(ob.departureTime, terminalArrival, opts.minRestSeconds);
+
+    const departureObs = departureObserved(
+      opts.rt,
+      ob.tripId,
+      opts.terminal.stopIds,
+      ob.departureTime,
+      opts.serviceDayStartSeconds,
+    );
+    const departedSeconds = record?.departureSeconds ?? departureObs.departureSeconds;
+    const departed = record?.departureSeconds !== undefined || departureObs.departed;
+    const onPrevLeg =
+      vehicleId !== undefined && prevTripId !== undefined && currentTrip === prevTripId;
+    const observed =
+      hasArrivalInfo || record?.arrivalSeconds !== undefined || vehicleId !== undefined;
+    let state: VehicleState;
+    if (departed) state = 'departed';
+    else if (onPrevLeg && predictedArrival > opts.nowSvc) state = 'incoming';
+    else if (observed || ob.departureTime >= opts.nowSvc) state = 'layover';
+    else state = 'departed';
+
+    departures.push({
+      tripId: ob.tripId,
+      routeId: opts.routeId,
+      vehicleId,
+      prevTripId,
+      scheduledDeparture: ob.departureTime,
+      scheduledArrival,
+      predictedArrival,
+      terminalArrival,
+      edt,
+      departedSeconds,
+      state,
+      hold: record?.hold,
+      hasArrivalInfo,
+      departureObs,
+    });
   }
 
   departures.sort(
-    (a, b) => a.scheduledDeparture - b.scheduledDeparture || a.tripId.localeCompare(b.tripId),
+    (a, b) => effectiveDeparture(a) - effectiveDeparture(b) || a.tripId.localeCompare(b.tripId),
   );
   return departures;
 }
