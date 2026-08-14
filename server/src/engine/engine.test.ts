@@ -343,6 +343,21 @@ describe('engine triplet dispatch', () => {
     expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(true);
   });
 
+  it('keeps a bus incoming when the outbound TU is pre-assigned before arrival', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [depUpdate('D2', 'V2', '08:14')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'MID', '08:08')],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const p2 = route.incoming.find((i) => i.tripId === 'P2')!;
+    expect(p2.vehicleId).toBe('V2');
+    expect(p2.nextTripId).toBe('D2');
+  });
+
   it('drops a bus from layover once its terminal stop leaves the feed', () => {
     const engine = makeEngine();
     const rt: RealtimeSnapshot = {

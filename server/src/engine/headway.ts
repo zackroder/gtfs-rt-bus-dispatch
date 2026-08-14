@@ -247,30 +247,24 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   }
   const vehicleToTrip = new Map<string, string>();
   for (const [trip, vehicle] of tripToVehicle) vehicleToTrip.set(vehicle, trip);
+  const vpTripByVehicle = new Map<string, string>();
+  for (const vp of opts.rt.vehiclePositions) {
+    if (vp.vehicleId && vp.tripId) vpTripByVehicle.set(vp.vehicleId, vp.tripId);
+  }
 
   const departures: OutboundDeparture[] = [];
   for (const ob of outbound) {
     const prevTripId = prevTrip.get(ob.tripId);
     const vehicleId =
       tripToVehicle.get(ob.tripId) ?? (prevTripId ? tripToVehicle.get(prevTripId) : undefined);
-    const currentTrip = vehicleId ? vehicleToTrip.get(vehicleId) : undefined;
+    const currentTrip = vehicleId
+      ? (vpTripByVehicle.get(vehicleId) ?? vehicleToTrip.get(vehicleId))
+      : undefined;
 
     let scheduledArrival = ob.departureTime;
     let predictedArrival = ob.departureTime;
     let hasArrivalInfo = false;
-    if (vehicleId && (currentTrip === prevTripId || currentTrip === ob.tripId)) {
-      const sourceTrip = currentTrip === prevTripId && prevTripId ? prevTripId : ob.tripId;
-      const arrival = arrivalAtTerminal(
-        db,
-        opts.rt,
-        sourceTrip,
-        opts.terminal.stopIds,
-        opts.serviceDayStartSeconds,
-      );
-      scheduledArrival = arrival.scheduled;
-      predictedArrival = arrival.predicted;
-      hasArrivalInfo = arrival.known;
-    } else if (prevTripId) {
+    if (prevTripId) {
       const arrival = arrivalAtTerminal(
         db,
         opts.rt,
@@ -308,10 +302,12 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     );
 
     const arrivedAtTerminal =
-      onOutboundLeg || (onPrevLeg && predictedArrival <= opts.nowSvc) || record?.arrivalSeconds !== undefined;
+      onOutboundLeg ||
+      (onPrevLeg && hasArrivalInfo && predictedArrival <= opts.nowSvc) ||
+      record?.arrivalSeconds !== undefined;
     let state: VehicleState;
     if (departed) state = 'departed';
-    else if (onPrevLeg && predictedArrival > opts.nowSvc) state = 'incoming';
+    else if (onPrevLeg && !arrivedAtTerminal) state = 'incoming';
     else if (arrivedAtTerminal) state = 'layover';
     else state = 'departed';
 
