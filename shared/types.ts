@@ -58,7 +58,6 @@ export interface IncomingBus {
 export interface HoldOverride {
   holdSeconds: number;
   effectiveDeparture: number;
-  rule: 'leader' | 'follower';
   reason: string;
 }
 
@@ -68,13 +67,15 @@ export interface LayoverBus {
   tripId: string;
   vehicleId?: string;
   scheduledDeparture: number;
+  terminalArrival: number;
+  expectedDeparture: number;
   predictedDeparture: number;
   countdownSeconds: number;
   hold?: HoldOverride;
-  minRestAdvisory?: boolean;
+  restDelayed?: boolean;
 }
 
-export type InterventionRule = 'hold_leader' | 'hold_follower' | 'gap_alert' | 'min_rest';
+export type InterventionRule = 'hold';
 
 export interface Intervention {
   id: string;
@@ -114,9 +115,6 @@ export interface AppConfig {
   refreshIntervalSeconds: number;
   staticRefreshHours: number;
   minRestMinutes: number;
-  gapFactor: number;
-  bunchFactor: number;
-  holdFraction: number;
   maxHoldMinutes: number;
   leadTimeMinutes: number;
   lookaheadMinutes: number;
@@ -140,9 +138,6 @@ export const appConfigSchema = z.object({
   refreshIntervalSeconds: z.number().int().min(5).max(3600),
   staticRefreshHours: z.number().int().min(0).max(720),
   minRestMinutes: z.number().int().min(0).max(600),
-  gapFactor: z.number().min(1).max(10),
-  bunchFactor: z.number().min(0).max(1),
-  holdFraction: z.number().min(0).max(1),
   maxHoldMinutes: z.number().int().min(0).max(600),
   leadTimeMinutes: z.number().int().min(0).max(600),
   lookaheadMinutes: z.number().int().min(5).max(1440),

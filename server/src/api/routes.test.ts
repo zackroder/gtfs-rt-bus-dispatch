@@ -16,9 +16,6 @@ const baseConfig: AppConfig = {
   refreshIntervalSeconds: 10,
   staticRefreshHours: 24,
   minRestMinutes: 5,
-  gapFactor: 1.5,
-  bunchFactor: 0.5,
-  holdFraction: 0.5,
   maxHoldMinutes: 10,
   leadTimeMinutes: 5,
   lookaheadMinutes: 90,
@@ -138,7 +135,7 @@ describe('api routes', () => {
     const res = await fetch(`${base}/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...baseConfig, gapFactor: 100 }),
+      body: JSON.stringify({ ...baseConfig, minRestMinutes: -1 }),
     });
     expect(res.status).toBe(400);
   });
