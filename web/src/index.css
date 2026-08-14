@@ -85,6 +85,8 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
@@ -100,7 +102,11 @@ h3 {
 }
 
 .card-side {
-  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin-left: auto;
 }
 
 .card-detail {
@@ -124,7 +130,7 @@ h3 {
 .arrival {
   font-size: 12px;
   color: var(--muted);
-  display: block;
+  white-space: nowrap;
 }
 
 .arrival.late {
@@ -214,7 +220,7 @@ h3 {
 .departs {
   font-size: 12px;
   color: var(--muted);
-  display: block;
+  white-space: nowrap;
 }
 
 .departs.held {
