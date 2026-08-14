@@ -161,6 +161,60 @@ describe('staticLoader', () => {
     ).toBe(0);
   });
 
+  it('replaces static data on reload instead of appending or failing', () => {
+    const db = createDatabase(':memory:');
+    loadStatic(
+      db,
+      syntheticGtfs({
+        routes: [
+          { routeId: 'BUS1', shortName: '72' },
+          { routeId: 'RED', shortName: 'Red Line', type: 1 },
+        ],
+        trips: [
+          {
+            tripId: 'BUST1',
+            routeId: 'BUS1',
+            stopTimes: [
+              { stopId: 'T', arr: '05:00:00', dep: '05:00:00' },
+              { stopId: 'B', arr: '05:30:00', dep: '05:30:00' },
+            ],
+          },
+          {
+            tripId: 'RAILT1',
+            routeId: 'RED',
+            stopTimes: [
+              { stopId: 'T', arr: '06:00:00', dep: '06:00:00' },
+              { stopId: 'RAIL', arr: '06:30:00', dep: '06:30:00' },
+            ],
+          },
+        ],
+      }),
+    );
+    expect((db.prepare('SELECT COUNT(*) AS c FROM routes').get() as { c: number }).c).toBe(1);
+
+    loadStatic(
+      db,
+      syntheticGtfs({
+        routes: [{ routeId: 'BUS1', shortName: '72' }],
+        trips: [
+          {
+            tripId: 'BUST2',
+            routeId: 'BUS1',
+            stopTimes: [
+              { stopId: 'T', arr: '07:00:00', dep: '07:00:00' },
+              { stopId: 'B', arr: '07:30:00', dep: '07:30:00' },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect((db.prepare('SELECT COUNT(*) AS c FROM routes').get() as { c: number }).c).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM trips').get() as { c: number }).c).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM stop_times').get() as { c: number }).c).toBe(2);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM stops').get() as { c: number }).c).toBe(2);
+  });
+
   it('does not chain trips without a block_id', () => {
     const db = createDatabase(':memory:');
     const gtfs = syntheticGtfs({

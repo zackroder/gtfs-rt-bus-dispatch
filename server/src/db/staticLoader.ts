@@ -73,6 +73,8 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
   );
 
   const run = db.transaction(() => {
+    db.exec(`DELETE FROM stops; DELETE FROM routes; DELETE FROM trips;
+             DELETE FROM stop_times; DELETE FROM calendar; DELETE FROM calendar_dates;`);
     for (const stop of stops) {
       insertStop.run(stop.stopId, stop.stopCode ?? null, stop.stopName, stop.parentStation ?? null, stop.lat, stop.lon);
     }
