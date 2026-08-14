@@ -109,12 +109,29 @@ export function outboundRoutesAtTerminal(
   return rows.map((r) => r.route_id).sort();
 }
 
-export function routeShortName(db: Database, routeId: string): string {
+export interface RouteStyle {
+  shortName: string;
+  longName?: string;
+  color?: string;
+  textColor?: string;
+}
+
+export function routeStyle(db: Database, routeId: string): RouteStyle {
   const row = db
-    .prepare(`SELECT short_name, long_name FROM routes WHERE route_id = ?`)
-    .get(routeId) as { short_name: string; long_name: string } | undefined;
-  if (!row) return routeId;
-  return row.short_name || row.long_name || routeId;
+    .prepare(`SELECT short_name, long_name, color, text_color FROM routes WHERE route_id = ?`)
+    .get(routeId) as
+    | { short_name: string; long_name: string; color: string | null; text_color: string | null }
+    | undefined;
+  return {
+    shortName: row?.short_name || row?.long_name || routeId,
+    longName: row?.long_name || undefined,
+    color: row?.color ?? undefined,
+    textColor: row?.text_color ?? undefined,
+  };
+}
+
+export function routeShortName(db: Database, routeId: string): string {
+  return routeStyle(db, routeId).shortName;
 }
 
 export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string>): Terminal[] {

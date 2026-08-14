@@ -54,7 +54,7 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
     `INSERT INTO stops (stop_id, stop_code, stop_name, parent_station, lat, lon) VALUES (?, ?, ?, ?, ?, ?)`,
   );
   const insertRoute = db.prepare(
-    `INSERT INTO routes (route_id, agency_id, short_name, long_name, type) VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO routes (route_id, agency_id, short_name, long_name, type, color, text_color) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertTrip = db.prepare(
     `INSERT INTO trips (trip_id, route_id, service_id, block_id, direction_id, headsign) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -79,7 +79,15 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
       insertStop.run(stop.stopId, stop.stopCode ?? null, stop.stopName, stop.parentStation ?? null, stop.lat, stop.lon);
     }
     for (const route of routes) {
-      insertRoute.run(route.routeId, route.agencyId ?? null, route.shortName, route.longName, route.type);
+      insertRoute.run(
+        route.routeId,
+        route.agencyId ?? null,
+        route.shortName,
+        route.longName,
+        route.type,
+        route.color ?? null,
+        route.textColor ?? null,
+      );
     }
     for (const trip of trips) {
       insertTrip.run(

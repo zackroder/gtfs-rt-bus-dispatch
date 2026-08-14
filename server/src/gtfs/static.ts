@@ -98,6 +98,8 @@ export function parseStatic(buffer: Buffer): ParsedStaticGtfs {
     shortName: pick(row, 'route_short_name') ?? '',
     longName: pick(row, 'route_long_name') ?? '',
     type: toNumber(pick(row, 'route_type')) ?? 0,
+    color: pick(row, 'route_color'),
+    textColor: pick(row, 'route_text_color'),
   }));
 
   const trips: ParsedTrip[] = readCsv(zip, 'trips.txt').map((row) => ({

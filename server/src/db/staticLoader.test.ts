@@ -12,7 +12,7 @@ describe('staticLoader', () => {
         { stopId: 'T', name: 'Terminal' },
         { stopId: 'B', name: 'Far' },
       ],
-      routes: [{ routeId: '1', shortName: '1' }],
+      routes: [{ routeId: '1', shortName: '1', color: 'FFB81C', textColor: '000000' }],
       trips: [
         {
           tripId: 'T1',
@@ -40,6 +40,13 @@ describe('staticLoader', () => {
     expect((db.prepare('SELECT COUNT(*) AS c FROM trips').get() as { c: number }).c).toBe(2);
     expect((db.prepare('SELECT COUNT(*) AS c FROM stop_times').get() as { c: number }).c).toBe(4);
     expect((db.prepare('SELECT COUNT(*) AS c FROM calendar').get() as { c: number }).c).toBe(1);
+
+    const route = db.prepare(`SELECT color, text_color FROM routes WHERE route_id = '1'`).get() as {
+      color: string;
+      text_color: string;
+    };
+    expect(route.color).toBe('FFB81C');
+    expect(route.text_color).toBe('000000');
 
     const dep = db
       .prepare(`SELECT departure_time FROM stop_times WHERE trip_id = ? AND stop_sequence = 0`)

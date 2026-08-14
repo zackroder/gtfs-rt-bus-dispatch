@@ -2,7 +2,13 @@ import { Router, type Response } from 'express';
 import type { Database } from 'better-sqlite3';
 import { appConfigSchema, type AppConfig, type TerminalSnapshot } from '../../../shared/types';
 import { redactConfig } from '../config';
-import { routeShortName } from '../engine/terminal';
+import { routeStyle } from '../engine/terminal';
+
+function byRouteName(a: { shortName: string; routeId: string }, b: { shortName: string; routeId: string }): number {
+  const nameA = a.shortName || a.routeId;
+  const nameB = b.shortName || b.routeId;
+  return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
+}
 
 export interface ApiDeps {
   db: Database;
@@ -27,25 +33,34 @@ export function createApi(deps: ApiDeps): Router {
 
   router.get('/terminals', (_req, res) => {
     const config = deps.getConfig();
-    const routes = new Map<string, { shortName: string; terminalIds: string[] }>();
+    const routes = new Map<string, { shortName: string; longName?: string; color?: string; textColor?: string; terminalIds: string[] }>();
     for (const terminal of config.terminals) {
       for (const routeId of terminal.routeIds ?? []) {
         let entry = routes.get(routeId);
         if (!entry) {
-          entry = { shortName: routeShortName(deps.db, routeId), terminalIds: [] };
+          const style = routeStyle(deps.db, routeId);
+          entry = {
+            shortName: style.shortName,
+            longName: style.longName,
+            color: style.color,
+            textColor: style.textColor,
+            terminalIds: [],
+          };
           routes.set(routeId, entry);
         }
         if (!entry.terminalIds.includes(terminal.id)) entry.terminalIds.push(terminal.id);
       }
     }
-    sendJson(res, 200, {
-      terminals: config.terminals,
-      routes: Array.from(routes.entries()).map(([routeId, entry]) => ({
-        routeId,
-        shortName: entry.shortName,
-        terminalIds: entry.terminalIds,
-      })),
-    });
+    const entries = Array.from(routes.entries()).map(([routeId, entry]) => ({
+      routeId,
+      shortName: entry.shortName,
+      longName: entry.longName,
+      color: entry.color,
+      textColor: entry.textColor,
+      terminalIds: entry.terminalIds,
+    }));
+    entries.sort(byRouteName);
+    sendJson(res, 200, { terminals: config.terminals, routes: entries });
   });
 
   router.get('/terminals/:id', (req, res) => {

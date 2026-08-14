@@ -25,6 +25,8 @@ export interface ParsedRoute {
   shortName: string;
   longName: string;
   type: number;
+  color?: string;
+  textColor?: string;
 }
 
 export interface ParsedTrip {

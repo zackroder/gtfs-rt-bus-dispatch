@@ -25,7 +25,7 @@ import {
   type TripEnd,
 } from './headway';
 import { decideTriplets, type TripletDecision } from './dispatch';
-import { outboundRoutesAtTerminal, routeShortName } from './terminal';
+import { outboundRoutesAtTerminal, routeStyle } from './terminal';
 
 const RECENT_DEPARTURE_SECONDS = 30 * 60;
 
@@ -194,7 +194,7 @@ export class Engine {
       const nextTripId = chains.nextTrip.get(tu.tripId);
       if (nextTripId) {
         const arr = arrivalFact(tu, end.lastStopId, end.lastArrival, serviceDayStartSeconds);
-        if (arr.predicted <= nowSvc) {
+        if (arr.known && arr.predicted <= nowSvc) {
           this.recordArrival(nextTripId, arr.predicted, 'tu');
         }
       }
@@ -259,7 +259,8 @@ export class Engine {
         });
       }
 
-      const shortName = routeShortName(this.db, routeId);
+      const style = routeStyle(this.db, routeId);
+      const shortName = style.shortName;
       const incoming: IncomingBus[] = [];
       const layovers: LayoverBus[] = [];
       const departed: DepartedBus[] = [];
@@ -325,6 +326,9 @@ export class Engine {
       states.push({
         routeId,
         routeShortName: shortName,
+        routeLongName: style.longName,
+        color: style.color,
+        textColor: style.textColor,
         incoming,
         layovers,
         departed,

@@ -28,7 +28,8 @@ let server: Server | null = null;
 
 function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
   const db = createDatabase(':memory:');
-  db.exec(`INSERT INTO routes (route_id, agency_id, short_name, long_name, type) VALUES ('1','A','R1','Route One',3)`);
+  db.exec(`INSERT INTO routes (route_id, agency_id, short_name, long_name, type, color, text_color) VALUES ('1','A','10','Route Ten',3,'FFB81C','000000')`);
+  db.exec(`INSERT INTO routes (route_id, agency_id, short_name, long_name, type, color) VALUES ('2','A','2','Route Two',3,'C8102E')`);
   let config = baseConfig;
   return {
     db,
@@ -78,15 +79,23 @@ describe('api routes', () => {
     expect(await res.json()).toEqual({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 });
   });
 
-  it('lists terminals grouped by route', async () => {
+  it('lists terminals grouped by route, sorted numerically, with colors', async () => {
     const base = await startServer(makeDeps());
     const res = await fetch(`${base}/terminals`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { terminals: unknown[]; routes: Array<{ routeId: string; shortName: string; terminalIds: string[] }> };
+    const body = (await res.json()) as { terminals: unknown[]; routes: Array<{ routeId: string; shortName: string; longName?: string; color?: string; textColor?: string; terminalIds: string[] }> };
     expect(body.terminals).toHaveLength(2);
-    const route1 = body.routes.find((r) => r.routeId === '1');
-    expect(route1!.shortName).toBe('R1');
-    expect(route1!.terminalIds).toEqual(['T1']);
+    expect(body.routes.map((r) => r.routeId)).toEqual(['2', '1']);
+    const route1 = body.routes.find((r) => r.routeId === '1')!;
+    expect(route1.shortName).toBe('10');
+    expect(route1.longName).toBe('Route Ten');
+    expect(route1.color).toBe('FFB81C');
+    expect(route1.textColor).toBe('000000');
+    expect(route1.terminalIds).toEqual(['T1']);
+    const route2 = body.routes.find((r) => r.routeId === '2')!;
+    expect(route2.shortName).toBe('2');
+    expect(route2.color).toBe('C8102E');
+    expect(route2.terminalIds).toEqual(['T2']);
   });
 
   it('serves a terminal snapshot and supports route filtering', async () => {

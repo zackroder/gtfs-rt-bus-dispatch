@@ -24,7 +24,9 @@ export function createDatabase(dbPath: string): Database.Database {
       agency_id TEXT,
       short_name TEXT,
       long_name TEXT,
-      type INTEGER
+      type INTEGER,
+      color TEXT,
+      text_color TEXT
     );
 
     CREATE TABLE IF NOT EXISTS trips (
@@ -79,5 +81,14 @@ export function createDatabase(dbPath: string): Database.Database {
       value_json TEXT
     );
   `);
+  ensureColumn(db, 'routes', 'color', 'TEXT');
+  ensureColumn(db, 'routes', 'text_color', 'TEXT');
   return db;
+}
+
+function ensureColumn(db: Database.Database, table: string, column: string, type: string): void {
+  const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }

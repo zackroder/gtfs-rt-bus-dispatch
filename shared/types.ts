@@ -109,6 +109,9 @@ export interface Intervention {
 export interface RouteState {
   routeId: string;
   routeShortName: string;
+  routeLongName?: string;
+  color?: string;
+  textColor?: string;
   incoming: IncomingBus[];
   layovers: LayoverBus[];
   departed: DepartedBus[];
