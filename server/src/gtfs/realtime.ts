@@ -1,5 +1,5 @@
 import { transit_realtime } from 'gtfs-realtime-bindings';
-import type { StopTimePrediction, TripUpdateInfo, VehiclePosition } from '../../../shared/types';
+import type { StopTimePrediction, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 
 const FeedMessage = transit_realtime.FeedMessage;
 
@@ -24,31 +24,6 @@ export async function fetchFeed(url: string): Promise<Buffer> {
     throw new Error(`GTFS-RT feed failed: ${url} -> ${res.status} ${res.statusText}`);
   }
   return Buffer.from(await res.arrayBuffer());
-}
-
-export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number): VehiclePosition[] {
-  const feed = FeedMessage.decode(new Uint8Array(buffer));
-  const timestamp = toSeconds(feed.header?.timestamp) ?? fallbackTimestamp;
-  const vehicles: VehiclePosition[] = [];
-  for (const entity of feed.entity ?? []) {
-    const v = entity.vehicle;
-    if (!v) continue;
-    const vehicleId = v.vehicle?.id;
-    const tripId = v.trip?.tripId ?? undefined;
-    if (vehicleId === undefined && tripId === undefined) continue;
-    const position = v.position;
-    vehicles.push({
-      vehicleId: vehicleId ?? entity.id,
-      tripId,
-      routeId: v.trip?.routeId ?? undefined,
-      stopId: v.stopId ?? undefined,
-      stopSequence: v.currentStopSequence ?? undefined,
-      lat: position ? position.latitude : undefined,
-      lon: position ? position.longitude : undefined,
-      timestamp: toSeconds(v.timestamp) ?? timestamp,
-    });
-  }
-  return vehicles;
 }
 
 export function decodeTripUpdates(buffer: Buffer, fallbackTimestamp: number): TripUpdateInfo[] {
@@ -82,4 +57,27 @@ export function decodeTripUpdates(buffer: Buffer, fallbackTimestamp: number): Tr
     });
   }
   return updates;
+}
+
+export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number): VehiclePositionInfo[] {
+  const feed = FeedMessage.decode(new Uint8Array(buffer));
+  const timestamp = toSeconds(feed.header?.timestamp) ?? fallbackTimestamp;
+  const positions: VehiclePositionInfo[] = [];
+  for (const entity of feed.entity ?? []) {
+    const vp = entity.vehicle;
+    if (!vp) continue;
+    const vehicleId = vp.vehicle?.id;
+    if (!vehicleId) continue;
+    const tripId = vp.trip?.tripId;
+    const stopId = vp.stopId ?? undefined;
+    const stopSequence = toSeconds(vp.currentStopSequence);
+    positions.push({
+      vehicleId,
+      tripId: tripId || undefined,
+      stopId: stopId || undefined,
+      currentStopSequence: stopSequence !== undefined && stopSequence > 0 ? stopSequence : undefined,
+      timestamp: toSeconds(vp.timestamp) ?? timestamp,
+    });
+  }
+  return positions;
 }

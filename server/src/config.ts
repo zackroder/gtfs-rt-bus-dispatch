@@ -15,16 +15,16 @@ export function setSetting(db: Database, key: string, value: unknown): void {
 }
 
 const DEFAULT_URLS = {
-  vehiclePositionsUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb',
   tripUpdatesUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb',
+  vehiclePositionsUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb',
   staticGtfsUrl: 'https://www.transitchicago.com/downloads/sch_data/google_transit.zip',
 };
 
 function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
   return {
     realtime: {
-      vehiclePositionsUrl: env.CTA_VP_URL ?? DEFAULT_URLS.vehiclePositionsUrl,
       tripUpdatesUrl: env.CTA_TU_URL ?? DEFAULT_URLS.tripUpdatesUrl,
+      vehiclePositionsUrl: env.CTA_VP_URL ?? DEFAULT_URLS.vehiclePositionsUrl,
       apiKey: env.CTA_API_KEY || undefined,
     },
     staticGtfsUrl: env.CTA_STATIC_URL ?? DEFAULT_URLS.staticGtfsUrl,
@@ -34,7 +34,6 @@ function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
     maxHoldMinutes: 10,
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
-    layoverProximityMeters: 300,
     terminals: [],
   };
 }
@@ -48,10 +47,16 @@ export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
   }
   const parsed: unknown = JSON.parse(saved);
   const config = appConfigSchema.parse(parsed);
+  let mutated = false;
   if (!config.realtime.apiKey && env.CTA_API_KEY) {
     config.realtime.apiKey = env.CTA_API_KEY;
-    setSetting(db, 'appConfig', config);
+    mutated = true;
   }
+  if (!config.realtime.vehiclePositionsUrl) {
+    config.realtime.vehiclePositionsUrl = env.CTA_VP_URL ?? DEFAULT_URLS.vehiclePositionsUrl;
+    mutated = true;
+  }
+  if (mutated) setSetting(db, 'appConfig', config);
   return config;
 }
 

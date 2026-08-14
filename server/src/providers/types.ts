@@ -1,9 +1,9 @@
-import type { TripUpdateInfo, VehiclePosition } from '../../../shared/types';
+import type { TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 
 export interface RealtimeSnapshot {
   timestamp: number;
-  vehicles: VehiclePosition[];
   tripUpdates: TripUpdateInfo[];
+  vehiclePositions: VehiclePositionInfo[];
 }
 
 export interface RealtimeProvider {

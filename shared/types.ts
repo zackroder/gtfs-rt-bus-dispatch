@@ -15,17 +15,6 @@ export interface Stop {
   lon: number;
 }
 
-export interface VehiclePosition {
-  vehicleId: string;
-  tripId?: string;
-  routeId?: string;
-  stopId?: string;
-  stopSequence?: number;
-  lat?: number;
-  lon?: number;
-  timestamp: number;
-}
-
 export interface StopTimePrediction {
   stopId: string;
   stopSequence: number;
@@ -41,6 +30,14 @@ export interface TripUpdateInfo {
   routeId?: string;
   delay?: number;
   stopTimeUpdates: StopTimePrediction[];
+  timestamp: number;
+}
+
+export interface VehiclePositionInfo {
+  vehicleId: string;
+  tripId?: string;
+  stopId?: string;
+  currentStopSequence?: number;
   timestamp: number;
 }
 
@@ -124,8 +121,8 @@ export interface TerminalSnapshot {
 
 export interface AppConfig {
   realtime: {
-    vehiclePositionsUrl: string;
     tripUpdatesUrl: string;
+    vehiclePositionsUrl?: string;
     apiKey?: string;
   };
   staticGtfsUrl: string;
@@ -135,7 +132,6 @@ export interface AppConfig {
   maxHoldMinutes: number;
   leadTimeMinutes: number;
   lookaheadMinutes: number;
-  layoverProximityMeters: number;
   terminals: Terminal[];
 }
 
@@ -148,8 +144,8 @@ export const terminalSchema = z.object({
 
 export const appConfigSchema = z.object({
   realtime: z.object({
-    vehiclePositionsUrl: z.string().url(),
     tripUpdatesUrl: z.string().url(),
+    vehiclePositionsUrl: z.string().url().optional(),
     apiKey: z.string().optional(),
   }),
   staticGtfsUrl: z.string().url(),
@@ -159,6 +155,5 @@ export const appConfigSchema = z.object({
   maxHoldMinutes: z.number().int().min(0).max(600),
   leadTimeMinutes: z.number().int().min(0).max(600),
   lookaheadMinutes: z.number().int().min(5).max(1440),
-  layoverProximityMeters: z.number().int().min(0).max(5000).default(300),
   terminals: z.array(terminalSchema),
 });

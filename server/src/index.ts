@@ -28,12 +28,19 @@ const DB_PATH = process.env.DB_PATH ?? './data/dispatch.db';
 const STATIC_GTFS_PATH = process.env.STATIC_GTFS_PATH ?? './data/gtfs.zip';
 
 const db = createDatabase(DB_PATH);
+try {
+  db.pragma('wal_checkpoint(TRUNCATE)');
+} catch {
+  // ignore if another process holds the WAL
+}
 let config: AppConfig = loadConfig(db, process.env);
 
 const engine = new Engine(db, () => config);
 const provider = new GtfsRealtimeProvider(() => config.realtime);
 
-let snapshots: TerminalSnapshot[] = [];
+let latestRt: RealtimeSnapshot | null = null;
+const snapshots = new Map<string, TerminalSnapshot>();
+const subscriptions = new Map<string, number>();
 let lastRefreshAt: number | null = null;
 let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
@@ -68,16 +75,55 @@ async function ensureStaticLoaded(force = false): Promise<void> {
   });
   const gtfs = await providerInstance.load();
   loadStatic(db, gtfs);
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // ignore checkpoint failures
+  }
+  engine.invalidateStaticCaches();
   staticLoadedAt = getStaticLoadedAt(db);
   discoverTerminals();
 }
 
+function computeTerminal(terminalId: string): TerminalSnapshot | undefined {
+  if (!latestRt) return snapshots.get(terminalId);
+  const fresh = engine.refresh(latestRt, new Date(), new Set([terminalId]));
+  const snapshot = fresh[0];
+  if (snapshot) snapshots.set(terminalId, snapshot);
+  return snapshot ?? snapshots.get(terminalId);
+}
+
+function subscribe(terminalId: string): void {
+  const count = (subscriptions.get(terminalId) ?? 0) + 1;
+  subscriptions.set(terminalId, count);
+  if (count === 1) {
+    const snapshot = computeTerminal(terminalId);
+    if (snapshot) broadcaster?.broadcast([snapshot]);
+  }
+}
+
+function unsubscribe(terminalId: string): void {
+  const count = (subscriptions.get(terminalId) ?? 0) - 1;
+  if (count <= 0) {
+    subscriptions.delete(terminalId);
+    snapshots.delete(terminalId);
+  } else {
+    subscriptions.set(terminalId, count);
+  }
+}
+
 async function refreshOnce(): Promise<void> {
-  const rt: RealtimeSnapshot = await provider.fetch();
-  const refreshed = engine.refresh(rt);
-  snapshots = refreshed;
+  try {
+    latestRt = await provider.fetch();
+  } catch (err) {
+    console.error('realtime fetch failed:', err instanceof Error ? err.message : err);
+  }
+  if (!latestRt) return;
+  const wanted = new Set(subscriptions.keys());
+  const fresh = engine.refresh(latestRt, new Date(), wanted);
+  for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
   lastRefreshAt = Date.now();
-  broadcaster?.broadcast(snapshots);
+  broadcaster?.broadcast(fresh);
 }
 
 function scheduleRefresh(): void {
@@ -102,8 +148,7 @@ app.use(
       config = applyConfig(db, config, next);
       return config;
     },
-    getSnapshots: () => snapshots,
-    getSnapshot: (terminalId) => snapshots.find((s) => s.terminalId === terminalId),
+    computeTerminal,
     getHealth: () => ({ ok: true, lastRefreshAt, staticLoadedAt }),
     reloadStatic: () => ensureStaticLoaded(true),
     refreshOnce,
@@ -119,7 +164,11 @@ if (fs.existsSync(webDist)) {
 }
 
 const httpServer = http.createServer(app);
-broadcaster = setupWs(httpServer, { getSnapshots: () => snapshots });
+broadcaster = setupWs(httpServer, {
+  getSnapshots: () => Array.from(snapshots.values()),
+  subscribe,
+  unsubscribe,
+});
 
 httpServer.listen(PORT, () => {
   console.log(`dispatch listening on :${PORT}`);
@@ -127,5 +176,8 @@ httpServer.listen(PORT, () => {
     .catch((err: unknown) => {
       console.error('static load failed:', err instanceof Error ? err.message : err);
     })
-    .finally(() => scheduleRefresh());
+    .finally(() => {
+      scheduleRefresh();
+      void refreshOnce().catch(() => undefined);
+    });
 });

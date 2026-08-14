@@ -5,7 +5,7 @@ import { Engine } from './engine';
 import { syntheticGtfs } from '../test/fixtures';
 import type { TripSpec } from '../test/fixtures';
 import type { RealtimeSnapshot } from '../providers/types';
-import type { AppConfig, TripUpdateInfo } from '../../../shared/types';
+import type { AppConfig, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 
 const START = 8 * 3600;
 
@@ -117,7 +117,6 @@ function makeEngine(): Engine {
   loadStatic(db, gtfs);
   const cfg: AppConfig = {
     realtime: {
-      vehiclePositionsUrl: 'http://localhost/vp.pb',
       tripUpdatesUrl: 'http://localhost/tu.pb',
     },
     staticGtfsUrl: 'http://localhost/gtfs.zip',
@@ -127,7 +126,6 @@ function makeEngine(): Engine {
     maxHoldMinutes: 10,
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
-    layoverProximityMeters: 300,
     terminals: [{ id: 'T', name: 'Terminal', stopIds: ['T'], routeIds: ['1'] }],
   };
   return new Engine(db, () => cfg);
@@ -136,7 +134,6 @@ function makeEngine(): Engine {
 function stdRt(): RealtimeSnapshot {
   return {
     timestamp: unixAt('08:08'),
-    vehicles: [],
     tripUpdates: [
       depUpdate('D1', 'V1', '08:05'),
       arrUpdate('P1', 'V1'),
@@ -144,6 +141,23 @@ function stdRt(): RealtimeSnapshot {
       arrUpdate('P3', 'V3'),
       arrUpdate('P4', 'V4'),
     ],
+    vehiclePositions: [],
+  };
+}
+
+function vpAtStop(
+  vehicleId: string,
+  tripId: string,
+  stopId: string,
+  hhmm: string,
+  currentStopSequence?: number,
+): VehiclePositionInfo {
+  return {
+    vehicleId,
+    tripId,
+    stopId,
+    currentStopSequence,
+    timestamp: unixAt(hhmm),
   };
 }
 
@@ -183,7 +197,6 @@ describe('engine triplet dispatch', () => {
     const engine = makeEngine();
     const rt: RealtimeSnapshot = {
       timestamp: unixAt('08:08'),
-      vehicles: [],
       tripUpdates: [
         depUpdate('D1', 'V1', '08:07'),
         arrUpdate('P1', 'V1'),
@@ -191,6 +204,7 @@ describe('engine triplet dispatch', () => {
         arrUpdate('P3', 'V3'),
         arrUpdate('P4', 'V4'),
       ],
+      vehiclePositions: [],
     };
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const hold = route1(snapshot).interventions[0]!;
@@ -254,40 +268,14 @@ describe('engine triplet dispatch', () => {
     expect(d3.restDelayed).toBe(true);
   });
 
-  it('confirms a layover when the vehicle is within the terminal buffer', () => {
+  it('records departures globally so recently-departed survives unviewed gaps', () => {
     const engine = makeEngine();
-    const rt: RealtimeSnapshot = {
-      timestamp: unixAt('08:08'),
-      vehicles: [{ vehicleId: 'V2', tripId: 'P2', lat: 41.8001, lon: -87.6001, timestamp: unixAt('08:08') }],
-      tripUpdates: [
-        depUpdate('D1', 'V1', '08:05'),
-        arrUpdate('P1', 'V1'),
-        arrUpdate('P2', 'V2'),
-        arrUpdate('P3', 'V3'),
-        arrUpdate('P4', 'V4'),
-      ],
-    };
+    const rt = stdRt();
+    engine.refresh(rt, nowAt('08:08'), new Set());
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
-    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(true);
-  });
-
-  it('drops a layover whose vehicle is beyond the terminal buffer', () => {
-    const engine = makeEngine();
-    const rt: RealtimeSnapshot = {
-      timestamp: unixAt('08:08'),
-      vehicles: [{ vehicleId: 'V2', tripId: 'P2', lat: 41.95, lon: -87.75, timestamp: unixAt('08:08') }],
-      tripUpdates: [
-        depUpdate('D1', 'V1', '08:05'),
-        arrUpdate('P1', 'V1'),
-        arrUpdate('P2', 'V2'),
-        arrUpdate('P3', 'V3'),
-        arrUpdate('P4', 'V4'),
-      ],
-    };
-    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
-    const route = route1(snapshot);
-    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const d1 = route.departed.find((d) => d.tripId === 'D1')!;
+    expect(d1.departureSeconds).toBe(svc('08:05'));
   });
 
   it('lists recently departed buses with their recorded departure time', () => {
@@ -298,5 +286,128 @@ describe('engine triplet dispatch', () => {
     expect(d1.departureSeconds).toBe(svc('08:05'));
     expect(d1.vehicleId).toBe('V1');
     expect(d1.scheduledDeparture).toBe(svc('08:10'));
+  });
+
+  it('keeps a bus as layover when its terminal departure is still in the future', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        depUpdate('D2', 'V2', '08:14'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+      vehiclePositions: [],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.departed.some((d) => d.tripId === 'D2')).toBe(false);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(true);
+  });
+
+  it('drops a bus from layover once its terminal stop leaves the feed', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        {
+          tripId: 'D2',
+          vehicleId: 'V2',
+          stopTimeUpdates: [{ stopId: 'B', stopSequence: 1, departureTime: unixAt('08:12') }],
+          timestamp: 1700000000,
+        },
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+      vehiclePositions: [],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    expect(route.incoming.some((i) => i.tripId === 'D2')).toBe(false);
+  });
+
+  it('records terminal arrival from a vehicle position at the last stop, overriding the TU prediction', () => {
+    const engine = makeEngine();
+    const tuOnly = stdRt();
+    engine.refresh(tuOnly, nowAt('08:18'), new Set());
+    const d3First = route1(engine.refresh(tuOnly, nowAt('08:18'))[0]!).layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3First.terminalArrival).toBe(svc('08:18'));
+
+    const withVp: RealtimeSnapshot = {
+      ...tuOnly,
+      vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:19', 1)],
+    };
+    const snapshot = engine.refresh(withVp, nowAt('08:19'))[0]!;
+    const d3 = route1(snapshot).layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.terminalArrival).toBe(svc('08:19'));
+    expect(d3.expectedDeparture).toBe(svc('08:24'));
+  });
+
+  it('records arrival from VP when the trip never crossed the TU prediction threshold', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:26'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V4', 'P4', 'T', '08:26', 1)],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:26'))[0]!;
+    const d4 = route1(snapshot).layovers.find((l) => l.tripId === 'D4')!;
+    expect(d4.terminalArrival).toBe(svc('08:26'));
+  });
+
+  it('records departure when the vehicle sequence advances past the terminal first stop', () => {
+    const engine = makeEngine();
+    const layoverRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'T', '08:08', 0)],
+    };
+    const before = engine.refresh(layoverRt, nowAt('08:08'))[0]!;
+    expect(route1(before).layovers.some((l) => l.tripId === 'D2')).toBe(true);
+
+    const enRouteRt: RealtimeSnapshot = {
+      ...layoverRt,
+      timestamp: unixAt('08:12'),
+      vehiclePositions: [vpAtStop('V2', 'D2', 'MID', '08:12')],
+    };
+    const after = engine.refresh(enRouteRt, nowAt('08:12'))[0]!;
+    const route = route1(after);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const d2 = route.departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+  });
+
+  it('records departure via trip flip when the sequence signal was missed', () => {
+    const engine = makeEngine();
+    const layoverRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V1', 'D1', 'T', '08:08', 0)],
+    };
+    engine.refresh(layoverRt, nowAt('08:08'));
+
+    const flippedRt: RealtimeSnapshot = {
+      ...layoverRt,
+      timestamp: unixAt('08:15'),
+      vehiclePositions: [vpAtStop('V1', 'P3', 'B', '08:15', 0)],
+    };
+    const snapshot = engine.refresh(flippedRt, nowAt('08:15'))[0]!;
+    const d1 = route1(snapshot).departed.find((d) => d.tripId === 'D1')!;
+    expect(d1.departureSeconds).toBe(svc('08:15'));
+  });
+
+  it('clamps a future-dated vehicle position timestamp to now', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:26'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V4', 'P4', 'T', '08:31', 1)],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:26'))[0]!;
+    const d4 = route1(snapshot).layovers.find((l) => l.tripId === 'D4')!;
+    expect(d4.terminalArrival).toBe(svc('08:26'));
   });
 });

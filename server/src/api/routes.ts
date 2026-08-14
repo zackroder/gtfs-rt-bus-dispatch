@@ -8,8 +8,7 @@ export interface ApiDeps {
   db: Database;
   getConfig(): AppConfig;
   applyConfig(next: AppConfig): AppConfig;
-  getSnapshots(): TerminalSnapshot[];
-  getSnapshot(terminalId: string): TerminalSnapshot | undefined;
+  computeTerminal(terminalId: string): TerminalSnapshot | undefined;
   getHealth(): { ok: boolean; lastRefreshAt: number | null; staticLoadedAt: number | null };
   reloadStatic(): Promise<void>;
   refreshOnce(): Promise<void>;
@@ -50,7 +49,7 @@ export function createApi(deps: ApiDeps): Router {
   });
 
   router.get('/terminals/:id', (req, res) => {
-    const snapshot = deps.getSnapshot(req.params.id);
+    const snapshot = deps.computeTerminal(req.params.id);
     if (!snapshot) {
       sendJson(res, 404, { error: `unknown terminal ${req.params.id}` });
       return;

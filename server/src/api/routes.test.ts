@@ -8,7 +8,6 @@ import type { AppConfig, TerminalSnapshot } from '../../../shared/types';
 
 const baseConfig: AppConfig = {
   realtime: {
-    vehiclePositionsUrl: 'http://localhost/vp.pb',
     tripUpdatesUrl: 'http://localhost/tu.pb',
     apiKey: 'sekrit-key',
   },
@@ -19,7 +18,6 @@ const baseConfig: AppConfig = {
   maxHoldMinutes: 10,
   leadTimeMinutes: 5,
   lookaheadMinutes: 90,
-  layoverProximityMeters: 300,
   terminals: [
     { id: 'T1', name: 'Terminal 1', stopIds: ['S1'], routeIds: ['1'] },
     { id: 'T2', name: 'Terminal 2', stopIds: ['S2'], routeIds: ['2'] },
@@ -39,8 +37,7 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
       config = { ...next, realtime: { ...next.realtime, apiKey: next.realtime.apiKey ?? config.realtime.apiKey } };
       return config;
     },
-    getSnapshots: () => [],
-    getSnapshot: (id) =>
+    computeTerminal: (id) =>
       id === 'T1'
         ? ({
             terminalId: 'T1',
@@ -115,7 +112,7 @@ describe('api routes', () => {
     const res = await fetch(`${base}/config`);
     const body = (await res.json()) as AppConfig;
     expect(body.realtime.apiKey).toBeUndefined();
-    expect(body.realtime.vehiclePositionsUrl).toBe(baseConfig.realtime.vehiclePositionsUrl);
+    expect(body.realtime.tripUpdatesUrl).toBe(baseConfig.realtime.tripUpdatesUrl);
   });
 
   it('accepts a valid PUT /config and redacts the response', async () => {

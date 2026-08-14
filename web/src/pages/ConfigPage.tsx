@@ -25,8 +25,12 @@ export default function ConfigPage() {
     setConfig({ ...config, [key]: Number(value) });
   };
 
-  const setUrl = (key: 'vehiclePositionsUrl' | 'tripUpdatesUrl', value: string) => {
-    setConfig({ ...config, realtime: { ...config.realtime, [key]: value } });
+  const setUrl = (value: string) => {
+    setConfig({ ...config, realtime: { ...config.realtime, tripUpdatesUrl: value } });
+  };
+
+  const setVpUrl = (value: string) => {
+    setConfig({ ...config, realtime: { ...config.realtime, vehiclePositionsUrl: value || undefined } });
   };
 
   const save = async () => {
@@ -66,7 +70,6 @@ export default function ConfigPage() {
     ['Max hold (min)', 'maxHoldMinutes'],
     ['Lead time (min)', 'leadTimeMinutes'],
     ['Lookahead (min)', 'lookaheadMinutes'],
-    ['Layover proximity (m)', 'layoverProximityMeters'],
   ];
 
   return (
@@ -95,21 +98,22 @@ export default function ConfigPage() {
       <section className="route-group">
         <h2>Data sources</h2>
         <div className="form-row">
-          <label htmlFor="vp">Vehicle positions URL</label>
-          <input
-            id="vp"
-            type="text"
-            value={config.realtime.vehiclePositionsUrl}
-            onChange={(e) => setUrl('vehiclePositionsUrl', e.target.value)}
-          />
-        </div>
-        <div className="form-row">
           <label htmlFor="tu">Trip updates URL</label>
           <input
             id="tu"
             type="text"
             value={config.realtime.tripUpdatesUrl}
-            onChange={(e) => setUrl('tripUpdatesUrl', e.target.value)}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="vp">Vehicle positions URL</label>
+          <input
+            id="vp"
+            type="text"
+            placeholder="optional"
+            value={config.realtime.vehiclePositionsUrl ?? ''}
+            onChange={(e) => setVpUrl(e.target.value)}
           />
         </div>
         <div className="form-row">

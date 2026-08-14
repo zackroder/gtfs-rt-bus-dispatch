@@ -59,7 +59,10 @@ export function useStream(terminalId: string, route?: string): StreamState {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws`);
       wsRef.current = ws;
-      ws.onopen = () => setSource('websocket');
+      ws.onopen = () => {
+        setSource('websocket');
+        ws.send(JSON.stringify({ type: 'subscribe', terminalId }));
+      };
       ws.onmessage = onWsMessage;
       ws.onclose = () => {
         wsRef.current = null;

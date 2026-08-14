@@ -1,11 +1,10 @@
-import type { AppConfig } from '../../../shared/types';
-import type { TripUpdateInfo, VehiclePosition } from '../../../shared/types';
+import type { AppConfig, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 import type { RealtimeProvider, RealtimeSnapshot } from './types';
 import { decodeTripUpdates, decodeVehiclePositions, fetchFeed } from '../gtfs/realtime';
 
 export class GtfsRealtimeProvider implements RealtimeProvider {
   constructor(
-    private getConfig: () => Pick<AppConfig['realtime'], 'vehiclePositionsUrl' | 'tripUpdatesUrl' | 'apiKey'>,
+    private getConfig: () => Pick<AppConfig['realtime'], 'tripUpdatesUrl' | 'vehiclePositionsUrl' | 'apiKey'>,
   ) {}
 
   private buildUrl(base: string): string {
@@ -16,24 +15,20 @@ export class GtfsRealtimeProvider implements RealtimeProvider {
   }
 
   async fetch(): Promise<RealtimeSnapshot> {
-    const { vehiclePositionsUrl, tripUpdatesUrl } = this.getConfig();
+    const { tripUpdatesUrl, vehiclePositionsUrl } = this.getConfig();
     const timestamp = Math.floor(Date.now() / 1000);
-    let vehicles: VehiclePosition[] = [];
     let tripUpdates: TripUpdateInfo[] = [];
-    const results = await Promise.allSettled([
-      fetchFeed(this.buildUrl(vehiclePositionsUrl)),
-      fetchFeed(this.buildUrl(tripUpdatesUrl)),
+    let vehiclePositions: VehiclePositionInfo[] = [];
+    const [tuResult, vpResult] = await Promise.allSettled([
+      fetchFeed(this.buildUrl(tripUpdatesUrl)).then((buf) => decodeTripUpdates(buf, timestamp)),
+      vehiclePositionsUrl
+        ? fetchFeed(this.buildUrl(vehiclePositionsUrl)).then((buf) => decodeVehiclePositions(buf, timestamp))
+        : Promise.resolve(vehiclePositions),
     ]);
-    if (results[0]?.status === 'fulfilled') {
-      vehicles = decodeVehiclePositions(results[0].value, timestamp);
-    } else if (results[0]?.status === 'rejected') {
-      console.error('vehicle positions feed failed:', results[0].reason);
-    }
-    if (results[1]?.status === 'fulfilled') {
-      tripUpdates = decodeTripUpdates(results[1].value, timestamp);
-    } else if (results[1]?.status === 'rejected') {
-      console.error('trip updates feed failed:', results[1].reason);
-    }
-    return { timestamp, vehicles, tripUpdates };
+    if (tuResult.status === 'fulfilled') tripUpdates = tuResult.value;
+    else console.error('trip updates feed failed:', tuResult.reason);
+    if (vpResult.status === 'fulfilled') vehiclePositions = vpResult.value;
+    else console.error('vehicle positions feed failed:', vpResult.reason);
+    return { timestamp, tripUpdates, vehiclePositions };
   }
 }

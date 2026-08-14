@@ -11,8 +11,18 @@ import type {
   TerminalSnapshot,
 } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
-import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeconds } from '../gtfs/time';
-import { buildDepartures, type OutboundDeparture, type RunRecord } from './headway';
+import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeconds, unixToServiceSeconds } from '../gtfs/time';
+import {
+  arrivalFact,
+  buildBlockChains,
+  buildDepartures,
+  buildTripEnds,
+  departureFact,
+  type BlockChains,
+  type FactSource,
+  type RunRecord,
+  type TripEnd,
+} from './headway';
 import { decideTriplets, type TripletDecision } from './dispatch';
 import { outboundRoutesAtTerminal, routeShortName } from './terminal';
 
@@ -36,16 +46,36 @@ interface RefreshContext {
 
 export class Engine {
   private ledger = new Map<string, RunRecord>();
+  private vehicleLastTrip = new Map<string, string>();
+  private blockChainsCache?: BlockChains;
+  private tripEndsCache?: Map<string, TripEnd>;
 
   constructor(
     private db: Database,
     private getConfig: () => AppConfig,
   ) {}
 
-  refresh(rt: RealtimeSnapshot, now: Date = new Date()): TerminalSnapshot[] {
+  invalidateStaticCaches(): void {
+    this.blockChainsCache = undefined;
+    this.tripEndsCache = undefined;
+  }
+
+  private blockChains(): BlockChains {
+    if (!this.blockChainsCache) this.blockChainsCache = buildBlockChains(this.db);
+    return this.blockChainsCache;
+  }
+
+  private tripEnds(): Map<string, TripEnd> {
+    if (!this.tripEndsCache) this.tripEndsCache = buildTripEnds(this.db);
+    return this.tripEndsCache;
+  }
+
+  refresh(rt: RealtimeSnapshot, now: Date = new Date(), terminalIds?: Set<string>): TerminalSnapshot[] {
     const config = this.getConfig();
     const serviceDayStartSeconds = getServiceDayStart(this.db);
     const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds);
+    this.recordFacts(rt, nowSvc, serviceDayStartSeconds);
+
     const activeDate = activeServiceDate(now, serviceDayStartSeconds);
     const ctx: RefreshContext = {
       rt,
@@ -57,9 +87,12 @@ export class Engine {
       generatedAt: Math.floor(now.getTime() / 1000),
     };
 
+    const wanted = terminalIds ?? new Set(config.terminals.map((t) => t.id));
+    const blockChains = this.blockChains();
     const snapshots: TerminalSnapshot[] = [];
     for (const terminal of config.terminals) {
-      const routes = this.buildRouteStates(terminal, ctx);
+      if (!wanted.has(terminal.id)) continue;
+      const routes = this.buildRouteStates(terminal, ctx, blockChains);
       if (routes.length === 0) continue;
       snapshots.push({
         terminalId: terminal.id,
@@ -71,7 +104,83 @@ export class Engine {
     return snapshots;
   }
 
-  private buildRouteStates(terminal: Terminal, ctx: RefreshContext): RouteState[] {
+  private recordArrival(tripId: string, at: number, source: FactSource): void {
+    const record = this.ledger.get(tripId) ?? {};
+    if (record.arrivalSource === 'vp') return;
+    if (record.arrivalSeconds !== undefined && source === 'tu') return;
+    if (record.arrivalSeconds === at && record.arrivalSource === source) return;
+    record.arrivalSeconds = at;
+    record.arrivalSource = source;
+    this.ledger.set(tripId, record);
+  }
+
+  private recordDeparture(tripId: string, at: number, source: FactSource): void {
+    const record = this.ledger.get(tripId) ?? {};
+    if (record.departureSource === 'vp') return;
+    if (record.departureSeconds !== undefined && source === 'tu') return;
+    if (record.departureSeconds === at && record.departureSource === source) return;
+    record.departureSeconds = at;
+    record.departureSource = source;
+    this.ledger.set(tripId, record);
+  }
+
+  private recordFacts(rt: RealtimeSnapshot, nowSvc: number, serviceDayStartSeconds: number): void {
+    const chains = this.blockChains();
+    const ends = this.tripEnds();
+
+    for (const vp of rt.vehiclePositions) {
+      if (!vp.tripId) continue;
+      const end = ends.get(vp.tripId);
+      if (!end) continue;
+      const vpSeconds = Math.min(
+        unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds),
+        nowSvc,
+      );
+
+      const atLastStop =
+        vp.stopId === end.lastStopId || vp.currentStopSequence === end.lastStopSequence;
+      if (atLastStop) {
+        const nextTripId = chains.nextTrip.get(vp.tripId);
+        if (nextTripId) this.recordArrival(nextTripId, vpSeconds, 'vp');
+      }
+
+      const pastFirstStop =
+        !atLastStop &&
+        ((vp.currentStopSequence !== undefined && vp.currentStopSequence > end.firstStopSequence) ||
+          (vp.stopId !== undefined && vp.stopId !== end.firstStopId));
+      if (pastFirstStop) this.recordDeparture(vp.tripId, vpSeconds, 'vp');
+
+      const lastTrip = this.vehicleLastTrip.get(vp.vehicleId);
+      if (lastTrip && lastTrip !== vp.tripId) {
+        this.recordDeparture(lastTrip, vpSeconds, 'vp');
+      }
+      this.vehicleLastTrip.set(vp.vehicleId, vp.tripId);
+    }
+
+    for (const tu of rt.tripUpdates) {
+      const end = ends.get(tu.tripId);
+      if (!end) continue;
+
+      const dep = departureFact(tu, end.firstStopId, end.firstDeparture, serviceDayStartSeconds, nowSvc);
+      if (dep.departed && dep.departureSeconds !== undefined) {
+        this.recordDeparture(tu.tripId, dep.departureSeconds, 'tu');
+      }
+
+      const nextTripId = chains.nextTrip.get(tu.tripId);
+      if (nextTripId) {
+        const arr = arrivalFact(tu, end.lastStopId, end.lastArrival, serviceDayStartSeconds);
+        if (arr.predicted <= nowSvc) {
+          this.recordArrival(nextTripId, arr.predicted, 'tu');
+        }
+      }
+    }
+  }
+
+  private buildRouteStates(
+    terminal: Terminal,
+    ctx: RefreshContext,
+    blockChains: BlockChains,
+  ): RouteState[] {
     const config = this.getConfig();
     const routeIds =
       terminal.routeIds ??
@@ -91,14 +200,12 @@ export class Engine {
         lookaheadSeconds: ctx.lookaheadSeconds,
         serviceDayStartSeconds: ctx.serviceDayStartSeconds,
         minRestSeconds: ctx.minRestSeconds,
-        layoverProximityMeters: config.layoverProximityMeters,
         activeServiceIds: ctx.activeServiceIds,
         rt: ctx.rt,
         ledger: this.ledger,
+        blockChains,
       });
       if (departures.length === 0) continue;
-
-      this.recordFacts(ctx, departures);
 
       const decisions = decideTriplets(departures, {
         nowSvc: ctx.nowSvc,
@@ -195,22 +302,6 @@ export class Engine {
       });
     }
     return states;
-  }
-
-  private recordFacts(ctx: RefreshContext, departures: OutboundDeparture[]): void {
-    for (const departure of departures) {
-      let record = this.ledger.get(departure.tripId);
-      if (!record) {
-        record = {};
-        this.ledger.set(departure.tripId, record);
-      }
-      if (record.arrivalSeconds === undefined && departure.predictedArrival <= ctx.nowSvc) {
-        record.arrivalSeconds = departure.predictedArrival;
-      }
-      if (record.departureSeconds === undefined && departure.departureObs.departed) {
-        record.departureSeconds = departure.departureObs.departureSeconds ?? ctx.nowSvc;
-      }
-    }
   }
 
   private lockHold(tripId: string, decision: TripletDecision): void {

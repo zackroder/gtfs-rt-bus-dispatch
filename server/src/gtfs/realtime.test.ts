@@ -13,41 +13,6 @@ function encodeFeed(header: transit_realtime.IFeedHeader, entities: object[]): B
 }
 
 describe('realtime decode', () => {
-  it('normalizes VehiclePositions into VehiclePosition DTOs', () => {
-    const buffer = encodeFeed(
-      { gtfsRealtimeVersion: '2.0', timestamp: 1700000000 },
-      [
-        {
-          id: 'vp1',
-          vehicle: {
-            trip: { tripId: 'T1', routeId: '1' },
-            vehicle: { id: 'V1' },
-            position: { latitude: 41.8, longitude: -87.6 },
-            currentStopSequence: 3,
-            stopId: 'B',
-            timestamp: 1700000001,
-          },
-        },
-        {
-          id: 'vp2',
-          vehicle: { vehicle: { id: 'V9' }, position: { latitude: 41.7, longitude: -87.5 } },
-        },
-      ],
-    );
-
-    const vehicles = decodeVehiclePositions(buffer, 1700000000);
-    expect(vehicles).toHaveLength(2);
-    expect(vehicles[0]!.vehicleId).toBe('V1');
-    expect(vehicles[0]!.tripId).toBe('T1');
-    expect(vehicles[0]!.routeId).toBe('1');
-    expect(vehicles[0]!.stopId).toBe('B');
-    expect(vehicles[0]!.stopSequence).toBe(3);
-    expect(vehicles[0]!.lat).toBeCloseTo(41.8, 5);
-    expect(vehicles[0]!.lon).toBeCloseTo(-87.6, 5);
-    expect(vehicles[0]!.timestamp).toBe(1700000001);
-    expect(vehicles[1]).toMatchObject({ vehicleId: 'V9', tripId: undefined });
-  });
-
   it('normalizes TripUpdates into TripUpdateInfo DTOs', () => {
     const buffer = encodeFeed(
       { gtfsRealtimeVersion: '2.0', timestamp: 1700000000 },
@@ -99,5 +64,50 @@ describe('realtime decode', () => {
       { id: 'x', tripUpdate: { trip: { routeId: '1' }, stopTimeUpdate: [{ stopId: 'A', stopSequence: 1 }] } },
     ]);
     expect(decodeTripUpdates(buffer, 0)).toHaveLength(0);
+  });
+
+  it('normalizes VehiclePositions into VehiclePositionInfo DTOs', () => {
+    const buffer = encodeFeed(
+      { gtfsRealtimeVersion: '2.0', timestamp: 1700000000 },
+      [
+        {
+          id: 'vp1',
+          vehicle: {
+            vehicle: { id: 'V1' },
+            trip: { tripId: 'T1', routeId: '1' },
+            position: { latitude: 41.88, longitude: -87.63 },
+            currentStopSequence: 12,
+            stopId: 'STOP12',
+            timestamp: 1700000005,
+          },
+        },
+        {
+          id: 'vp-minimal',
+          vehicle: {
+            vehicle: { id: 'V2' },
+            timestamp: 1700000006,
+          },
+        },
+        { id: 'noop' },
+      ],
+    );
+
+    const positions = decodeVehiclePositions(buffer, 1700000000);
+    expect(positions).toEqual([
+      {
+        vehicleId: 'V1',
+        tripId: 'T1',
+        stopId: 'STOP12',
+        currentStopSequence: 12,
+        timestamp: 1700000005,
+      },
+      {
+        vehicleId: 'V2',
+        tripId: undefined,
+        stopId: undefined,
+        currentStopSequence: undefined,
+        timestamp: 1700000006,
+      },
+    ]);
   });
 });
