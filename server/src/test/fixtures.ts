@@ -19,6 +19,7 @@ export interface TripSpec {
 export interface RouteSpec {
   routeId: string;
   shortName: string;
+  type?: number;
 }
 
 export interface StopSpec {
@@ -42,7 +43,7 @@ export function syntheticGtfs(opts: {
     agencyId: 'TEST',
     shortName: r.shortName,
     longName: r.shortName,
-    type: 3,
+    type: r.type ?? 3,
   }));
   const stops = (opts.stops ?? [
     { stopId: 'T', name: 'Terminal' },

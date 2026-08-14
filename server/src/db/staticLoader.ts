@@ -39,6 +39,17 @@ export function deriveBlockTrips(db: Database): void {
 }
 
 export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
+  const BUS_ROUTE_TYPE = 3;
+  const busRouteIds = new Set(
+    gtfs.routes.filter((r) => r.type === BUS_ROUTE_TYPE).map((r) => r.routeId),
+  );
+  const trips = gtfs.trips.filter((t) => busRouteIds.has(t.routeId));
+  const tripIds = new Set(trips.map((t) => t.tripId));
+  const stopTimes = gtfs.stopTimes.filter((st) => tripIds.has(st.tripId));
+  const usedStops = new Set(stopTimes.map((st) => st.stopId));
+  const stops = gtfs.stops.filter((s) => usedStops.has(s.stopId));
+  const routes = gtfs.routes.filter((r) => busRouteIds.has(r.routeId));
+
   const insertStop = db.prepare(
     `INSERT INTO stops (stop_id, stop_code, stop_name, parent_station, lat, lon) VALUES (?, ?, ?, ?, ?, ?)`,
   );
@@ -62,13 +73,13 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
   );
 
   const run = db.transaction(() => {
-    for (const stop of gtfs.stops) {
+    for (const stop of stops) {
       insertStop.run(stop.stopId, stop.stopCode ?? null, stop.stopName, stop.parentStation ?? null, stop.lat, stop.lon);
     }
-    for (const route of gtfs.routes) {
+    for (const route of routes) {
       insertRoute.run(route.routeId, route.agencyId ?? null, route.shortName, route.longName, route.type);
     }
-    for (const trip of gtfs.trips) {
+    for (const trip of trips) {
       insertTrip.run(
         trip.tripId,
         trip.routeId,
@@ -78,7 +89,7 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
         trip.headsign ?? null,
       );
     }
-    for (const st of gtfs.stopTimes) {
+    for (const st of stopTimes) {
       insertStopTime.run(
         st.tripId,
         st.stopSequence,

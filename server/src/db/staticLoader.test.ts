@@ -117,6 +117,50 @@ describe('staticLoader', () => {
     ]);
   });
 
+  it('drops non-bus routes and their trips, stop_times, and stops', () => {
+    const db = createDatabase(':memory:');
+    const gtfs = syntheticGtfs({
+      stops: [
+        { stopId: 'T', name: 'Terminal' },
+        { stopId: 'B', name: 'Far' },
+        { stopId: 'RAIL', name: 'Rail Platform' },
+      ],
+      routes: [
+        { routeId: 'BUS1', shortName: '72' },
+        { routeId: 'RED', shortName: 'Red Line', type: 1 },
+      ],
+      trips: [
+        {
+          tripId: 'BUST1',
+          routeId: 'BUS1',
+          stopTimes: [
+            { stopId: 'T', arr: '05:00:00', dep: '05:00:00' },
+            { stopId: 'B', arr: '05:30:00', dep: '05:30:00' },
+          ],
+        },
+        {
+          tripId: 'RAILT1',
+          routeId: 'RED',
+          stopTimes: [
+            { stopId: 'RAIL', arr: '05:00:00', dep: '05:00:00' },
+            { stopId: 'T', arr: '05:30:00', dep: '05:30:00' },
+          ],
+        },
+      ],
+    });
+    loadStatic(db, gtfs);
+
+    expect((db.prepare('SELECT COUNT(*) AS c FROM routes').get() as { c: number }).c).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM trips').get() as { c: number }).c).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS c FROM stop_times').get() as { c: number }).c).toBe(2);
+    expect(
+      (db.prepare(`SELECT COUNT(*) AS c FROM stops WHERE stop_id = 'RAIL'`).get() as { c: number }).c,
+    ).toBe(0);
+    expect(
+      (db.prepare(`SELECT COUNT(*) AS c FROM trips WHERE trip_id = 'RAILT1'`).get() as { c: number }).c,
+    ).toBe(0);
+  });
+
   it('does not chain trips without a block_id', () => {
     const db = createDatabase(':memory:');
     const gtfs = syntheticGtfs({
