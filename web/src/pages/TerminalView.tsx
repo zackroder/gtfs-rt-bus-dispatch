@@ -36,7 +36,12 @@ export default function TerminalView() {
       {snapshot ? (
         snapshot.routes.length > 0 ? (
           snapshot.routes.map((route) => (
-            <RouteGroup key={route.routeId} route={route} generatedAt={snapshot.generatedAt} />
+            <RouteGroup
+              key={route.routeId}
+              route={route}
+              generatedAt={snapshot.generatedAt}
+              serviceDayStartSeconds={snapshot.serviceDayStartSeconds}
+            />
           ))
         ) : (
           <p className="empty">No activity at this terminal right now.</p>

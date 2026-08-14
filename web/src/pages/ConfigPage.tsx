@@ -66,6 +66,7 @@ export default function ConfigPage() {
     ['Max hold (min)', 'maxHoldMinutes'],
     ['Lead time (min)', 'leadTimeMinutes'],
     ['Lookahead (min)', 'lookaheadMinutes'],
+    ['Layover proximity (m)', 'layoverProximityMeters'],
   ];
 
   return (

@@ -2,9 +2,10 @@ export function pad(value: number): string {
   return String(Math.max(0, value)).padStart(2, '0');
 }
 
-export function formatClock(serviceSeconds: number): string {
-  const hours = Math.floor(serviceSeconds / 3600) % 24;
-  const minutes = Math.floor((serviceSeconds % 3600) / 60);
+export function formatClock(serviceSeconds: number, serviceDayStartSeconds: number): string {
+  const wallClock = ((serviceSeconds + serviceDayStartSeconds) % 86400 + 86400) % 86400;
+  const hours = Math.floor(wallClock / 3600);
+  const minutes = Math.floor((wallClock % 3600) / 60);
   return `${pad(hours)}:${pad(minutes)}`;
 }
 
