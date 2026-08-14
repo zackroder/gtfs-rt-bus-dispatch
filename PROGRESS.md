@@ -12,6 +12,7 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 4 — API + WebSocket
 - [x] Phase 5 — Web frontend
 - [x] Phase 6 — Config UI + deployment polish
+- [x] Phase 7 — Triplet dispatch refactor
 
 ---
 
@@ -110,6 +111,56 @@ this file (and the decisions log) after finishing any milestone.
 
 ---
 
+## Phase 7 — Triplet dispatch refactor (complete)
+
+Replace the leader/follower + threshold rules with the triplet/EDT model. The
+business logic must live **only** in `server/src/engine/dispatch.ts` (pure, no
+I/O) so it can be reviewed and unit-tested in isolation.
+
+### 7.1 Types + config
+- [x] `shared/types.ts`: drop `gapFactor`/`bunchFactor`/`holdFraction` from
+      `AppConfig` + `appConfigSchema`; simplify `HoldOverride` (drop `rule`);
+      replace the `InterventionRule` union with `'hold'`; add
+      `LayoverBus.terminalArrival`, `expectedDeparture`, `restDelayed`; drop
+      `minRestAdvisory`.
+- [x] `server/src/config.ts`: remove the three factors from defaults.
+- [x] `server/src/api/routes.test.ts`: remove the three factors + the
+      `gapFactor: 100` case.
+
+### 7.2 Core logic (the reviewed artifact)
+- [x] Create `server/src/engine/dispatch.ts` with pure functions:
+      `expectedDepartureTime`, `holdSeconds`, `decideTriplets` (per
+      IMPLEMENTATION §8.5).
+- [x] Create `server/src/engine/dispatch.test.ts` (per IMPLEMENTATION §11).
+- [x] Delete `server/src/engine/interventions.ts` + `interventions.test.ts`.
+
+### 7.3 Engine plumbing
+- [x] Add an in-memory run ledger to `engine.ts` (arrival/departure/hold facts
+      keyed by `tripId`), carried across refreshes.
+- [x] Rework `headway.ts`: compute terminal arrival (predicted inbound vs
+      recorded layover) and EDT; classify `incoming|layover|departed`; sort by
+      effective departure; expose EDT + effective departure to the core.
+- [x] Wire `engine.ts` to call `decideTriplets`, attach locked holds, and emit
+      a single `hold` intervention + `restDelayed`/`expectedDeparture` on
+      layovers.
+- [x] Rewrite `engine.test.ts` for the new model (worked example, propagation,
+      boundaries, rest-delay, lock).
+
+### 7.4 Web
+- [x] `LayoverCard`: show `expectedDeparture`; struck-through scheduled + red
+      EDT when `restDelayed`; countdown targets `predictedDeparture`.
+- [x] `InterventionCard`: single `hold` case ("Hold <vehicle> until hh:mm").
+- [x] `ConfigPage`: remove the three factor inputs.
+- [x] `web/src/index.css`: drop `.gap_alert`/`.min_rest` styles; add rest-delay
+      styling.
+
+### 7.5 Verify
+- [x] `npm run typecheck`, `npm run lint`, `npm test` all pass.
+- [x] No remaining references to `gapFactor`/`bunchFactor`/`holdFraction`/
+      `hold_leader`/`hold_follower`/`gap_alert`/`min_rest`/`minRestAdvisory`.
+
+---
+
 ## Decisions log
 
 - **2026-08-13 — Stack**: Node/TypeScript full stack (Express +
@@ -164,6 +215,26 @@ this file (and the decisions log) after finishing any milestone.
   optional scalars to 0. Delay fields keep 0 (on-time); absolute `time` fields
   treat 0 as absent (never a real POSIX timestamp). Lat/lon are 32-bit floats
   (small precision loss).
+- **2026-08-14 — Triplet dispatch model**: replace leader/follower pair rules
+  with a single triplet rule. The decision subject is the middle bus; hold =
+  `min(max((H_b - H_f)/2, 0), max_hold)`, where `H_b` = gap to the follower
+  (behind) and `H_f` = gap to the leader (ahead). `gap_alert` and the min-rest
+  intervention are dropped.
+- **2026-08-14 — Expected departure time (EDT)**: the core of every decision.
+  `EDT = max(scheduledDeparture, terminalArrival + minRest)`. Requires recording
+  terminal arrival (and actual departure for departed leaders).
+- **2026-08-14 — Record arrivals/departures**: in-memory run ledger keyed by
+  `tripId`; resets on restart (pilot limitation; SQLite persistence later).
+- **2026-08-14 — Lock holds at decision time**: once a hold is issued within
+  the lead window (measured from EDT, not scheduled), freeze `{ holdSeconds,
+  until }` until the bus departs; no re-derivation. Holds propagate
+  left-to-right via the locked `until`.
+- **2026-08-14 — Rest-delay in UI**: when `EDT > scheduled` (late arrival +
+  rest), show the scheduled time struck through with the EDT in red; no
+  separate advisory.
+- **2026-08-14 — Config simplification**: removed `gapFactor`, `bunchFactor`,
+  `holdFraction` (unused by the new formula). Keep `minRestMinutes`,
+  `maxHoldMinutes`, `leadTimeMinutes`, `lookaheadMinutes`.
 
 ## Build notes
 
@@ -173,7 +244,13 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Next steps
 
-1. Seed a real CTA API key + run `npm run dev` against live feeds.
-2. Optional: expose `vehiclePosition.stopId`-based ETA (currently delay-based).
-3. Optional: re-solve holds iteratively across multiple pairs.
-4. Optional: co-located multi-route terminal view in the UI.
+1. Implement Phase 7 (triplet dispatch refactor) — hand off to a worker agent;
+   see the checklist above plus IMPLEMENTATION.md §8.5 and README "How dispatch
+   decisions work".
+2. Seed a real CTA API key + run `npm run dev` against live feeds.
+3. Optional: expose `vehiclePosition.stopId`-based ETA (currently delay-based).
+4. Optional: persist the run ledger to SQLite so arrival/departure facts survive
+   restarts.
+5. Optional: re-lock a hold only when the recomputed value drifts beyond a small
+   threshold (e.g. 1 min) before departure.
+6. Optional: co-located multi-route terminal view in the UI.
