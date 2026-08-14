@@ -34,6 +34,7 @@ function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
     maxHoldMinutes: 10,
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
+    layoverProximityMeters: 300,
     terminals: [],
   };
 }
@@ -46,7 +47,12 @@ export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
     return config;
   }
   const parsed: unknown = JSON.parse(saved);
-  return appConfigSchema.parse(parsed);
+  const config = appConfigSchema.parse(parsed);
+  if (!config.realtime.apiKey && env.CTA_API_KEY) {
+    config.realtime.apiKey = env.CTA_API_KEY;
+    setSetting(db, 'appConfig', config);
+  }
+  return config;
 }
 
 export function applyConfig(db: Database, current: AppConfig, next: AppConfig): AppConfig {

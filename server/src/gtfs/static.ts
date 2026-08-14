@@ -20,25 +20,42 @@ export interface GtfsStaticOptions {
   force?: boolean;
 }
 
-export async function downloadStatic(url: string, cachePath?: string): Promise<Buffer> {
-  if (cachePath && !fs.existsSync(cachePath)) {
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`GTFS static download failed: ${res.status} ${res.statusText}`);
-    }
-    const buffer = Buffer.from(await res.arrayBuffer());
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(cachePath, buffer);
-    return buffer;
-  }
-  if (cachePath) {
-    return fs.readFileSync(cachePath);
-  }
+function isZip(buffer: Buffer): boolean {
+  return (
+    buffer.length >= 4 &&
+    buffer[0] === 0x50 &&
+    buffer[1] === 0x4b &&
+    (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07)
+  );
+}
+
+async function fetchZip(url: string): Promise<Buffer> {
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`GTFS static download failed: ${res.status} ${res.statusText}`);
   }
-  return Buffer.from(await res.arrayBuffer());
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (!isZip(buffer)) {
+    throw new Error(
+      `GTFS static download did not return a zip file (${buffer.length} bytes received); ` +
+        `check the URL or place a valid zip at the cache path`,
+    );
+  }
+  return buffer;
+}
+
+export async function downloadStatic(url: string, cachePath?: string): Promise<Buffer> {
+  if (cachePath && fs.existsSync(cachePath)) {
+    const cached = fs.readFileSync(cachePath);
+    if (isZip(cached)) return cached;
+    fs.unlinkSync(cachePath);
+  }
+  const buffer = await fetchZip(url);
+  if (cachePath) {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, buffer);
+  }
+  return buffer;
 }
 
 function readCsv(zip: AdmZip, name: string): Array<Record<string, string>> {
