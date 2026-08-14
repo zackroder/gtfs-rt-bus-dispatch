@@ -114,12 +114,17 @@ export interface TripUpdateInfo {
 export interface IncomingBus {
   routeId: string;
   routeShortName: string;
-  tripId: string;
+  tripId: string;             // current inbound trip
   vehicleId?: string;
   scheduledArrival: number;   // service-day seconds
   predictedArrival: number;   // service-day seconds
   etaSeconds: number;         // predictedArrival - nowSvc (>= 0)
   delaySeconds: number;       // predictedArrival - scheduledArrival
+  nextTripId: string;         // outbound trip the vehicle will operate next
+  nextDestination: string;    // last stop name of the next trip (not headsign)
+  scheduledDeparture: number; // service-day seconds of the next trip
+  expectedDeparture: number;  // EDT of the next trip
+  restDelayed?: boolean;      // true when EDT > scheduledDeparture
 }
 
 export interface HoldOverride {
@@ -134,12 +139,25 @@ export interface LayoverBus {
   tripId: string;             // next outbound trip (from block chain)
   vehicleId?: string;
   scheduledDeparture: number; // service-day seconds
-  terminalArrival: number;    // service-day seconds (recorded, or predicted if inbound)
+  scheduledArrival: number;   // scheduled terminal arrival of previous trip in block
+  terminalArrival: number;    // recorded arrival (VP fact, else TU prediction); 0 if unknown
   expectedDeparture: number;  // EDT = max(scheduled, arrival + minRest)
   predictedDeparture: number; // effective: held time if held, else EDT
   countdownSeconds: number;   // predictedDeparture - nowSvc (timer target)
   hold?: HoldOverride;
   restDelayed?: boolean;      // true when EDT > scheduledDeparture
+}
+
+export interface DepartedBus {
+  routeId: string;
+  routeShortName: string;
+  tripId: string;
+  vehicleId?: string;
+  headsign?: string;          // last stop name of the departed trip (not headsign)
+  scheduledDeparture: number; // service-day seconds
+  departureSeconds: number;   // recorded actual departure
+  held?: boolean;             // departure left under a locked hold
+  currentStop?: string;       // stop name the vehicle is at now (from VP)
 }
 
 export type InterventionRule = 'hold';
@@ -163,6 +181,7 @@ export interface RouteState {
   routeShortName: string;
   incoming: IncomingBus[];
   layovers: LayoverBus[];
+  departed: DepartedBus[];
   interventions: Intervention[];
 }
 
@@ -479,11 +498,16 @@ because each center's locked `until` feeds the next triplet's leader reference.
 
 For each terminal: group by route; build `RouteState`:
 
-- `incoming` = `state === 'incoming'` (ETA = predicted arrival − nowSvc).
-- `layovers` = `state === 'layover'`, with `expectedDeparture` (EDT),
-  `predictedDeparture` (held `until` if held, else EDT), `restDelayed` flag,
-  and `hold`.
-- `departed` buses are omitted (not shown).
+- `incoming` = `state === 'incoming'` — `scheduledArrival`, `predictedArrival`,
+  `etaSeconds`, `delaySeconds`, plus the next outbound trip (`nextTripId`,
+  `nextDestination` = last stop name, `scheduledDeparture`, `expectedDeparture`).
+- `layovers` = `state === 'layover'`, with `scheduledArrival` (previous trip's
+  scheduled terminal arrival), `terminalArrival` (recorded), `expectedDeparture`
+  (EDT), `predictedDeparture` (held `until` if held, else EDT), `restDelayed`
+  flag, and `hold`.
+- `departed` = `state === 'departed'` within the recent window (30 min), with
+  `scheduledDeparture`, recorded `departureSeconds`, `held` (left under a locked
+  hold), `headsign` (last stop name), and `currentStop` (from VP when available).
 - `countdownSeconds = predictedDeparture - nowSvc` (targets the effective
   departure: held time if held, else EDT).
 
@@ -504,11 +528,13 @@ For each terminal: group by route; build `RouteState`:
 Mobile-first (max-width container, large tap targets). `react-router-dom`:
 
 - `/` -> `Terminals.tsx`: list terminals grouped by route; tap to open.
-- `/terminal/:id` -> `TerminalView.tsx`: sections per route — **Incoming**
-  (route, run, `Countdown` to ETA, delay badge), **Laying over** (route,
-  vehicle, `Countdown` to scheduled departure, hold badge if held), and
-  **Interventions** (`InterventionCard`: "Hold <vehicle> until hh:mm (+N min)"
-  + reason).
+- `/terminal/:id` -> `TerminalView.tsx`: sections per route — **Inbound
+  vehicles** (scheduled + estimated arrival, estimated red when late, next-trip
+  destination and departure), **Laying over** (recorded vs scheduled arrival
+  with late arrival red, expected vs scheduled departure, `Countdown`, hold
+  badge if held), **Recently departed** (recorded vs scheduled departure,
+  purple when held, destination and current stop from VP), and **Interventions**
+  (`InterventionCard`: "Hold <vehicle> until hh:mm (+N min)" + reason).
 
 `hooks/useCountdown(seconds)` ticks every second and renders `MM:SS`
 (color: green > 2 min, amber 0-2 min, red < 0).
@@ -546,8 +572,9 @@ Header shows last-updated time and data-source status.
 2. `npm run dev` loads CTA static (or synthetic fixture), polls GTFS-RT, and
    serves the UI.
 3. Terminal auto-discovery produces a list grouped by route.
-4. Terminal view shows incoming ETA, layover expected-departure countdowns
-   (with struck-through scheduled time for rest-delayed buses), and hold badges.
+4. Terminal view shows inbound scheduled/estimated arrivals, layover
+   recorded/scheduled arrivals with countdowns, recently-departed actual/scheduled
+   departures (purple when held) with current stops, and hold badges.
 5. Triplet holds are emitted per §8.5 (EDT + `(H_b - H_f)/2`, floor + cap),
    locked at decision time, and covered by tests.
 6. `PUT /api/config` updates rules live; persisted in SQLite.

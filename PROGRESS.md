@@ -283,6 +283,16 @@ I/O) so it can be reviewed and unit-tested in isolation.
   stop_times → now-unused stops. CTA rail (type 1) never enters SQLite, so
   terminal discovery and engine queries are bus-only. Existing DBs pick this
   up on the next static reload.
+- **2026-08-14 — Terminal card polish**: destinations come from the trip's
+  last stop name (extended `trip_ends` with a `stops` join) instead of the
+  headsign, which was unreliable. Layover cards now show recorded vs scheduled
+  terminal arrival (red when late) and expected vs scheduled departure; inbound
+  cards dropped the countdown in favor of scheduled vs estimated arrival (red
+  when late); recently-departed cards show actual vs scheduled departure,
+  purple when the trip left under a locked hold (`DepartedBus.held`), plus the
+  vehicle's current stop resolved from VP (`stopId`, else `tripId` +
+  `currentStopSequence` → stop_times). Stop names are cached in the engine
+  (`stopNamesCache`, invalidated on static reload).
 
 ## Build notes
 

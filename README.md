@@ -20,11 +20,14 @@ rather than letting it pile into one.
 ## Features
 
 - **Terminal selector** — pick a terminal, grouped/sorted by route.
-- **Incoming view** — buses inbound to the terminal with ETA and delay.
-- **Layover view** — buses resting at the terminal with their *expected*
-  departure time and a live **min:sec countdown**; a late-arriving bus shows
-  its scheduled time struck through with the rest-delayed expected time in red,
-  and a held bus shows a hold badge.
+- **Inbound view** — buses inbound to the terminal showing scheduled vs
+  estimated arrival (red when late) and the next trip's destination/departure.
+- **Layover view** — buses resting at the terminal showing recorded vs
+  scheduled arrival (red when late), expected vs scheduled departure, a live
+  **min:sec countdown**, and a hold badge when held.
+- **Recently departed** — buses that just left, with actual vs scheduled
+  departure time (purple when a hold was applied), their destination, and the
+  stop they're currently at (from VehiclePositions).
 - **Interventions** — recommended holds ("hold vehicle X until hh:mm") with a
   human-readable reason, issued ~5 minutes before the bus's expected departure.
 - **Live refresh** — regular GTFS-RT polling, pushed to the UI over WebSocket.
@@ -114,14 +117,14 @@ held by this rule.
 ## Countdown timer
 
 Every bus laying over at a terminal shows a live **min:sec countdown** to its
-*expected* departure time (EDT), color-coded green (on track), amber (within
-lead time), red (overdue). If a late arrival pushed the EDT past the scheduled
-departure, the scheduled time is shown struck through with the EDT in red
-(e.g. `~~14:10~~ 14:16`). A bus under a locked hold shows the hold as an
-explicit badge on top — e.g. `held +2:30 → departs 14:32` — so rest-delays,
-on-time tracking, and hold recommendations stay visually distinct. The
-countdown targets the bus's effective departure: its held time if held,
-otherwise its EDT.
+*effective* departure time (held `until` if held, else EDT), color-coded green
+(on track), amber (within lead time), red (overdue). Cards show scheduled and
+actual times side by side: the layover's recorded terminal arrival against its
+scheduled arrival (red when late), its expected departure against the
+scheduled one, and a held bus shows the hold as an explicit badge — e.g.
+`held +2:30 → departs 14:32`. Inbound buses show scheduled vs estimated arrival
+(no countdown) and recently-departed buses show actual vs scheduled departure,
+with the departure in purple when it left under a hold.
 
 ## Architecture
 
