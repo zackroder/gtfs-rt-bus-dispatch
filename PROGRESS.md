@@ -235,6 +235,54 @@ I/O) so it can be reviewed and unit-tested in isolation.
 - **2026-08-14 — Config simplification**: removed `gapFactor`, `bunchFactor`,
   `holdFraction` (unused by the new formula). Keep `minRestMinutes`,
   `maxHoldMinutes`, `leadTimeMinutes`, `lookaheadMinutes`.
+- **2026-08-14 — On-demand refresh (complete)**: replaced the full-scan refresh
+  (all 258 terminals every tick, ~10s of sync DB work blocking the event loop)
+  with subscribe-based on-demand refresh: a global GTFS-RT fetch loop + per-tick
+  compute of only subscribed terminals. Cost scales with open views, not total
+  terminals. WS clients send `subscribe`/`unsubscribe`; `GET /terminals/:id`
+  computes on demand.
+- **2026-08-14 — Block chains are static**: `block_trips(block_id, seq,
+  trip_id, …)` already stores the trip chain at GTFS load; the next/prev lookup
+  maps must not be rebuilt per refresh. Cached in the Engine (with a static
+  `trip_ends` first/last-stop index), invalidated on static reload.
+- **2026-08-14 — Global fact pass**: arrival/departure facts for the run ledger
+  are recorded every tick for all terminals (not just viewed ones) by joining
+  the TripUpdates feed against the static `trip_ends` + block-chain index — no
+  per-trip DB queries. This keeps "recently departed" correct even for
+  terminals never viewed.
+- **2026-08-14 — Drop VehiclePositions**: the vehicle-position verification
+  layer (300m geofence layover confirm/drop, stopSequence departure fallback,
+  vehicle→trip assignment) is removed; the engine relies solely on TripUpdates.
+  Simplifies to "predicted arrival has passed → layover". Also drops one feed
+  fetch/decode, the `layoverProximityMeters` config, and the `CTA_VP_URL` env.
+- **2026-08-14 — WAL checkpoint**: `PRAGMA wal_checkpoint(TRUNCATE)` after
+  static load and on boot. A 635MB uncheckpointed WAL left behind by a killed
+  process was making every DB query ~2.4x slower (full scan 10.1s → 4.25s).
+- **2026-08-14 — Departure detection (TripUpdates only)**: CTA's TripUpdates
+  feed omits stops a vehicle has already served. So "departed" = the terminal
+  (first) stop is absent from the trip update, or its departure time is in the
+  past; a future departure time is a *prediction*, so the bus is still laying
+  over. Fixes the inversion where laying-over buses showed as "recently
+  departed" (with future times) and departed buses showed as "laying over".
+- **2026-08-14 — VehiclePositions as fact source (partial revert)**:
+  TripUpdates-only fact recording was inaccurate for arrivals: CTA drops the
+  last stop once served, so arrivals were never recorded for buses already in
+  layover; and the recorded value was a smoothed prediction, not an
+  observation. VP is now the primary source for arrival/departure *facts*:
+  a vehicle on trip T observed at T's last stop (stopId or stopSequence)
+  records arrival for `nextTrip(T)` at the VP timestamp (clamped to now);
+  sequence/stopId advancing past T's first stop (or a tripId flip) records
+  T's departure. TU heuristics remain as fallback and TU is still the source
+  for *predictions* (incoming ETA). Priority: VP overrides TU, never the
+  reverse; first-write-wins within each source (`RunRecord.arrivalSource`/
+  `departureSource`). VP fetch is parallel to TU; `CTA_VP_URL` env +
+  `realtime.vehiclePositionsUrl` config (backfilled for saved configs).
+
+- **2026-08-14 — Bus-only static load**: `loadStatic` filters GTFS to
+  `route_type = 3` (bus) and cascades: rail routes → their trips → their
+  stop_times → now-unused stops. CTA rail (type 1) never enters SQLite, so
+  terminal discovery and engine queries are bus-only. Existing DBs pick this
+  up on the next static reload.
 
 ## Build notes
 
@@ -254,3 +302,8 @@ I/O) so it can be reviewed and unit-tested in isolation.
 5. Optional: re-lock a hold only when the recomputed value drifts beyond a small
    threshold (e.g. 1 min) before departure.
 6. Optional: co-located multi-route terminal view in the UI.
+7. **Known gap (on-demand refresh)**: arrival facts for a bus that never appears
+   in TripUpdates (no realtime data) are not locked into the ledger; such a bus's
+   EDT falls back to scheduled. "Recently departed" is now recorded globally and
+   is correct for all terminals. Minor: persists ledger to SQLite to survive
+   restarts (see next step 4).

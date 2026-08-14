@@ -2,3 +2,4 @@ node_modules/
 dist/
 data/
 .env
+server/src/_diag.ts

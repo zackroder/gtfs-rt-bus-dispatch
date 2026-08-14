@@ -230,13 +230,14 @@ Local testing: `npm run dev`.
   by more than a small threshold (e.g. 1 min).
 - Actual arrival/departure recording is in-memory for the life of the process
   and resets on restart (pilot limitation; SQLite persistence is future work).
-- Actual departure is inferred from realtime (TripUpdates terminal departure,
-  falling back to the first VehiclePositions sample on the outbound trip), so it
-  is approximate.
+- Actual arrival/departure is recorded from VehiclePositions (vehicle observed
+  at a trip's terminal stop, sequence advancing past the first stop, or a
+  tripId flip), with TripUpdates predictions as fallback; accuracy is bounded
+  by feed freshness and the refresh interval.
 - The first and last departures in a route have no neighbor on one side and are
   never held by the triplet rule.
-- ETA from VehiclePositions (when TripUpdates lack a terminal prediction) is a
-  simple delay-based estimate.
+- ETA when TripUpdates lack a terminal prediction is a simple delay-based
+  estimate.
 - Multiple-route co-located terminal view is a future UI feature (data model
   already supports it).
 - Service-day start is auto-detected from GTFS stop_times (see `gtfs/time.ts`);
