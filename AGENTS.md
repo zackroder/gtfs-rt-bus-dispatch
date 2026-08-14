@@ -63,9 +63,9 @@ server/                     # Node + TypeScript backend
       gtfsrt.ts             # default GTFS-RT provider implementation
     engine/
       terminal.ts           # terminal resolution: incoming vs layover buses
-      headway.ts            # ordered outbound departures, leader/follower pairs
-      interventions.ts      # hold rules (leader hold, anti-bunching, gap, min-rest)
-      engine.ts             # orchestrates refresh -> normalized snapshot
+      headway.ts            # ordered outbound departures + terminal arrival/EDT inputs
+      dispatch.ts           # CORE dispatch logic: EDT + triplet headway hold (single source of truth)
+      engine.ts             # orchestrates refresh + run ledger -> normalized snapshot
     api/
       routes.ts             # REST endpoints
       ws.ts                 # websocket broadcast of snapshots

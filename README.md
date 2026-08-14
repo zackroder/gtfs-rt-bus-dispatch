@@ -8,96 +8,120 @@ manager can tell an operator to hold their bus and smooth headways.
 ## Problem
 
 At a bus terminal, consecutive outbound departures on a route should be evenly
-spaced (regular headways). In practice:
+spaced (regular headways). In practice, inbound trips arrive unevenly, so a
+bus's *expected* departure drifts from its schedule.
 
-- The **leader** is at the terminal, ready to depart on its next outbound trip.
-- Its **follower** is still inbound and running late. The follower will be late
-  for *its* outbound trip, even after its mandatory minimum rest.
-
-If the leader departs on time, the gap behind it becomes huge (a "gap" in
-service). If we hold the leader for part of the follower's lateness, we split
-the delay across both buses and keep headways more even.
+If every bus departs strictly on schedule (or as soon as its rest is up), a late
+bus leaves a large gap behind it and the buses behind it bunch up. We smooth
+this by holding the **middle** bus of each triplet for half the difference
+between its two adjacent headways — spreading the delay across multiple gaps
+rather than letting it pile into one.
 
 ## Features
 
 - **Terminal selector** — pick a terminal, grouped/sorted by route.
 - **Incoming view** — buses inbound to the terminal with ETA and delay.
-- **Layover view** — buses currently resting at the terminal with their
-  scheduled departure time and a live **min:sec countdown** (hold overrides
-  shown as a badge).
+- **Layover view** — buses resting at the terminal with their *expected*
+  departure time and a live **min:sec countdown**; a late-arriving bus shows
+  its scheduled time struck through with the rest-delayed expected time in red,
+  and a held bus shows a hold badge.
 - **Interventions** — recommended holds ("hold vehicle X until hh:mm") with a
-  human-readable reason, surfaced 5+ minutes before the leader's departure.
+  human-readable reason, issued ~5 minutes before the bus's expected departure.
 - **Live refresh** — regular GTFS-RT polling, pushed to the UI over WebSocket.
-- **Configurable rules** — rest minimum, hold fraction, max hold, lead time,
-  thresholds, feed URLs/keys.
+- **Configurable rules** — minimum rest, maximum hold, lead time, lookahead,
+  feed URLs/keys.
 
-## Intervention rules
+## How dispatch decisions work
 
-All rules run on the ordered set of outbound departures for a route at a
-terminal, pairing each departure with the vehicle operating it (via GTFS
-`block_id` trip chaining + realtime trip assignment).
+We reason in terms of **triplets** of consecutive outbound departures at a
+terminal, and make the decision for the **middle** bus from its two adjacent
+headways.
 
-Both hold rules are the same mechanism — intentionally delaying a bus at the
-terminal — targeted at different buses depending on which direction the
-headway error runs:
+### Expected departure time (EDT)
 
-| Condition | Problem | Action |
-| --- | --- | --- |
-| follower late | service gap (headway too big) | hold **leader** |
-| follower early / leader late | bunching (headway too small) | hold **follower** |
-
-Leader hold sacrifices an on-time leader's punctuality to split the follower's
-lateness across two gaps; follower hold delays a bus that is ready to depart
-so it doesn't platoon. Thresholds are relative to each pair's **scheduled
-headway** `H = F_d - L_d`, so they scale with route and time of day:
+Every bus has an **expected departure time** — the earliest moment it should
+leave the terminal:
 
 ```
-P = predicted_depart(follower) - predicted_depart(leader)   # predicted headway
-if P > gap_factor   * H -> hold leader   by min(hold_fraction * (P - H), max_hold)
-if P < bunch_factor * H -> hold follower by min(bunch_factor * H - P,  max_hold)
+EDT = max(scheduledDeparture, terminalArrival + minRestMinutes)
 ```
 
-If the leader has already departed, a gap can no longer be fixed by holding —
-that downgrades to a passive gap alert (rule 3).
+- `terminalArrival` is the bus's *recorded* arrival at the terminal — a fact
+  once it has arrived, a TripUpdates prediction while it is still inbound.
+- If arrival + mandatory rest leaves room before the scheduled departure, the
+  bus waits and departs on schedule. Otherwise it departs late: `EDT >
+  scheduled`, and the bus is **rest-delayed**.
 
-### 1. Hold leader (headway smoothing) — primary
+### Triplets and headways
 
-For a leader/follower pair with scheduled departures `L_d` and `F_d`:
+For three consecutive buses — **leader** (earliest), **center**, and
+**follower** (latest) — measure two headways:
 
-1. Follower lateness: `P - H = predicted_departure(follower) - F_d`.
-2. If `P > gap_factor * H` (a real gap is opening) and
-   `now >= L_d - lead_time` and the leader is physically at the terminal:
-   - `hold = min(hold_fraction * (P - H), max_hold)`.
-   - Recommend: "Hold leader until `L_d + hold`".
-3. Reason: splitting the follower's lateness across both buses smooths the
-   headway instead of letting a gap form behind the leader.
+```
+H_f = center − leader     # forward headway (gap ahead, toward the leader)
+H_b = follower − center   # backward headway (gap behind, toward the follower)
+```
 
-### 2. Hold follower (anti-bunching)
+```
+        H_f (ahead)             H_b (behind)
+   ┌────────────┐   ┌────────────┐   ┌────────────┐
+   │   leader   │   │   center   │   │  follower  │
+   └────────────┘   └────────────┘   └────────────┘
+        L                  C                  F
+        └─ center − leader ─┘└─ follower − center ─┘
+```
 
-If `P < bunch_factor * H` (the follower is early relative to the leader, or the
-leader was held/delayed so the follower catches up), recommend holding the
-follower by `min(bunch_factor * H - P, max_hold)`.
+The leader's time is its *actual* recorded departure once it has left (else its
+EDT); the center's and follower's are their EDTs.
 
-### 3. Gap alert (passive)
+### The hold
 
-If a gap exceeds `gap_factor * H` but the leader has already departed (so it
-can no longer be held), flag the gap so a manager can consider inserting a
-spare. No automatic hold is issued.
+About `leadTimeMinutes` before the center's *expected* departure, evaluate the
+triplet and hold the center by:
 
-### 4. Minimum-rest advisory (passive)
+```
+hold = min( max((H_b − H_f) / 2, 0), maxHoldMinutes )
+```
 
-If a bus's predicted layover at the terminal is less than `min_rest`, surface a
-warning that the operator may depart without the required rest.
+- The inner `max(…, 0)` only delays — it never dispatches a bus early.
+- The outer `min(…, maxHoldMinutes)` caps any hold at the configured ceiling.
+
+Holding the center delays it, shrinking the gap to its follower while widening
+the gap to its leader — exactly what evens the two headways when `H_b > H_f`.
+Once issued, a hold is **locked**: the manager sees a stable instruction until
+the bus actually departs, and the held departure feeds forward as the *leader*
+reference for the next triplet.
+
+This deliberately minimizes *excess* wait: equalizing adjacent headways spreads
+a given lump of delay across more passengers instead of letting it pile into a
+single gap.
+
+### Example
+
+Scheduled departures `1:00, 1:10, 1:20, 1:30`; inbound trips finish late, so
+the initial EDTs are `1:05, 1:12, 1:23, 1:30` (buses 1–4):
+
+1. **Bus 2** (center, EDT `1:12`): leader bus 1 departed `1:05`; follower bus 3
+   EDT `1:23`. So `H_f = 1:12 − 1:05 = 7` and `H_b = 1:23 − 1:12 = 11`.
+   Hold `(11 − 7)/2 = 2` minutes → bus 2 departs `1:14` (headways now `9`/`9`).
+2. **Bus 3** (center, EDT `1:23`): leader bus 2 now departs `1:14`; follower
+   bus 4 EDT `1:30`. So `H_f = 1:23 − 1:14 = 9` and `H_b = 1:30 − 1:23 = 7`.
+   Hold `max((7 − 9)/2, 0) = 0` → bus 3 departs on time `1:23`.
+
+Bus 1 (first) and bus 4 (last) have no neighbor on one side, so they are never
+held by this rule.
 
 ## Countdown timer
 
 Every bus laying over at a terminal shows a live **min:sec countdown** to its
-next trip's *scheduled* departure (from its `block_id` chain), color-coded:
-green (on track), amber (within lead time), red (overdue). A bus under an
-active hold shows the hold as an explicit badge on top of the scheduled time —
-e.g. `held +2:30 -> departs 14:32` — so on-time tracking and hold
-recommendations stay visually distinct. This lets a manager both nudge
-operators toward on-time departures and act on holds in the same view.
+*expected* departure time (EDT), color-coded green (on track), amber (within
+lead time), red (overdue). If a late arrival pushed the EDT past the scheduled
+departure, the scheduled time is shown struck through with the EDT in red
+(e.g. `~~14:10~~ 14:16`). A bus under a locked hold shows the hold as an
+explicit badge on top — e.g. `held +2:30 → departs 14:32` — so rest-delays,
+on-time tracking, and hold recommendations stay visually distinct. The
+countdown targets the bus's effective departure: its held time if held,
+otherwise its EDT.
 
 ## Architecture
 
@@ -167,12 +191,9 @@ SQLite. Env vars only seed the initial defaults.
 | `CTA_API_KEY` | — | Required; GTFS-RT API key (appended as `?key=`) |
 | `refresh_interval_seconds` | 10 | Realtime poll interval |
 | `static_refresh_hours` | 24 | Re-load static GTFS |
-| `min_rest_minutes` | 5 | Mandatory operator rest |
-| `gap_factor` | 1.5 | Gap threshold as a multiple of scheduled headway |
-| `bunch_factor` | 0.5 | Bunch threshold as a multiple of scheduled headway |
-| `hold_fraction` | 0.5 | Fraction of excess lateness to hold the leader |
+| `min_rest_minutes` | 5 | Mandatory operator rest (used in EDT) |
 | `max_hold_minutes` | 10 | Absolute ceiling on any hold |
-| `lead_time_minutes` | 5 | Warn this far before leader departure |
+| `lead_time_minutes` | 5 | Evaluate a hold this far before expected departure |
 | `lookahead_minutes` | 90 | Horizon of departures to consider |
 | `terminals` | auto-discovered | `[{ id, name, stop_ids[], route_ids[]? }]` |
 
@@ -203,8 +224,17 @@ Local testing: `npm run dev`.
 
 ## Known limitations / future work
 
-- Hold propagation across multiple pairs is computed independently (no
-  iterative re-solve). Refine in a later phase.
+- Holds are decided in a single left-to-right pass and locked once issued; a
+  locked hold is not re-solved even if conditions change before departure. A
+  possible future refinement is to re-lock only when the recomputed hold drifts
+  by more than a small threshold (e.g. 1 min).
+- Actual arrival/departure recording is in-memory for the life of the process
+  and resets on restart (pilot limitation; SQLite persistence is future work).
+- Actual departure is inferred from realtime (TripUpdates terminal departure,
+  falling back to the first VehiclePositions sample on the outbound trip), so it
+  is approximate.
+- The first and last departures in a route have no neighbor on one side and are
+  never held by the triplet rule.
 - ETA from VehiclePositions (when TripUpdates lack a terminal prediction) is a
   simple delay-based estimate.
 - Multiple-route co-located terminal view is a future UI feature (data model

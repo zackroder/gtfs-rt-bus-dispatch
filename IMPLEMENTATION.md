@@ -49,9 +49,9 @@ server/src/
   providers/types.ts       # RealtimeProvider interface (§7)
   providers/gtfsrt.ts      # GTFS-RT adapter (§7)
   engine/terminal.ts       # terminal resolution (§8.1)
-  engine/headway.ts        # departures, vehicle assignment, scheduled headway (§8.2)
-  engine/interventions.ts  # rules (§8.4)
-  engine/engine.ts         # orchestrator -> TerminalSnapshot[] (§8.5)
+  engine/headway.ts        # departures, vehicle assignment, EDT inputs (§8.2–8.3)
+  engine/dispatch.ts       # CORE dispatch logic: EDT + triplet hold (§8.5)
+  engine/engine.ts         # orchestrator + run ledger -> TerminalSnapshot[] (§8.4, §8.6)
   api/routes.ts            # REST (§9)
   api/ws.ts                # WebSocket broadcast (§9)
 web/src/
@@ -124,8 +124,7 @@ export interface IncomingBus {
 
 export interface HoldOverride {
   holdSeconds: number;        // additional seconds
-  effectiveDeparture: number; // service-day seconds (scheduled + hold)
-  rule: 'leader' | 'follower';
+  effectiveDeparture: number; // service-day seconds (EDT + hold)
   reason: string;
 }
 
@@ -135,24 +134,25 @@ export interface LayoverBus {
   tripId: string;             // next outbound trip (from block chain)
   vehicleId?: string;
   scheduledDeparture: number; // service-day seconds
-  predictedDeparture: number; // service-day seconds (incl. hold)
-  countdownSeconds: number;   // scheduledDeparture - nowSvc (timer target)
+  terminalArrival: number;    // service-day seconds (recorded, or predicted if inbound)
+  expectedDeparture: number;  // EDT = max(scheduled, arrival + minRest)
+  predictedDeparture: number; // effective: held time if held, else EDT
+  countdownSeconds: number;   // predictedDeparture - nowSvc (timer target)
   hold?: HoldOverride;
-  minRestAdvisory?: boolean;
+  restDelayed?: boolean;      // true when EDT > scheduledDeparture
 }
 
-export type InterventionRule =
-  | 'hold_leader' | 'hold_follower' | 'gap_alert' | 'min_rest';
+export type InterventionRule = 'hold';
 
 export interface Intervention {
   id: string;
   terminalId: string;
   routeId: string;
   rule: InterventionRule;
-  vehicleId?: string;         // the bus to hold / affected
+  vehicleId?: string;         // the center bus to hold
   leaderVehicleId?: string;
   followerVehicleId?: string;
-  holdSeconds: number;        // 0 for passive alerts
+  holdSeconds: number;
   reason: string;
   until?: number;             // service-day seconds
   generatedAt: number;        // unix seconds
@@ -181,12 +181,9 @@ export interface AppConfig {
   staticGtfsUrl: string;
   refreshIntervalSeconds: number;   // 10
   staticRefreshHours: number;       // 24
-  minRestMinutes: number;           // 5
-  gapFactor: number;                // 1.5
-  bunchFactor: number;              // 0.5
-  holdFraction: number;             // 0.5
-  maxHoldMinutes: number;           // 10
-  leadTimeMinutes: number;          // 5
+  minRestMinutes: number;           // 5  (mandatory rest in EDT)
+  maxHoldMinutes: number;           // 10 (ceiling on any hold)
+  leadTimeMinutes: number;          // 5  (evaluate before expected departure)
   lookaheadMinutes: number;         // 90
   terminals: Terminal[];            // auto-discovered, then editable
 }
@@ -366,9 +363,24 @@ file.
 
 ## 8. Engine algorithm
 
-`engine/engine.ts` exposes `async refresh(): Promise<TerminalSnapshot[]>`.
-Called by the scheduler on a `setInterval(refreshIntervalSeconds)`, and the
-snapshots are cached in memory + broadcast over WS + served by REST.
+`engine/engine.ts` exposes `refresh(rt, now): TerminalSnapshot[]`. On each tick
+it: computes `nowSvc`; builds the ordered departures per terminal/route; updates
+the in-memory run ledger with arrival/departure facts; calls the pure dispatch
+core; and assembles snapshots.
+
+### 8.0 Where the business logic lives (review this first)
+
+All decision math is centralized in **`server/src/engine/dispatch.ts`** — pure
+functions with no DB, realtime, or network I/O. It is the single source of
+truth for:
+
+- `expectedDepartureTime` — the EDT formula (§8.3).
+- `holdSeconds` — the headway-equalization formula with floor + cap (§8.5).
+- `decideTriplets` — the left-to-right pass over an ordered departure list.
+
+No other file may compute a hold or an EDT. To audit "why did we recommend this
+hold?", read `dispatch.ts` and its tests (`dispatch.test.ts`) — nothing else is
+needed.
 
 ### 8.1 Terminal resolution (`terminal.ts`)
 
@@ -401,65 +413,79 @@ departure trip T:
    realtime (rare).
 3. **Classify** the vehicle:
    - `incoming`: vehicle's current trip is `prevTrip(T)` and its predicted
-     arrival at S is in the future.
-   - `layover`: predicted arrival at S is in the past (or vehicle position is
-     at S with no active inbound trip). This bus gets a countdown + hold
-     evaluation.
-   - `unknown`: no realtime data — treat as `layover` with predicted =
-     scheduled (on-time assumption).
+     arrival at S is still in the future.
+   - `layover`: the vehicle has arrived at the terminal but not yet departed.
+   - `departed`: an actual departure has been recorded (§8.4).
 
-### 8.3 Predicted times
+Sort the list chronologically by **effective departure** (actual departure if
+`departed`, else the locked `until` if held, else EDT), not by scheduled time.
 
-`predictedArrival(V, terminalStop)`: prefer the inbound trip's
-`stop_time_update` for `terminalStop` — `arrivalTime` (absolute) else
-`scheduledArrival + arrivalDelay`; else trip-level `delay` applied to
-`scheduledArrival`; else `scheduledArrival`.
+### 8.3 Terminal arrival + expected departure (EDT)
 
-`predictedDeparture(V, T)` for a layover bus =
-`max(predictedArrival(V, S), nowSvc) + minRestMinutes*60`. For a bus already
-laid over with no realtime signal, use `scheduledDeparture`.
+`terminalArrival` for a departure's vehicle:
+
+- **incoming**: predicted arrival at the terminal from TripUpdates — prefer
+  `arrivalTime` (absolute), else `scheduledArrival + arrivalDelay`, else
+  trip-level `delay` (exactly today's `arrivalAtTerminal`).
+- **layover**: the *recorded* actual arrival (frozen in the run ledger once the
+  vehicle is at the terminal).
+
+```
+EDT = max(scheduledDeparture, terminalArrival + minRestMinutes*60)
+```
+
+A bus is **rest-delayed** when `EDT > scheduledDeparture`.
 
 ETA for an incoming bus = `predictedArrival - nowSvc`.
 
-### 8.4 Intervention rules (`interventions.ts`)
+### 8.4 Run ledger (in-memory)
 
-Inputs: ordered departures for a route at a terminal, each with
-`scheduledDeparture` (L_d, F_d) and `predictedDeparture`.
+A per-process map (keyed by `tripId`), carried across refreshes, that records
+terminal-arrival and departure **facts**:
 
-For each consecutive pair (leader L, follower F):
+- `arrivalSeconds` — frozen once a vehicle is observed at/past the terminal
+  (the last predicted arrival becomes the recorded arrival).
+- `departureSeconds` — the actual departure once observed (§8.5 detection).
+- `hold` — the locked `{ holdSeconds, until }` once decided.
 
-```
-H = F_d - L_d                              // scheduled headway
-P = predictedDeparture(F) - predictedDeparture(L)   // predicted headway
-```
+The ledger resets on process restart (pilot limitation; SQLite persistence is
+future work). Only `layover`/`departed` facts come from the ledger; `incoming`
+buses get fresh predictions each tick.
 
-Guard: if `H <= 0` (duplicate/back-to-back schedules), skip the pair (or
-floor H at a small epsilon; skipping is simpler).
+### 8.5 Dispatch core (`dispatch.ts`)
 
-- **hold_leader** (gap): if `P > gapFactor * H` AND leader is `layover` AND
-  `nowSvc >= L_d - leadTimeMinutes*60`:
-  `holdSeconds = min(holdFraction * (P - H), maxHoldMinutes*60)`.
-  Emit intervention targeting the leader, `until = L_d + holdSeconds`.
-  Attach `HoldOverride` to the leader's `LayoverBus`.
-- **hold_follower** (bunch): if `P < bunchFactor * H`:
-  `holdSeconds = min(bunchFactor*H - P, maxHoldMinutes*60)`.
-  Emit intervention targeting the follower.
-- **gap_alert**: if `P > gapFactor * H` AND leader has already departed
-  (`predictedDeparture(L) <= nowSvc` or `incoming`/gone): passive flag.
-- **min_rest**: for each layover bus, if
-  `predictedDeparture - predictedArrival < minRestMinutes*60`, set
-  `minRestAdvisory` + passive intervention.
+Pure, side-effect-free. Input: the chronologically ordered departure list (each
+with `state`, `terminalArrival`, `scheduledDeparture`, `EDT`, and any locked
+hold), plus `nowSvc`, `leadTimeMinutes`, `maxHoldMinutes`.
 
-Important: compute holds independently from raw predicted departures — do
-**not** cascade a held departure into subsequent pairs (documented
-limitation).
+For each center at index `i` in `[1, n-2]`:
 
-### 8.5 Snapshot assembly
+1. Skip if the center has already departed or already has a locked hold.
+2. **Trigger**: only if `nowSvc >= center.EDT - leadTimeMinutes*60`.
+3. Leader reference = effective departure of `i-1` (actual if departed, else
+   held `until`, else EDT). Follower reference = `EDT` of `i+1`.
+4. `H_f = center.EDT - leader`, `H_b = follower - center.EDT`.
+5. `holdSeconds = min(max((H_b - H_f)/2, 0), maxHoldMinutes*60)`.
+6. If `holdSeconds > 0`: lock `{ holdSeconds, until = center.EDT + holdSeconds }`
+   and emit the intervention. The locked `until` becomes the center's effective
+   departure for subsequent triplets and for the countdown.
 
-For each terminal: group by route, build `RouteState` (incoming sorted by ETA,
-layovers sorted by scheduled departure, interventions). Compute `nowSvc` once
-per refresh. Derive `countdownSeconds = scheduledDeparture - nowSvc` (the
-timer always targets scheduled time; the hold is a separate badge).
+Properties: the `max(…, 0)` floor means a bus is never dispatched early; the
+`min(…, maxHold)` ceiling bounds every hold. The first and last departures have
+no neighbor on one side and are never held. Holds propagate left-to-right
+because each center's locked `until` feeds the next triplet's leader reference.
+
+### 8.6 Snapshot assembly
+
+For each terminal: group by route; build `RouteState`:
+
+- `incoming` = `state === 'incoming'` (ETA = predicted arrival − nowSvc).
+- `layovers` = `state === 'layover'`, with `expectedDeparture` (EDT),
+  `predictedDeparture` (held `until` if held, else EDT), `restDelayed` flag,
+  and `hold`.
+- `departed` buses are omitted (not shown).
+- `countdownSeconds = predictedDeparture - nowSvc` (targets the effective
+  departure: held time if held, else EDT).
 
 ## 9. API + WebSocket
 
@@ -500,14 +526,19 @@ Header shows last-updated time and data-source status.
   `routes`, `trips`, `stop_times`, `calendar`).
 - `block_trips` derivation: chaining across a 2-trip block.
 - Realtime decode: synthetic `FeedMessage` protobuf -> normalized DTO.
+- `dispatch.test.ts` (pure, no DB):
+  - EDT: on-time (`scheduled` when `arrival + rest <= scheduled`) and
+    rest-delayed (`arrival + rest` when it exceeds scheduled).
+  - hold formula: floor at 0 and cap at `maxHoldMinutes`.
+  - triplet pass: the README worked example (holds 2 min then 0), left-to-right
+    propagation, first/last never held.
+  - trigger window measured from EDT; no fire before it opens.
+  - lock-at-decision: a locked hold is not re-derived on later ticks.
 - Engine (synthetic schedule + synthetic realtime):
-  - hold_leader fires when `P > 1.5H` within lead window; hold =
-    `0.5*(P-H)`, capped by `maxHoldMinutes`.
-  - hold_follower fires when `P < 0.5H`.
-  - no fire when leader already departed (gap_alert instead).
-  - no fire below thresholds.
-  - `min_rest` advisory when layover < rest.
-  - countdownSeconds = scheduled - now (not held departure).
+  - rest-delayed flag set when a late arrival pushes EDT past scheduled.
+  - departed leader uses its actual (recorded) departure in the triplet.
+  - incoming bus uses its predicted arrival in EDT.
+  - countdownSeconds = predictedDeparture - nowSvc (held time when held).
 
 ## 12. Definition of done
 
@@ -515,9 +546,10 @@ Header shows last-updated time and data-source status.
 2. `npm run dev` loads CTA static (or synthetic fixture), polls GTFS-RT, and
    serves the UI.
 3. Terminal auto-discovery produces a list grouped by route.
-4. Terminal view shows incoming ETA, layover countdowns, and hold badges.
-5. Leader/follower holds, gap alerts, and min-rest advisories are emitted per
-   the formulas in §8.4 and covered by tests.
+4. Terminal view shows incoming ETA, layover expected-departure countdowns
+   (with struck-through scheduled time for rest-delayed buses), and hold badges.
+5. Triplet holds are emitted per §8.5 (EDT + `(H_b - H_f)/2`, floor + cap),
+   locked at decision time, and covered by tests.
 6. `PUT /api/config` updates rules live; persisted in SQLite.
 7. `npm run build && npm start` serves the built web bundle from the server.
 
