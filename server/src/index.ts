@@ -1,8 +1,10 @@
-import 'dotenv/config';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import dotenv from 'dotenv';
 import express from 'express';
+
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 import { createDatabase } from './db/schema';
 import { applyConfig, loadConfig } from './config';
 import { loadStatic } from './db/staticLoader';
@@ -36,6 +38,17 @@ let lastRefreshAt: number | null = null;
 let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
 
+function discoverTerminals(): void {
+  if (config.terminals.length > 0) return;
+  const serviceDayStart = getServiceDayStart(db);
+  const now = new Date();
+  const active = activeServiceIds(db, activeServiceDate(now, serviceDayStart));
+  const terminals = autoDiscoverTerminals(db, active);
+  if (terminals.length > 0) {
+    config = applyConfig(db, config, { ...config, terminals });
+  }
+}
+
 async function ensureStaticLoaded(force = false): Promise<void> {
   const stopCount = (db.prepare('SELECT COUNT(*) AS c FROM stops').get() as { c: number }).c;
   const savedLoadedAt = getStaticLoadedAt(db);
@@ -43,7 +56,10 @@ async function ensureStaticLoaded(force = false): Promise<void> {
     savedLoadedAt !== null &&
     config.staticRefreshHours > 0 &&
     Date.now() - savedLoadedAt > config.staticRefreshHours * 3600 * 1000;
-  if (!force && stopCount > 0 && !stale) return;
+  if (!force && stopCount > 0 && !stale) {
+    discoverTerminals();
+    return;
+  }
 
   const providerInstance = new GtfsStaticProvider({
     url: config.staticGtfsUrl,
@@ -53,16 +69,7 @@ async function ensureStaticLoaded(force = false): Promise<void> {
   const gtfs = await providerInstance.load();
   loadStatic(db, gtfs);
   staticLoadedAt = getStaticLoadedAt(db);
-
-  if (config.terminals.length === 0) {
-    const serviceDayStart = getServiceDayStart(db);
-    const now = new Date();
-    const active = activeServiceIds(db, activeServiceDate(now, serviceDayStart));
-    const terminals = autoDiscoverTerminals(db, active);
-    if (terminals.length > 0) {
-      config = applyConfig(db, config, { ...config, terminals });
-    }
-  }
+  discoverTerminals();
 }
 
 async function refreshOnce(): Promise<void> {

@@ -5,6 +5,7 @@ export interface OutboundTripRow {
   tripId: string;
   stopId: string;
   departureTime: number;
+  headsign?: string;
 }
 
 export interface InboundTripRow {
@@ -30,7 +31,7 @@ export function outboundTrips(
   const rows = db
     .prepare(
       `
-      SELECT st.trip_id, st.stop_id, st.departure_time
+      SELECT st.trip_id, st.stop_id, st.departure_time, t.headsign
       FROM stop_times st
       JOIN trips t ON t.trip_id = st.trip_id AND t.route_id = ? AND t.service_id IN (${placeholders(serviceList.length)})
       WHERE st.stop_id IN (${placeholders(stopIds.length)})
@@ -43,8 +44,14 @@ export function outboundTrips(
     trip_id: string;
     stop_id: string;
     departure_time: number;
+    headsign: string | null;
   }>;
-  return rows.map((r) => ({ tripId: r.trip_id, stopId: r.stop_id, departureTime: r.departure_time }));
+  return rows.map((r) => ({
+    tripId: r.trip_id,
+    stopId: r.stop_id,
+    departureTime: r.departure_time,
+    headsign: r.headsign ?? undefined,
+  }));
 }
 
 export function inboundTrips(
@@ -116,7 +123,7 @@ export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string
   const rows = db
     .prepare(
       `
-      SELECT t.route_id, st.stop_id, st.stop_sequence, s.stop_name, s.lat, s.lon
+      SELECT t.route_id, t.direction_id, t.trip_id, st.stop_id, st.stop_sequence, s.stop_name, s.lat, s.lon
       FROM trips t
       JOIN stop_times st ON st.trip_id = t.trip_id
       JOIN stops s ON s.stop_id = st.stop_id
@@ -125,6 +132,8 @@ export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string
     )
     .all(...serviceList) as Array<{
     route_id: string;
+    direction_id: number | null;
+    trip_id: string;
     stop_id: string;
     stop_sequence: number;
     stop_name: string;
@@ -132,49 +141,107 @@ export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string
     lon: number;
   }>;
 
-  const firstStopByRoute = new Map<string, string>();
   const stopMeta = new Map<string, { name: string; lat: number; lon: number }>();
-  const byRoute = new Map<string, Map<string, number>>();
+  const tripFirstStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
+  const tripLastStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
   for (const row of rows) {
     if (!stopMeta.has(row.stop_id)) {
       stopMeta.set(row.stop_id, { name: row.stop_name, lat: row.lat, lon: row.lon });
     }
-    let stops = byRoute.get(row.route_id);
-    if (!stops) {
-      stops = new Map();
-      byRoute.set(row.route_id, stops);
+    const dir = row.direction_id === null ? '' : String(row.direction_id);
+    const current = tripFirstStop.get(row.trip_id);
+    if (!current || row.stop_sequence < current.seq) {
+      tripFirstStop.set(row.trip_id, {
+        stopId: row.stop_id,
+        routeId: row.route_id,
+        dir,
+        seq: row.stop_sequence,
+      });
     }
-    const current = stops.get(row.stop_id);
-    if (current === undefined || row.stop_sequence < current) {
-      stops.set(row.stop_id, row.stop_sequence);
+    const last = tripLastStop.get(row.trip_id);
+    if (!last || row.stop_sequence > last.seq) {
+      tripLastStop.set(row.trip_id, {
+        stopId: row.stop_id,
+        routeId: row.route_id,
+        dir,
+        seq: row.stop_sequence,
+      });
     }
   }
-  for (const [routeId, stops] of byRoute) {
-    let bestStop = '';
-    let bestSeq = Number.MAX_SAFE_INTEGER;
-    for (const [stopId, seq] of stops) {
-      if (seq < bestSeq) {
-        bestSeq = seq;
-        bestStop = stopId;
+
+  function countByKey(stops: Map<string, { stopId: string; routeId: string; dir: string; seq: number }>) {
+    const counts = new Map<string, Map<string, number>>();
+    for (const s of stops.values()) {
+      const key = `${s.routeId}:${s.dir}`;
+      let byStop = counts.get(key);
+      if (!byStop) {
+        byStop = new Map();
+        counts.set(key, byStop);
       }
+      byStop.set(s.stopId, (byStop.get(s.stopId) ?? 0) + 1);
     }
-    firstStopByRoute.set(routeId, bestStop);
+    return counts;
+  }
+
+  function modal(counts: Map<string, Map<string, number>>): Map<string, string | undefined> {
+    const result = new Map<string, string | undefined>();
+    for (const [key, byStop] of counts) {
+      let best: string | undefined;
+      let bestCount = -1;
+      for (const [stopId, count] of byStop) {
+        if (count > bestCount) {
+          bestCount = count;
+          best = stopId;
+        }
+      }
+      result.set(key, best);
+    }
+    return result;
+  }
+
+  const firstCounts = countByKey(tripFirstStop);
+  const lastCounts = countByKey(tripLastStop);
+  const modalFirst = modal(firstCounts);
+  const modalLast = modal(lastCounts);
+
+  const stopsByRoute = new Map<string, Set<string>>();
+  for (const [key, stopId] of modalFirst) {
+    const routeId = key.slice(0, key.lastIndexOf(':'));
+    if (!stopId || routeId === '') continue;
+    let stops = stopsByRoute.get(routeId);
+    if (!stops) {
+      stops = new Set();
+      stopsByRoute.set(routeId, stops);
+    }
+    stops.add(stopId);
+  }
+  for (const [key, stopId] of modalLast) {
+    const routeId = key.slice(0, key.lastIndexOf(':'));
+    if (!stopId || routeId === '') continue;
+    let stops = stopsByRoute.get(routeId);
+    if (!stops) {
+      stops = new Set();
+      stopsByRoute.set(routeId, stops);
+    }
+    stops.add(stopId);
   }
 
   const candidates = new Map<string, { name: string; lat: number; lon: number; routeIds: Set<string> }>();
-  for (const [routeId, stopId] of firstStopByRoute) {
-    let candidate = candidates.get(stopId);
-    if (!candidate) {
-      const meta = stopMeta.get(stopId);
-      candidate = {
-        name: meta?.name ?? stopId,
-        lat: meta?.lat ?? 0,
-        lon: meta?.lon ?? 0,
-        routeIds: new Set(),
-      };
-      candidates.set(stopId, candidate);
+  for (const [routeId, stopIds] of stopsByRoute) {
+    for (const stopId of stopIds) {
+      let candidate = candidates.get(stopId);
+      if (!candidate) {
+        const meta = stopMeta.get(stopId);
+        candidate = {
+          name: meta?.name ?? stopId,
+          lat: meta?.lat ?? 0,
+          lon: meta?.lon ?? 0,
+          routeIds: new Set(),
+        };
+        candidates.set(stopId, candidate);
+      }
+      candidate.routeIds.add(routeId);
     }
-    candidate.routeIds.add(routeId);
   }
 
   return Array.from(candidates.entries())

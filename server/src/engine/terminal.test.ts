@@ -59,6 +59,44 @@ describe('terminal resolution', () => {
     expect(depot!.routeIds).toEqual(['3']);
   });
 
+  it('discovers a terminal at each end of a route', () => {
+    const db = createDatabase(':memory:');
+    const gtfs = syntheticGtfs({
+      stops: [
+        { stopId: 'A', name: 'A' },
+        { stopId: 'B', name: 'B' },
+      ],
+      trips: [
+        {
+          tripId: 'OUT',
+          routeId: '1',
+          stopTimes: [
+            { stopId: 'A', arr: '08:00:00', dep: '08:00:00' },
+            { stopId: 'B', arr: '08:30:00', dep: '08:30:00' },
+          ],
+        },
+        {
+          tripId: 'IN',
+          routeId: '1',
+          stopTimes: [
+            { stopId: 'B', arr: '09:00:00', dep: '09:00:00' },
+            { stopId: 'A', arr: '09:30:00', dep: '09:30:00' },
+          ],
+        },
+      ],
+    });
+    loadStatic(db, gtfs);
+
+    const active = activeServiceIds(db, '20260813');
+    const terminals = autoDiscoverTerminals(db, active);
+    const atA = terminals.find((t) => t.id === 'A');
+    const atB = terminals.find((t) => t.id === 'B');
+    expect(atA).toBeDefined();
+    expect(atA!.routeIds).toEqual(['1']);
+    expect(atB).toBeDefined();
+    expect(atB!.routeIds).toEqual(['1']);
+  });
+
   it('resolves outbound and inbound trips per terminal stop', () => {
     const db = createDatabase(':memory:');
     const gtfs = syntheticGtfs({
