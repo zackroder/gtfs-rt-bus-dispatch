@@ -3,6 +3,7 @@ import { BusCard } from './BusCard';
 import { LayoverCard } from './LayoverCard';
 import { DepartedCard } from './DepartedCard';
 import { InterventionCard } from './InterventionCard';
+import { RouteBadge } from './RouteBadge';
 
 export function RouteGroup({
   route,
@@ -20,7 +21,14 @@ export function RouteGroup({
     route.interventions.length === 0;
   return (
     <section className="route-group">
-      <h2>Route {route.routeShortName}</h2>
+      <h2>
+        <RouteBadge
+          shortName={route.routeShortName}
+          color={route.color}
+          textColor={route.textColor}
+        />
+        {route.routeLongName && <span className="route-name">{route.routeLongName}</span>}
+      </h2>
       {route.layovers.length > 0 && (
         <div className="group">
           <h3>Laying over</h3>
@@ -53,6 +61,8 @@ export function RouteGroup({
             <BusCard
               key={`${bus.tripId}-${bus.vehicleId ?? ''}`}
               bus={bus}
+              routeColor={route.color}
+              routeTextColor={route.textColor}
               serviceDayStartSeconds={serviceDayStartSeconds}
             />
           ))}

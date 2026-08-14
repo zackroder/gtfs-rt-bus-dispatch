@@ -1,11 +1,16 @@
 import type { IncomingBus } from '../../../shared/types';
+import { RouteBadge } from './RouteBadge';
 import { formatClock } from '../format';
 
 export function BusCard({
   bus,
+  routeColor,
+  routeTextColor,
   serviceDayStartSeconds,
 }: {
   bus: IncomingBus;
+  routeColor?: string;
+  routeTextColor?: string;
   serviceDayStartSeconds: number;
 }) {
   const late = bus.predictedArrival > bus.scheduledArrival;
@@ -25,7 +30,13 @@ export function BusCard({
       </div>
       <div className="card-detail">
         <span className="next-trip">
-          Next trip: #{bus.routeShortName} to {bus.nextDestination}
+          Next trip:{' '}
+          <RouteBadge
+            shortName={bus.routeShortName}
+            color={routeColor}
+            textColor={routeTextColor}
+          />{' '}
+          to {bus.nextDestination}
         </span>
         <span className="departs">
           dep {formatClock(bus.expectedDeparture, serviceDayStartSeconds)} / sched{' '}

@@ -2,7 +2,14 @@ import type { AppConfig, Terminal, TerminalSnapshot } from '../../shared/types';
 
 export interface TerminalsResponse {
   terminals: Terminal[];
-  routes: Array<{ routeId: string; shortName: string; terminalIds: string[] }>;
+  routes: Array<{
+    routeId: string;
+    shortName: string;
+    longName?: string;
+    color?: string;
+    textColor?: string;
+    terminalIds: string[];
+  }>;
 }
 
 export interface Health {

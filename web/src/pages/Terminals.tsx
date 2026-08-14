@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getTerminals, type TerminalsResponse } from '../api';
+import { RouteBadge } from '../components/RouteBadge';
 
 export default function Terminals() {
   const [data, setData] = useState<TerminalsResponse | null>(null);
@@ -39,7 +40,14 @@ export default function Terminals() {
       <h1>Terminals</h1>
       {data.routes.map((route) => (
         <div key={route.routeId} className="route-group">
-          <h2>Route {route.shortName || route.routeId}</h2>
+          <h2>
+            <RouteBadge
+              shortName={route.shortName || route.routeId}
+              color={route.color}
+              textColor={route.textColor}
+            />
+            {route.longName && <span className="route-name">{route.longName}</span>}
+          </h2>
           {route.terminalIds.map((terminalId) => {
             const terminal = data.terminals.find((t) => t.id === terminalId);
             if (!terminal) return null;
