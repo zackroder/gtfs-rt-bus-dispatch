@@ -14,6 +14,7 @@ import { Engine } from './engine/engine';
 import { autoDiscoverTerminals } from './engine/terminal';
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
+import { InterventionStore } from './db/interventions';
 import {
   activeServiceDate,
   activeServiceIds,
@@ -23,6 +24,8 @@ import {
 import type { AppConfig, TerminalSnapshot } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';
 
+// The process owns one database, provider, engine, and refresh loop. HTTP and WS layers
+// call into these shared objects so snapshots and operational state stay consistent.
 const PORT = Number(process.env.PORT ?? 8080);
 const DB_PATH = process.env.DB_PATH ?? './data/dispatch.db';
 const STATIC_GTFS_PATH = process.env.STATIC_GTFS_PATH ?? './data/gtfs.zip';
@@ -35,7 +38,8 @@ try {
 }
 let config: AppConfig = loadConfig(db, process.env);
 
-const engine = new Engine(db, () => config);
+const interventions = new InterventionStore(db);
+const engine = new Engine(db, () => config, interventions);
 const provider = new GtfsRealtimeProvider(() => config.realtime);
 
 let latestRt: RealtimeSnapshot | null = null;
@@ -44,8 +48,11 @@ const subscriptions = new Map<string, number>();
 let lastRefreshAt: number | null = null;
 let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
+let refreshInFlight: Promise<void> | null = null;
+let staticLoadInFlight: Promise<void> | null = null;
 
 function discoverTerminals(): void {
+  // Discovery is only a first-run convenience; an explicit terminal configuration is preserved.
   if (config.terminals.length > 0) return;
   const serviceDayStart = getServiceDayStart(db);
   const now = new Date();
@@ -57,6 +64,15 @@ function discoverTerminals(): void {
 }
 
 async function ensureStaticLoaded(force = false): Promise<void> {
+  // Coalesce concurrent startup, reload, and request-triggered loads into one operation.
+  if (staticLoadInFlight) return staticLoadInFlight;
+  staticLoadInFlight = ensureStaticLoadedInternal(force).finally(() => {
+    staticLoadInFlight = null;
+  });
+  return staticLoadInFlight;
+}
+
+async function ensureStaticLoadedInternal(force = false): Promise<void> {
   const stopCount = (db.prepare('SELECT COUNT(*) AS c FROM stops').get() as { c: number }).c;
   const savedLoadedAt = getStaticLoadedAt(db);
   const stale =
@@ -64,6 +80,7 @@ async function ensureStaticLoaded(force = false): Promise<void> {
     config.staticRefreshHours > 0 &&
     Date.now() - savedLoadedAt > config.staticRefreshHours * 3600 * 1000;
   if (!force && stopCount > 0 && !stale) {
+    // Static tables are reusable until their configured refresh age is exceeded.
     discoverTerminals();
     return;
   }
@@ -86,25 +103,34 @@ async function ensureStaticLoaded(force = false): Promise<void> {
 }
 
 function computeTerminal(terminalId: string): TerminalSnapshot | undefined {
-  if (!latestRt) return snapshots.get(terminalId);
-  const fresh = engine.refresh(latestRt, new Date(), new Set([terminalId]));
-  const snapshot = fresh[0];
-  if (snapshot) snapshots.set(terminalId, snapshot);
-  return snapshot ?? snapshots.get(terminalId);
+  // HTTP reads can serve the latest cached snapshot, while an unknown configured terminal
+  // still returns undefined so the API can distinguish it from an empty snapshot.
+  const cached = snapshots.get(terminalId);
+  if (cached) return cached;
+  if (!config.terminals.some((terminal) => terminal.id === terminalId)) return undefined;
+  return {
+    terminalId,
+    generatedAt: 0,
+    serviceDayStartSeconds: getServiceDayStart(db),
+    routes: [],
+  };
 }
 
 function subscribe(terminalId: string): void {
   const count = (subscriptions.get(terminalId) ?? 0) + 1;
   subscriptions.set(terminalId, count);
   if (count === 1) {
-    const snapshot = computeTerminal(terminalId);
-    if (snapshot) broadcaster?.broadcast([snapshot]);
+    // The first interested client gets an immediate refresh instead of waiting for the timer.
+    void refreshOnce().catch((err: unknown) => {
+      console.error('subscription refresh failed:', err instanceof Error ? err.message : err);
+    });
   }
 }
 
 function unsubscribe(terminalId: string): void {
   const count = (subscriptions.get(terminalId) ?? 0) - 1;
   if (count <= 0) {
+    // Drop terminal-specific memory once no WS client can consume it.
     subscriptions.delete(terminalId);
     snapshots.delete(terminalId);
   } else {
@@ -112,23 +138,38 @@ function unsubscribe(terminalId: string): void {
   }
 }
 
-async function refreshOnce(): Promise<void> {
+async function refreshInternal(): Promise<void> {
+  if (staticLoadInFlight) await staticLoadInFlight;
   try {
     latestRt = await provider.fetch();
   } catch (err) {
     console.error('realtime fetch failed:', err instanceof Error ? err.message : err);
   }
   if (!latestRt) return;
+  // The engine always records facts globally, but only builds snapshots for subscribed terminals.
   const wanted = new Set(subscriptions.keys());
   const fresh = engine.refresh(latestRt, new Date(), wanted);
   for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
+  for (const terminalId of wanted) {
+    if (!fresh.some((snapshot) => snapshot.terminalId === terminalId)) snapshots.delete(terminalId);
+  }
   lastRefreshAt = Date.now();
   broadcaster?.broadcast(fresh);
+}
+
+async function refreshOnce(): Promise<void> {
+  // Serialization prevents overlapping polls from racing the in-memory ledger or broadcasts.
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshInternal().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
 }
 
 function scheduleRefresh(): void {
   const intervalMs = config.refreshIntervalSeconds * 1000;
   setTimeout(() => {
+    // Schedule the next tick after this one settles so slow feeds cannot create overlapping loops.
     refreshOnce()
       .catch((err: unknown) => {
         console.error('refresh failed:', err instanceof Error ? err.message : err);
@@ -149,6 +190,15 @@ app.use(
       return config;
     },
     computeTerminal,
+    interventions,
+    getVpDiagnostics: () => ({
+      generatedAt: Math.floor(Date.now() / 1000),
+      latestPollAt: latestRt?.timestamp ?? null,
+      latestPollAgeSeconds: latestRt ? Math.max(0, Math.floor(Date.now() / 1000) - latestRt.timestamp) : null,
+      observations: engine.getVehiclePositionDiagnostics(),
+      recentFacts: engine.getFactEventDiagnostics(),
+      provider: provider.getDiagnostics(),
+    }),
     getHealth: () => ({ ok: true, lastRefreshAt, staticLoadedAt }),
     reloadStatic: () => ensureStaticLoaded(true),
     refreshOnce,
@@ -165,7 +215,6 @@ if (fs.existsSync(webDist)) {
 
 const httpServer = http.createServer(app);
 broadcaster = setupWs(httpServer, {
-  getSnapshots: () => Array.from(snapshots.values()),
   subscribe,
   unsubscribe,
 });

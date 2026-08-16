@@ -1,6 +1,8 @@
 import type { ParsedStaticGtfs } from '../providers/types';
 import { detectServiceDayStart, parseGtfsTime } from '../gtfs/time';
 
+// These small specifications make engine tests readable while still exercising the same
+// normalized GTFS shapes used by the production static loader.
 export interface StopTimeSpec {
   stopId: string;
   arr: string;
@@ -35,11 +37,14 @@ function rawSeconds(time: string): number {
   return parsed;
 }
 
+// Build a deterministic in-memory GTFS fixture with an active calendar and detected clock origin.
 export function syntheticGtfs(opts: {
   routes?: RouteSpec[];
   stops?: StopSpec[];
   trips: TripSpec[];
 }): ParsedStaticGtfs {
+  // Fixtures use an always-active service and bus routes so tests focus on dispatch behavior,
+  // not on downloading or filtering a real agency feed.
   const routes = (opts.routes ?? [{ routeId: '1', shortName: '1' }]).map((r) => ({
     routeId: r.routeId,
     agencyId: 'TEST',

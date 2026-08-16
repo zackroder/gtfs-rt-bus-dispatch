@@ -8,6 +8,7 @@ import {
 } from './dispatch';
 import type { HoldOverride } from '../../../shared/types';
 
+// Dispatch fixtures use service-day seconds directly so each assertion isolates EDT/headway math.
 const MIN_REST = 300;
 const LEAD = 300;
 const MAX_HOLD = 600;
@@ -57,6 +58,8 @@ describe('holdSeconds', () => {
 });
 
 describe('decideTriplets', () => {
+  // Triplet fixtures deliberately include a departed leader and future followers to model the
+  // operational middle-bus recommendation rather than a generic spacing algorithm.
   it('reproduces the README worked example', () => {
     const departures = [
       dep({ tripId: 'D1', state: 'departed', departedSeconds: 300, edt: 300 }),
@@ -90,7 +93,7 @@ describe('decideTriplets', () => {
       dep({ tripId: 'D1', state: 'departed', departedSeconds: 0, edt: 0 }),
       dep({ tripId: 'D2', state: 'layover', edt: 300 }),
       dep({ tripId: 'D3', state: 'layover', edt: 550 }),
-      dep({ tripId: 'D4', state: 'layover', edt: 700 }),
+      dep({ tripId: 'D4', state: 'layover', edt: 820 }),
     ];
     const opts = { nowSvc: 100000, leadTimeSeconds: 0, maxHoldSeconds: MAX_HOLD };
 
@@ -102,8 +105,8 @@ describe('decideTriplets', () => {
       opts,
     );
     expect(ids(held)).toEqual(['D3']);
-    expect(held[0]!.holdSeconds).toBe(10);
-    expect(held[0]!.until).toBe(560);
+    expect(held[0]!.holdSeconds).toBe(60);
+    expect(held[0]!.until).toBe(610);
   });
 
   it('never holds the first or last departure', () => {
@@ -118,8 +121,18 @@ describe('decideTriplets', () => {
       leadTimeSeconds: 0,
       maxHoldSeconds: MAX_HOLD,
     });
-    expect(ids(decisions)).toEqual(['D2', 'D3']);
+    expect(ids(decisions)).toEqual(['D2']);
     expect(decisions.every((d) => d.tripId !== 'D1' && d.tripId !== 'D4')).toBe(true);
+  });
+
+  it('rounds holds to 30-second increments and suppresses holds under one minute', () => {
+    expect(holdSeconds(118, 0, MAX_HOLD)).toBe(0);
+    expect(holdSeconds(119, 0, MAX_HOLD)).toBe(0);
+    expect(holdSeconds(120, 0, MAX_HOLD)).toBe(60);
+    expect(holdSeconds(121, 0, MAX_HOLD)).toBe(60);
+    expect(holdSeconds(149, 0, MAX_HOLD)).toBe(60);
+    expect(holdSeconds(150, 0, MAX_HOLD)).toBe(90);
+    expect(holdSeconds(119, 0, 119)).toBe(0);
   });
 
   it('opens the trigger window from EDT, not scheduled', () => {

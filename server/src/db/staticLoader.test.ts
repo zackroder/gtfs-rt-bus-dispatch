@@ -4,6 +4,8 @@ import { deriveBlockTrips, loadStatic } from './staticLoader';
 import { syntheticGtfs } from '../test/fixtures';
 import { normalizeServiceSeconds } from '../gtfs/time';
 
+// Loader fixtures verify the atomic static-feed projection: bus filtering, normalized times,
+// derived block chains, and replacement on reload.
 describe('staticLoader', () => {
   it('round-trips synthetic GTFS into the SQLite tables', () => {
     const db = createDatabase(':memory:');

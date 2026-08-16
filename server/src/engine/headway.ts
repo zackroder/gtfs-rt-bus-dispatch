@@ -5,6 +5,8 @@ import { unixToServiceSeconds } from '../gtfs/time';
 import { effectiveDeparture, expectedDepartureTime } from './dispatch';
 import { outboundTrips } from './terminal';
 
+// Headway construction combines static departure order, realtime predictions, and persisted
+// VP/ TU run facts into the records consumed by the dispatch decision function.
 export type VehicleState = 'incoming' | 'layover' | 'departed';
 
 export const PAST_WINDOW_SECONDS = 30 * 60;
@@ -44,12 +46,13 @@ export interface OutboundDeparture {
   scheduledArrival: number;
   predictedArrival: number;
   terminalArrival?: number;
+  arrivalSource?: 'observed' | 'estimated';
+  arrivalForEdt?: number;
   edt: number;
   departedSeconds?: number;
   state: VehicleState;
   hold?: HoldOverride;
   hasArrivalInfo: boolean;
-  departureObs: { departed: boolean; departureSeconds?: number };
 }
 
 export interface BuildDeparturesOptions {
@@ -63,14 +66,23 @@ export interface BuildDeparturesOptions {
   rt: RealtimeSnapshot;
   ledger: Map<string, RunRecord>;
   blockChains?: BlockChains;
+  tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>;
+  arrivalCache?: Map<string, ArrivalAtStop>;
 }
 
-export function buildBlockChains(db: Database): BlockChains {
+// Build predecessor/successor links for trips assigned to the same block.
+export function buildBlockChains(db: Database, activeServiceIds?: Set<string>): BlockChains {
   const nextTrip = new Map<string, string>();
   const prevTrip = new Map<string, string>();
+  const serviceList = activeServiceIds ? Array.from(activeServiceIds) : [];
+  if (activeServiceIds && serviceList.length === 0) return { nextTrip, prevTrip };
+  // An optional service filter keeps block relationships from crossing into another service date.
+  const filter = serviceList.length > 0
+    ? `WHERE service_id IN (${serviceList.map(() => '?').join(',')})`
+    : '';
   const rows = db
-    .prepare(`SELECT block_id, trip_id FROM block_trips ORDER BY block_id, seq`)
-    .all() as Array<{ block_id: string; trip_id: string }>;
+    .prepare(`SELECT block_id, trip_id FROM block_trips ${filter} ORDER BY block_id, seq`)
+    .all(...serviceList) as Array<{ block_id: string; trip_id: string }>;
   let lastBlock = '';
   let lastTrip = '';
   for (const row of rows) {
@@ -84,6 +96,7 @@ export function buildBlockChains(db: Database): BlockChains {
   return { nextTrip, prevTrip };
 }
 
+// Cache each trip's first and last scheduled stop for VP state inference and display labels.
 export function buildTripEnds(db: Database): Map<string, TripEnd> {
   const rows = db
     .prepare(
@@ -125,38 +138,18 @@ export function buildTripEnds(db: Database): Map<string, TripEnd> {
   return ends;
 }
 
-export function departureFact(
-  tu: TripUpdateInfo,
-  stopId: string,
-  scheduled: number,
-  serviceDayStartSeconds: number,
-  nowSvc: number,
-): { departed: boolean; departureSeconds?: number } {
-  const terminal = tu.stopTimeUpdates
-    .filter((u) => u.stopId === stopId)
-    .sort((a, b) => b.stopSequence - a.stopSequence)[0];
-  if (!terminal) {
-    return { departed: tu.stopTimeUpdates.length > 0 };
-  }
-  if (terminal.departureTime !== undefined && terminal.departureTime > 0) {
-    const departureSeconds = unixToServiceSeconds(terminal.departureTime, serviceDayStartSeconds);
-    return { departed: departureSeconds <= nowSvc, departureSeconds };
-  }
-  if (terminal.departureDelay !== undefined) {
-    const departureSeconds = scheduled + terminal.departureDelay;
-    return { departed: departureSeconds <= nowSvc, departureSeconds };
-  }
-  return { departed: false };
-}
-
+// Derive one terminal arrival prediction using the most specific available TU field.
 export function arrivalFact(
   tu: TripUpdateInfo,
   stopId: string,
+  stopSequence: number,
   scheduled: number,
   serviceDayStartSeconds: number,
 ): { predicted: number; known: boolean } {
+  // Prefer an absolute predicted arrival, then stop delay, then trip delay. A missing value
+  // remains unknown rather than pretending the schedule is an observed arrival.
   const matching = tu.stopTimeUpdates
-    .filter((u) => u.stopId === stopId)
+    .filter((u) => u.stopId === stopId || u.stopSequence === stopSequence)
     .sort((a, b) => b.stopSequence - a.stopSequence);
   const update = matching[0];
   if (update?.arrivalTime !== undefined) {
@@ -174,18 +167,20 @@ export function arrivalFact(
   return { predicted: scheduled, known: false };
 }
 
-interface ArrivalAtStop {
+export interface ArrivalAtStop {
   scheduled: number;
   predicted: number;
   known: boolean;
 }
 
+// Look up a trip's scheduled terminal arrival and apply its realtime prediction when available.
 export function arrivalAtTerminal(
   db: Database,
   rt: RealtimeSnapshot,
   tripId: string,
   stopIds: string[],
   serviceDayStartSeconds: number,
+  tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
 ): ArrivalAtStop {
   const placeholders = stopIds.map(() => '?').join(',');
   const rows = db
@@ -204,30 +199,21 @@ export function arrivalAtTerminal(
   const last = rows[rows.length - 1]!;
   const scheduled = last.arrival_time ?? last.departure_time;
 
-  const tripUpdate = rt.tripUpdates.find((u) => u.tripId === tripId);
+  const tripUpdate = tripUpdatesById?.get(tripId) ?? rt.tripUpdates.find((u) => u.tripId === tripId);
+  // A terminal prediction is only useful when the TU identifies the corresponding trip.
   if (!tripUpdate) return { scheduled, predicted: scheduled, known: false };
 
-  const fact = arrivalFact(tripUpdate, last.stop_id, scheduled, serviceDayStartSeconds);
+  const fact = arrivalFact(
+    tripUpdate,
+    last.stop_id,
+    last.stop_sequence,
+    scheduled,
+    serviceDayStartSeconds,
+  );
   return { scheduled, predicted: fact.predicted, known: fact.known };
 }
 
-export function departureObserved(
-  rt: RealtimeSnapshot,
-  tripId: string,
-  stopIds: string[],
-  scheduledDeparture: number,
-  serviceDayStartSeconds: number,
-  nowSvc: number,
-): { departed: boolean; departureSeconds?: number } {
-  const update = rt.tripUpdates.find((u) => u.tripId === tripId);
-  if (!update || update.stopTimeUpdates.length === 0) return { departed: false };
-  const terminal = update.stopTimeUpdates
-    .filter((u) => stopIds.includes(u.stopId))
-    .sort((a, b) => b.stopSequence - a.stopSequence)[0];
-  if (!terminal) return { departed: true };
-  return departureFact(update, terminal.stopId, scheduledDeparture, serviceDayStartSeconds, nowSvc);
-}
-
+// Construct ordered outbound departures with vehicle assignment, state, arrival, and EDT fields.
 export function buildDepartures(db: Database, opts: BuildDeparturesOptions): OutboundDeparture[] {
   const outbound = outboundTrips(
     db,
@@ -249,7 +235,12 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   for (const [trip, vehicle] of tripToVehicle) vehicleToTrip.set(vehicle, trip);
   const vpTripByVehicle = new Map<string, string>();
   for (const vp of opts.rt.vehiclePositions) {
-    if (vp.vehicleId && vp.tripId) vpTripByVehicle.set(vp.vehicleId, vp.tripId);
+    // VP is the stronger assignment signal when TU and VP disagree; TU remains a fallback
+    // for feeds that omit a trip from the vehicle-position entity.
+    if (vp.vehicleId && vp.tripId) {
+      vpTripByVehicle.set(vp.vehicleId, vp.tripId);
+      if (!tripToVehicle.has(vp.tripId)) tripToVehicle.set(vp.tripId, vp.vehicleId);
+    }
   }
 
   const departures: OutboundDeparture[] = [];
@@ -260,18 +251,24 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const currentTrip = vehicleId
       ? (vpTripByVehicle.get(vehicleId) ?? vehicleToTrip.get(vehicleId))
       : undefined;
+    const currentTripFromVp = vehicleId !== undefined && vpTripByVehicle.has(vehicleId);
 
     let scheduledArrival = ob.departureTime;
     let predictedArrival = ob.departureTime;
     let hasArrivalInfo = false;
     if (prevTripId) {
-      const arrival = arrivalAtTerminal(
+      // The outbound bus may still be on its previous block leg. Its terminal arrival is the
+      // input to EDT and to the incoming/layover classification.
+      const cacheKey = `${prevTripId}|${opts.terminal.stopIds.join(',')}`;
+      const arrival = opts.arrivalCache?.get(cacheKey) ?? arrivalAtTerminal(
         db,
         opts.rt,
         prevTripId,
         opts.terminal.stopIds,
         opts.serviceDayStartSeconds,
+        opts.tripUpdatesById,
       );
+      opts.arrivalCache?.set(cacheKey, arrival);
       scheduledArrival = arrival.scheduled;
       predictedArrival = arrival.predicted;
       hasArrivalInfo = arrival.known;
@@ -280,26 +277,17 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const record = opts.ledger.get(ob.tripId);
     const onPrevLeg =
       vehicleId !== undefined && prevTripId !== undefined && currentTrip === prevTripId;
-    const onOutboundLeg = vehicleId !== undefined && currentTrip === ob.tripId;
+    const onOutboundLeg = currentTripFromVp && currentTrip === ob.tripId;
 
-    const departureObs = departureObserved(
-      opts.rt,
-      ob.tripId,
-      opts.terminal.stopIds,
-      ob.departureTime,
-      opts.serviceDayStartSeconds,
-      opts.nowSvc,
-    );
-    const departed = record?.departureSeconds !== undefined || departureObs.departed;
-    const departedSeconds = record?.departureSeconds ?? (departed ? departureObs.departureSeconds : undefined);
+    const departed = record?.departureSeconds !== undefined;
+    const departedSeconds = record?.departureSeconds;
 
-    const terminalArrival =
-      record?.arrivalSeconds ?? (onPrevLeg && hasArrivalInfo ? predictedArrival : undefined);
-    const ctaDeparture = departureObs.departureSeconds;
-    const edt = Math.max(
-      expectedDepartureTime(ob.departureTime, terminalArrival, opts.minRestSeconds),
-      ctaDeparture !== undefined ? ctaDeparture : Number.NEGATIVE_INFINITY,
-    );
+    const terminalArrival = record?.arrivalSeconds;
+    const arrivalSource = terminalArrival !== undefined ? 'observed' : hasArrivalInfo ? 'estimated' : undefined;
+    const arrivalForEdt = terminalArrival ?? (onPrevLeg && hasArrivalInfo ? predictedArrival : undefined);
+    // Observed VP arrival wins over a TU estimate; estimates are used for EDT only while the bus
+    // is demonstrably still on the previous leg.
+    const edt = expectedDepartureTime(ob.departureTime, arrivalForEdt, opts.minRestSeconds);
 
     const arrivedAtTerminal =
       onOutboundLeg ||
@@ -310,6 +298,8 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     else if (onPrevLeg && !arrivedAtTerminal) state = 'incoming';
     else if (arrivedAtTerminal) state = 'layover';
     else state = 'departed';
+    // A bus with no reliable live assignment is treated as departed rather than shown as waiting;
+    // this avoids presenting an untracked vehicle as an actionable layover.
 
     departures.push({
       tripId: ob.tripId,
@@ -321,16 +311,18 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       scheduledArrival,
       predictedArrival,
       terminalArrival,
+      arrivalSource,
+      arrivalForEdt,
       edt,
       departedSeconds,
       state,
       hold: record?.hold,
       hasArrivalInfo,
-      departureObs,
     });
   }
 
   departures.sort(
+    // Holds alter effective ordering, and trip ID breaks ties deterministically.
     (a, b) => effectiveDeparture(a) - effectiveDeparture(b) || a.tripId.localeCompare(b.tripId),
   );
   return departures;

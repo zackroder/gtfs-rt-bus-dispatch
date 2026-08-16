@@ -4,8 +4,12 @@ import type { Server } from 'node:http';
 import express from 'express';
 import { createDatabase } from '../db/schema';
 import { createApi, type ApiDeps } from './routes';
+import { InterventionStore } from '../db/interventions';
+import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
 import type { AppConfig, TerminalSnapshot } from '../../../shared/types';
 
+// API tests use an in-memory database and real HTTP requests to cover validation, redaction,
+// service-date scoping, and intervention lifecycle responses without external feeds.
 const baseConfig: AppConfig = {
   realtime: {
     tripUpdatesUrl: 'http://localhost/tu.pb',
@@ -28,6 +32,7 @@ let server: Server | null = null;
 
 function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
   const db = createDatabase(':memory:');
+  const interventions = new InterventionStore(db);
   db.exec(`INSERT INTO routes (route_id, agency_id, short_name, long_name, type, color, text_color) VALUES ('1','A','10','Route Ten',3,'FFB81C','000000')`);
   db.exec(`INSERT INTO routes (route_id, agency_id, short_name, long_name, type, color) VALUES ('2','A','2','Route Two',3,'C8102E')`);
   let config = baseConfig;
@@ -48,8 +53,10 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
           } satisfies TerminalSnapshot)
         : undefined,
     getHealth: () => ({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 }),
+    getVpDiagnostics: () => ({ observations: [], recentFacts: [] }),
     reloadStatic: () => Promise.resolve(),
     refreshOnce: () => Promise.resolve(),
+    interventions,
     ...overrides,
   };
 }
@@ -77,6 +84,15 @@ describe('api routes', () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 });
+  });
+
+  it('serves read-only VP diagnostics', async () => {
+    const base = await startServer(makeDeps({
+      getVpDiagnostics: () => ({ observations: [{ vehicleId: 'V1' }], recentFacts: [] }),
+    }));
+    const res = await fetch(`${base}/diagnostics/vp`);
+    expect(res.status).toBe(200);
+    expect((await res.json() as { observations: Array<{ vehicleId: string }> }).observations[0]!.vehicleId).toBe('V1');
   });
 
   it('lists terminals grouped by route, sorted numerically, with colors', async () => {
@@ -146,5 +162,42 @@ describe('api routes', () => {
       body: JSON.stringify({ ...baseConfig, minRestMinutes: -1 }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('lists and transitions persistent interventions', async () => {
+    const deps = makeDeps();
+    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db));
+    const now = Math.floor(Date.now() / 1000);
+    const intervention = deps.interventions.createSuggestion({
+      id: `hold:${serviceDate}:T1:1:D1`,
+      serviceDate,
+      terminalId: 'T1',
+      routeId: '1',
+      rule: 'hold',
+      tripId: 'D1',
+      holdSeconds: 90,
+      reason: 'uneven headways',
+      until: 900,
+      generatedAt: now,
+      expiresAt: now + 3600,
+    });
+    const base = await startServer(deps);
+    const list = await fetch(`${base}/interventions`);
+    expect(list.status).toBe(200);
+    expect((await list.json()) as unknown[]).toHaveLength(1);
+
+    const viewed = await fetch(`${base}/interventions/${intervention.id}/view`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actorId: 'manager-1', requestId: 'view-1' }),
+    });
+    expect(viewed.status).toBe(200);
+    const applied = await fetch(`${base}/interventions/${intervention.id}/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actorId: 'manager-1', requestId: 'apply-1' }),
+    });
+    expect(applied.status).toBe(200);
+    expect((await applied.json() as { status: string }).status).toBe('applied');
   });
 });

@@ -1,6 +1,8 @@
 import type { Database } from 'better-sqlite3';
 import type { Terminal } from '../../../shared/types';
 
+// Terminal queries separate the first stop of outbound service from the last stop of
+// inbound service. This lets one configured terminal represent both arriving and departing buses.
 export interface OutboundTripRow {
   tripId: string;
   stopId: string;
@@ -15,9 +17,11 @@ export interface InboundTripRow {
 }
 
 function placeholders(count: number): string {
+  // Parameterized placeholders keep dynamic IN lists safe without interpolating IDs.
   return Array.from({ length: count }, () => '?').join(',');
 }
 
+// Return scheduled outbound trips serving the terminal during the requested service window.
 export function outboundTrips(
   db: Database,
   routeId: string,
@@ -27,6 +31,7 @@ export function outboundTrips(
   toSvc: number,
 ): OutboundTripRow[] {
   const serviceList = Array.from(activeServiceIds);
+  // No active service means no schedule should leak into the current terminal view.
   if (serviceList.length === 0) return [];
   const rows = db
     .prepare(
@@ -54,6 +59,7 @@ export function outboundTrips(
   }));
 }
 
+// Return scheduled inbound trips whose final stop is this terminal.
 export function inboundTrips(
   db: Database,
   routeId: string,
@@ -84,6 +90,7 @@ export function inboundTrips(
   return rows.map((r) => ({ tripId: r.trip_id, stopId: r.stop_id, arrivalTime: r.arrival_time }));
 }
 
+// Find routes with outbound departures at a terminal in the requested service window.
 export function outboundRoutesAtTerminal(
   db: Database,
   stopIds: string[],
@@ -116,7 +123,9 @@ export interface RouteStyle {
   textColor?: string;
 }
 
+// Read the display metadata for a route, falling back to its identifier when static data is absent.
 export function routeStyle(db: Database, routeId: string): RouteStyle {
+  // GTFS colors are passed through unchanged; the UI owns presentation of the six-digit values.
   const row = db
     .prepare(`SELECT short_name, long_name, color, text_color FROM routes WHERE route_id = ?`)
     .get(routeId) as
@@ -130,10 +139,12 @@ export function routeStyle(db: Database, routeId: string): RouteStyle {
   };
 }
 
+// Return the display short name used by older callers that need only one label.
 export function routeShortName(db: Database, routeId: string): string {
   return routeStyle(db, routeId).shortName;
 }
 
+// Infer terminal candidates from the modal endpoints of active route/direction schedules.
 export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string>): Terminal[] {
   const serviceList = Array.from(activeServiceIds);
   if (serviceList.length === 0) return [];
@@ -159,6 +170,8 @@ export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string
   }>;
 
   const stopMeta = new Map<string, { name: string; lat: number; lon: number }>();
+  // A modal first/last stop per route and direction is more robust than assuming every trip
+  // uses the same endpoint, especially when schedules contain short turns or variants.
   const tripFirstStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
   const tripLastStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
   for (const row of rows) {
@@ -201,6 +214,8 @@ export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string
   }
 
   function modal(counts: Map<string, Map<string, number>>): Map<string, string | undefined> {
+    // Select the most common endpoint for each route/direction, with query order providing
+    // a stable tie result for otherwise equivalent candidates.
     const result = new Map<string, string | undefined>();
     for (const [key, byStop] of counts) {
       let best: string | undefined;

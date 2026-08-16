@@ -1,5 +1,7 @@
 import type { TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 
+// Providers normalize external feeds into the DTOs consumed by the engine, keeping feed-specific
+// parsing details out of dispatch logic.
 export interface RealtimeSnapshot {
   timestamp: number;
   tripUpdates: TripUpdateInfo[];
@@ -10,6 +12,7 @@ export interface RealtimeProvider {
   fetch(): Promise<RealtimeSnapshot>;
 }
 
+// The Parsed* shapes are the boundary between GTFS CSV parsing and SQLite loading.
 export interface ParsedStop {
   stopId: string;
   stopCode?: string;

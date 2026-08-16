@@ -1,3 +1,4 @@
+/** Card retaining recently departed vehicles for dispatch context and traceability. */
 import type { DepartedBus } from '../../../shared/types';
 import { formatClock } from '../format';
 
@@ -8,6 +9,7 @@ export function DepartedCard({
   bus: DepartedBus;
   serviceDayStartSeconds: number;
 }) {
+  // A held departure is marked in the same compact line as its actual departure time.
   return (
     <div className="card departed-card">
       <div className="card-main">

@@ -4,6 +4,7 @@ import { decodeTripUpdates, decodeVehiclePositions } from './realtime';
 
 const FeedMessage = transit_realtime.FeedMessage;
 
+// Encode real protobuf messages so decoder tests cover the Long/nested-field normalization boundary.
 function encodeFeed(header: transit_realtime.IFeedHeader, entities: object[]): Buffer {
   const message = FeedMessage.encode({
     header,
@@ -13,6 +14,7 @@ function encodeFeed(header: transit_realtime.IFeedHeader, entities: object[]): B
 }
 
 describe('realtime decode', () => {
+  // Fixtures include valid entities and ignored incomplete entities to define the DTO contract.
   it('normalizes TripUpdates into TripUpdateInfo DTOs', () => {
     const buffer = encodeFeed(
       { gtfsRealtimeVersion: '2.0', timestamp: 1700000000 },

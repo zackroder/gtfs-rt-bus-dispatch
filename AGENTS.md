@@ -10,9 +10,9 @@ updates) to detect when buses are off-schedule, then recommends simple hold
 interventions so a manager can tell an operator to hold their bus and smooth
 headways.
 
-Primary intervention: **hold the leader** (a bus ready to depart) for a
-fraction of its late follower's lateness, up to a max hold, so the gap behind
-the leader doesn't become huge.
+Primary intervention: recommend holding the middle bus in a triplet of
+outbound departures for up to the configured maximum, so adjacent headways are
+more even.
 
 ## Commands
 
@@ -26,6 +26,28 @@ npm run lint       # eslint
 npm run typecheck  # tsc --noEmit across server + web
 npm test           # vitest
 ```
+
+## Git hygiene
+
+- Before making changes, run `git status --short --branch`, inspect the current
+  branch, and check recent history with `git log --oneline -10`.
+- Do not work directly on `main` or `master` for feature or fix work. Start
+  from the repository's integration branch when one exists, then create a
+  focused branch such as `feat/persistent-intervention-queue`.
+- Do not assume an integration branch exists locally. Inspect
+  `git branch --all` and `git remote -v`; if no suitable branch exists, do not
+  create or switch branches without the owner's direction.
+- Preserve pre-existing worktree and index changes. Never use destructive
+  commands such as `git reset --hard` or `git checkout --` to discard them.
+- Keep each branch focused. Do not mix unrelated cleanup, generated files,
+  secrets, local databases, or environment files into a feature change.
+- Before committing, inspect `git status`, `git diff`, `git diff --cached`, and
+  `git log --oneline -10`; stage only the intended files and verify no secrets
+  are included.
+- Use concise, imperative commit messages that match the repository history.
+  Do not amend commits or force-push unless explicitly requested.
+- Do not commit, push, merge, or create a pull request unless explicitly
+  requested. Report the recommended branch and base when work is ready.
 
 ## Environment
 
@@ -54,6 +76,7 @@ server/                     # Node + TypeScript backend
     db/
       schema.ts             # SQLite schema + indexes
       staticLoader.ts       # GTFS static CSV -> SQLite tables
+      interventions.ts      # persistent intervention queue + audit events
     gtfs/
       static.ts             # parse GTFS zip/CSV
       time.ts               # service-day detection + time normalization
@@ -67,7 +90,7 @@ server/                     # Node + TypeScript backend
       dispatch.ts           # CORE dispatch logic: EDT + triplet headway hold (single source of truth)
       engine.ts             # orchestrates refresh + run ledger -> normalized snapshot
     api/
-      routes.ts             # REST endpoints
+    routes.ts             # REST endpoints
       ws.ts                 # websocket broadcast of snapshots
 web/                        # React + Vite frontend (mobile-first)
   src/
@@ -85,7 +108,13 @@ shared/
 
 - TypeScript strict mode. No `any` except at provider boundaries (already
   normalized into `shared/types.ts` DTOs).
-- Do NOT add comments unless asked. Self-documenting names.
+- Comment all non-trivial work. Add module/function comments and focused inline
+  comments that explain business rules, data-source assumptions, persistence
+  boundaries, state transitions, performance safeguards, and other reasoning a
+  maintainer would not recover from the code alone.
+- Do not write comments that merely restate a variable assignment or obvious
+  control flow. Keep comments adjacent to the code they explain and update or
+  remove stale comments when behavior changes.
 - Validate external input with `zod` (config + API bodies).
 - Times: internally store "seconds since service-day start" as integers; the
   start is auto-detected from stop_times (overnight lull). GTFS allows
@@ -103,10 +132,21 @@ Static (loaded from GTFS, read-only):
 - `stop_times(trip_id, stop_sequence, stop_id, arrival_time, departure_time, pickup_type, drop_off_type)` — indexed on `stop_id` and `trip_id`
 - `calendar(service_id, monday..sunday, start_date, end_date)`
 - `calendar_dates(service_id, date, exception_type)`
-- `block_trips(block_id, seq, trip_id, start_time, route_id)` — trip chains per block (derived at load)
+- `block_trips(block_id, seq, trip_id, start_time, route_id, service_id)` — active-service-aware trip chains per block
 
 Config (runtime, editable):
 - `settings(key TEXT PRIMARY KEY, value_json TEXT)`
+
+Operational:
+- `interventions` — persistent recommendation state and applied holds
+- `intervention_events` — append-only intervention interaction audit log
+- `config_events` — append-only configuration audit log
+- `run_facts` — persisted observed arrival/departure facts by service date
+
+Diagnostics:
+- `GET /api/diagnostics/vp` reports the latest VP observations, transition
+  candidates, recorded fact events, and feed freshness/errors without mutating
+  dispatch state.
 
 ## How to verify your work
 

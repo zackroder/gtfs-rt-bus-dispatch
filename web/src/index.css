@@ -1,3 +1,10 @@
+/*
+ * Mobile-first visual language for the dispatcher dashboard.
+ * Sections below follow the component/page structure so layout and status colors
+ * can be found without changing the selectors that components depend on.
+ */
+
+/* Theme tokens: status colors are shared by text, badges, and focus treatment. */
 :root {
   --bg: #f4f5f7;
   --card: #ffffff;
@@ -11,10 +18,12 @@
   --hold: #7c3aed;
 }
 
+/* Global sizing and full-height app shell. */
 * {
   box-sizing: border-box;
 }
 
+/* Base typography and page background. */
 html,
 body,
 #root {
@@ -28,6 +37,7 @@ body {
   color: var(--ink);
 }
 
+/* Narrow centered canvas keeps terminal cards readable on larger displays. */
 .app {
   max-width: 520px;
   margin: 0 auto;
@@ -36,6 +46,7 @@ body {
   flex-direction: column;
 }
 
+/* Persistent navigation remains visible while a dispatcher scans a long list. */
 .app-header {
   position: sticky;
   top: 0;
@@ -51,17 +62,20 @@ body {
   font-weight: 700;
 }
 
+/* Main content spacing leaves room below the final operational card. */
 .app-main {
   padding: 12px 12px 40px;
   flex: 1;
 }
 
+/* Heading rhythm and GTFS route identity. */
 h1,
 h2,
 h3 {
   margin: 8px 0 6px;
 }
 
+/* Route badge colors may be overridden inline by normalized GTFS route colors. */
 .route-badge {
   display: inline-flex;
   align-items: center;
@@ -82,6 +96,7 @@ h3 {
   margin-left: 8px;
 }
 
+/* Route containers and group headings separate service from vehicle state. */
 .route-group {
   background: var(--card);
   border: 1px solid var(--border);
@@ -101,6 +116,7 @@ h3 {
   color: var(--muted);
 }
 
+/* Shared vehicle card layout: the side column keeps times aligned and detail spans below. */
 .card {
   display: flex;
   justify-content: space-between;
@@ -143,6 +159,7 @@ h3 {
   padding-top: 6px;
 }
 
+/* Secondary vehicle labels and arrival/departure timing. */
 .next-trip {
   color: var(--muted);
 }
@@ -177,6 +194,7 @@ h3 {
   font-size: 15px;
 }
 
+/* Countdown tones make urgency visible while the text remains the source of information. */
 .countdown {
   font-variant-numeric: tabular-nums;
   font-weight: 700;
@@ -194,6 +212,7 @@ h3 {
   color: var(--late);
 }
 
+/* Delay and rest badges identify exceptions without changing card structure. */
 .badge {
   font-size: 11px;
   padding: 2px 6px;
@@ -248,6 +267,7 @@ h3 {
   font-weight: 700;
 }
 
+/* Intervention recommendation and lifecycle state styling. */
 .intervention {
   border-left: 4px solid var(--accent);
   background: #eff6ff;
@@ -267,6 +287,73 @@ h3 {
   margin-top: 2px;
 }
 
+.intervention-status {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status-pending {
+  color: var(--accent);
+}
+
+.status-applied,
+.status-completed {
+  color: var(--ok);
+}
+
+.status-declined,
+.status-canceled,
+.status-expired {
+  color: var(--muted);
+}
+
+/* Action controls use native button semantics; focus styling is explicit for keyboard users. */
+.intervention-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.intervention-actions button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.intervention-actions button:first-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.intervention-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.intervention-actions button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.intervention-error {
+  margin-top: 6px;
+  color: var(--late);
+  font-size: 12px;
+}
+
+/* Navigation links used by terminal selection and page headers. */
 .terminal-link {
   display: block;
   padding: 12px;
@@ -305,6 +392,7 @@ h3 {
   font-weight: 600;
 }
 
+/* Live stream source and last-update status in the terminal header. */
 .source {
   font-size: 11px;
   text-transform: uppercase;
@@ -330,6 +418,7 @@ h3 {
   color: var(--muted);
 }
 
+/* Loading, empty, success, and error messages share low-noise page treatment. */
 .ok-msg {
   color: var(--ok);
   font-weight: 600;
@@ -347,6 +436,7 @@ h3 {
   color: var(--late);
 }
 
+/* Settings form controls. */
 .form-row {
   display: flex;
   justify-content: space-between;

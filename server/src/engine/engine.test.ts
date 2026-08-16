@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { createDatabase } from '../db/schema';
 import { loadStatic } from '../db/staticLoader';
 import { Engine } from './engine';
+import { InterventionStore } from '../db/interventions';
 import { syntheticGtfs } from '../test/fixtures';
 import type { TripSpec } from '../test/fixtures';
 import type { RealtimeSnapshot } from '../providers/types';
 import type { AppConfig, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 
+// This fixture models four block vehicles, their inbound legs, and staggered outbound departures.
+// It is intentionally rich enough to exercise VP-only facts, EDT, holds, and service-day restore.
 const START = 8 * 3600;
 
 function svc(hhmm: string): number {
@@ -111,6 +114,12 @@ function fixtureTrips(): TripSpec[] {
   ];
 }
 
+const engineData = new WeakMap<Engine, {
+  store: InterventionStore;
+  db: ReturnType<typeof createDatabase>;
+  config: AppConfig;
+}>();
+
 function makeEngine(): Engine {
   const gtfs = syntheticGtfs({ trips: fixtureTrips() });
   const db = createDatabase(':memory:');
@@ -128,10 +137,18 @@ function makeEngine(): Engine {
     lookaheadMinutes: 90,
     terminals: [{ id: 'T', name: 'Terminal', stopIds: ['T'], routeIds: ['1'] }],
   };
-  return new Engine(db, () => cfg);
+  const interventions = new InterventionStore(db);
+  const engine = new Engine(db, () => cfg, interventions);
+  engineData.set(engine, { store: interventions, db, config: cfg });
+  return engine;
+}
+
+function testData(engine: Engine) {
+  return engineData.get(engine)!;
 }
 
 function stdRt(): RealtimeSnapshot {
+  // The standard snapshot has one departed leader, one assigned layover, and two incoming buses.
   return {
     timestamp: unixAt('08:08'),
     tripUpdates: [
@@ -141,7 +158,10 @@ function stdRt(): RealtimeSnapshot {
       arrUpdate('P3', 'V3'),
       arrUpdate('P4', 'V4'),
     ],
-    vehiclePositions: [],
+    vehiclePositions: [
+      vpAtStop('V1', 'D1', 'B', '08:05', 1),
+      vpAtStop('V2', 'P2', 'T', '08:07', 1),
+    ],
   };
 }
 
@@ -166,26 +186,33 @@ function route1(snapshot: ReturnType<Engine['refresh']>[number]) {
 }
 
 describe('engine triplet dispatch', () => {
-  it('holds the center to even headways and propagates the locked hold to the next triplet', () => {
+  // These tests verify orchestration and persistence around the pure dispatch rule.
+  it('queues the center suggestion and applies it only after approval', () => {
     const engine = makeEngine();
     const rt = stdRt();
 
     const first = engine.refresh(rt, nowAt('08:08'))[0]!;
     const routeA = route1(first);
     expect(routeA.interventions).toHaveLength(1);
-    const hold = routeA.interventions[0]!;
-    expect(hold.rule).toBe('hold');
-    expect(hold.holdSeconds).toBe(120);
-    expect(hold.until).toBe(svc('08:14'));
-    expect(hold.vehicleId).toBe('V2');
+    const suggestion = routeA.interventions[0]!;
+    expect(suggestion.rule).toBe('hold');
+    expect(suggestion.status).toBe('pending');
+    expect(suggestion.holdSeconds).toBe(120);
+    expect(suggestion.until).toBe(svc('08:14'));
+    expect(suggestion.vehicleId).toBe('V2');
 
     const d2 = routeA.layovers.find((l) => l.tripId === 'D2')!;
-    expect(d2.hold?.holdSeconds).toBe(120);
-    expect(d2.predictedDeparture).toBe(svc('08:14'));
+    expect(d2.hold).toBeUndefined();
+    expect(d2.predictedDeparture).toBe(svc('08:12'));
+
+    testData(engine).store.apply(suggestion.id, { actorId: 'test' }, unixAt('08:08'));
+    const applied = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    expect(applied.interventions[0]!.status).toBe('applied');
+    expect(applied.layovers.find((l) => l.tripId === 'D2')!.hold?.holdSeconds).toBe(120);
 
     const second = engine.refresh(rt, nowAt('08:18'))[0]!;
     const routeB = route1(second);
-    expect(routeB.interventions).toEqual([]);
+    expect(routeB.interventions[0]!.status).toBe('applied');
     const d2Later = routeB.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2Later.hold?.holdSeconds).toBe(120);
     const d3 = routeB.layovers.find((l) => l.tripId === 'D3')!;
@@ -204,7 +231,10 @@ describe('engine triplet dispatch', () => {
         arrUpdate('P3', 'V3'),
         arrUpdate('P4', 'V4'),
       ],
-      vehiclePositions: [],
+      vehiclePositions: [
+        vpAtStop('V1', 'D1', 'B', '08:07', 1),
+        vpAtStop('V2', 'P2', 'T', '08:07', 1),
+      ],
     };
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const hold = route1(snapshot).interventions[0]!;
@@ -226,7 +256,8 @@ describe('engine triplet dispatch', () => {
     const snapshot = engine.refresh(rt, nowAt('08:18'))[0]!;
     const route = route1(snapshot);
     const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
-    expect(d3.terminalArrival).toBe(svc('08:18'));
+    expect(d3.terminalArrival).toBeUndefined();
+    expect(d3.terminalArrivalSource).toBe('estimated');
     expect(d3.scheduledArrival).toBe(svc('08:18'));
     expect(d3.expectedDeparture).toBe(svc('08:23'));
     expect(d3.restDelayed).toBe(true);
@@ -241,7 +272,8 @@ describe('engine triplet dispatch', () => {
     const snapshot = engine.refresh(rt, nowAt('08:25'))[0]!;
     const route = route1(snapshot);
     const d4 = route.layovers.find((l) => l.tripId === 'D4')!;
-    expect(d4.terminalArrival).toBe(svc('08:25'));
+    expect(d4.terminalArrival).toBeUndefined();
+    expect(d4.terminalArrivalSource).toBe('estimated');
     expect(d4.scheduledArrival).toBe(svc('08:25'));
     expect(d4.expectedDeparture).toBe(svc('08:30'));
     expect(d4.restDelayed).toBe(false);
@@ -252,7 +284,10 @@ describe('engine triplet dispatch', () => {
     const engine = makeEngine();
     const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
     const route = route1(snapshot);
-    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    const suggestion = route.interventions[0]!;
+    testData(engine).store.apply(suggestion.id, { actorId: 'test' }, unixAt('08:08'));
+    const applied = route1(engine.refresh(stdRt(), nowAt('08:08'))[0]!);
+    const d2 = applied.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.countdownSeconds).toBe(svc('08:14') - svc('08:08'));
   });
 
@@ -281,6 +316,16 @@ describe('engine triplet dispatch', () => {
     expect(d1.departureSeconds).toBe(svc('08:05'));
   });
 
+  it('restores observed run facts after an engine restart', () => {
+    const first = makeEngine();
+    first.refresh(stdRt(), nowAt('08:08'));
+    const firstData = testData(first);
+    const restarted = new Engine(firstData.db, () => firstData.config, firstData.store);
+    const route = route1(restarted.refresh({ timestamp: unixAt('08:09'), tripUpdates: [], vehiclePositions: [] }, nowAt('08:09'))[0]!);
+    expect(route.departed.some((bus) => bus.tripId === 'D1')).toBe(true);
+    expect(route.layovers.some((bus) => bus.tripId === 'D2')).toBe(true);
+  });
+
   it('lists recently departed buses with their recorded departure time', () => {
     const engine = makeEngine();
     const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
@@ -297,6 +342,8 @@ describe('engine triplet dispatch', () => {
     const engine = makeEngine();
     const rt = stdRt();
     engine.refresh(rt, nowAt('08:08'));
+    const suggestion = route1(engine.refresh(rt, nowAt('08:08'))[0]!).interventions[0]!;
+    testData(engine).store.apply(suggestion.id, { actorId: 'test' }, unixAt('08:08'));
     const later: RealtimeSnapshot = {
       timestamp: unixAt('08:20'),
       tripUpdates: [
@@ -305,7 +352,7 @@ describe('engine triplet dispatch', () => {
         arrUpdate('P3', 'V3'),
         arrUpdate('P4', 'V4'),
       ],
-      vehiclePositions: [],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'B', '08:16', 1)],
     };
     const snapshot = engine.refresh(later, nowAt('08:20'))[0]!;
     const d2 = route1(snapshot).departed.find((d) => d.tripId === 'D2')!;
@@ -325,6 +372,19 @@ describe('engine triplet dispatch', () => {
     expect(d1.currentStop).toBe('Far Stop');
   });
 
+  it('exposes VP transition diagnostics alongside recorded fact events', () => {
+    const engine = makeEngine();
+    engine.refresh(stdRt(), nowAt('08:08'));
+    const observations = engine.getVehiclePositionDiagnostics();
+    const leader = observations.find((observation) => observation.vehicleId === 'V1')!;
+    const layover = observations.find((observation) => observation.vehicleId === 'V2')!;
+    expect(leader.pastFirstStop).toBe(true);
+    expect(leader.recordedDeparture).toBe(true);
+    expect(layover.atLastStop).toBe(true);
+    expect(layover.recordedArrival).toBe(true);
+    expect(engine.getFactEventDiagnostics().map((event) => event.action)).toEqual(['departure', 'arrival']);
+  });
+
   it('keeps a bus as layover when its terminal departure is still in the future', () => {
     const engine = makeEngine();
     const rt: RealtimeSnapshot = {
@@ -335,12 +395,28 @@ describe('engine triplet dispatch', () => {
         arrUpdate('P3', 'V3'),
         arrUpdate('P4', 'V4'),
       ],
-      vehiclePositions: [],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'T', '08:08', 0)],
     };
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
     expect(route.departed.some((d) => d.tripId === 'D2')).toBe(false);
     expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(true);
+  });
+
+  it('does not use a future TripUpdate departure prediction as EDT', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      ...stdRt(),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        depUpdate('D2', 'V2', '08:40'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+    };
+    const d2 = route1(engine.refresh(rt, nowAt('08:08'))[0]!).layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.expectedDeparture).toBe(svc('08:12'));
   });
 
   it('keeps a bus incoming when the outbound TU is pre-assigned before arrival', () => {
@@ -386,7 +462,7 @@ describe('engine triplet dispatch', () => {
     const tuOnly = stdRt();
     engine.refresh(tuOnly, nowAt('08:18'), new Set());
     const d3First = route1(engine.refresh(tuOnly, nowAt('08:18'))[0]!).layovers.find((l) => l.tripId === 'D3')!;
-    expect(d3First.terminalArrival).toBe(svc('08:18'));
+    expect(d3First.terminalArrival).toBeUndefined();
 
     const withVp: RealtimeSnapshot = {
       ...tuOnly,

@@ -13,6 +13,7 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 5 — Web frontend
 - [x] Phase 6 — Config UI + deployment polish
 - [x] Phase 7 — Triplet dispatch refactor
+- [x] Phase 8 — Persistent intervention queue and fact integrity
 
 ---
 
@@ -140,9 +141,9 @@ I/O) so it can be reviewed and unit-tested in isolation.
 - [x] Rework `headway.ts`: compute terminal arrival (predicted inbound vs
       recorded layover) and EDT; classify `incoming|layover|departed`; sort by
       effective departure; expose EDT + effective departure to the core.
-- [x] Wire `engine.ts` to call `decideTriplets`, attach locked holds, and emit
-      a single `hold` intervention + `restDelayed`/`expectedDeparture` on
-      layovers.
+- [x] Wire `engine.ts` to call `decideTriplets`, emit persistent pending
+      suggestions, and attach only applied holds + `restDelayed`/
+      `expectedDeparture` on layovers.
 - [x] Rewrite `engine.test.ts` for the new model (worked example, propagation,
       boundaries, rest-delay, lock).
 
@@ -160,6 +161,23 @@ I/O) so it can be reviewed and unit-tested in isolation.
       `hold_leader`/`hold_follower`/`gap_alert`/`min_rest`/`minRestAdvisory`.
 
 ---
+
+## Phase 8 — Persistent intervention queue and fact integrity (complete)
+
+- [x] Persist pending/applied/declined/canceled/expired/completed intervention
+      state in SQLite.
+- [x] Persist append-only view and transition events, including actor and
+      request identifiers.
+- [x] Require explicit approval before a hold affects dispatch calculations.
+- [x] Use VehiclePositions only for recorded arrival/departure facts; retain
+      TripUpdates for predictions and assignment.
+- [x] Round holds to 30-second increments and suppress holds below one minute.
+- [x] Add intervention REST actions, filtered WebSocket updates, and UI action
+      controls.
+- [x] Scope ledger/block chains by service date and serialize refreshes.
+- [x] Persist observed run facts by service date and restore them on restart.
+- [x] Add realtime request timeouts, stale snapshot cleanup, response schemas,
+      and shared countdown timing.
 
 ## Decisions log
 
@@ -225,10 +243,10 @@ I/O) so it can be reviewed and unit-tested in isolation.
   terminal arrival (and actual departure for departed leaders).
 - **2026-08-14 — Record arrivals/departures**: in-memory run ledger keyed by
   `tripId`; resets on restart (pilot limitation; SQLite persistence later).
-- **2026-08-14 — Lock holds at decision time**: once a hold is issued within
-  the lead window (measured from EDT, not scheduled), freeze `{ holdSeconds,
-  until }` until the bus departs; no re-derivation. Holds propagate
-  left-to-right via the locked `until`.
+- **2026-08-14 — Applied holds are locked**: a generated suggestion is pending
+  until explicitly applied. Once applied within the lead window, freeze
+  `{ holdSeconds, until }` until the bus departs; no re-derivation. Holds
+  propagate left-to-right via the locked `until`.
 - **2026-08-14 — Rest-delay in UI**: when `EDT > scheduled` (late arrival +
   rest), show the scheduled time struck through with the EDT in red; no
   separate advisory.
@@ -245,37 +263,22 @@ I/O) so it can be reviewed and unit-tested in isolation.
   trip_id, …)` already stores the trip chain at GTFS load; the next/prev lookup
   maps must not be rebuilt per refresh. Cached in the Engine (with a static
   `trip_ends` first/last-stop index), invalidated on static reload.
-- **2026-08-14 — Global fact pass**: arrival/departure facts for the run ledger
-  are recorded every tick for all terminals (not just viewed ones) by joining
-  the TripUpdates feed against the static `trip_ends` + block-chain index — no
-  per-trip DB queries. This keeps "recently departed" correct even for
-  terminals never viewed.
-- **2026-08-14 — Drop VehiclePositions**: the vehicle-position verification
-  layer (300m geofence layover confirm/drop, stopSequence departure fallback,
-  vehicle→trip assignment) is removed; the engine relies solely on TripUpdates.
-  Simplifies to "predicted arrival has passed → layover". Also drops one feed
-  fetch/decode, the `layoverProximityMeters` config, and the `CTA_VP_URL` env.
+- **2026-08-14 — Global VP fact pass**: VehiclePositions record arrival and
+  departure facts every tick for all terminals (not just viewed ones) by
+  joining VP trip IDs against the static `trip_ends` + active block-chain index.
+  TripUpdates remain predictions and are never promoted to recorded facts.
 - **2026-08-14 — WAL checkpoint**: `PRAGMA wal_checkpoint(TRUNCATE)` after
   static load and on boot. A 635MB uncheckpointed WAL left behind by a killed
   process was making every DB query ~2.4x slower (full scan 10.1s → 4.25s).
-- **2026-08-14 — Departure detection (TripUpdates only)**: CTA's TripUpdates
-  feed omits stops a vehicle has already served. So "departed" = the terminal
-  (first) stop is absent from the trip update, or its departure time is in the
-  past; a future departure time is a *prediction*, so the bus is still laying
-  over. Fixes the inversion where laying-over buses showed as "recently
-  departed" (with future times) and departed buses showed as "laying over".
-- **2026-08-14 — VehiclePositions as fact source (partial revert)**:
-  TripUpdates-only fact recording was inaccurate for arrivals: CTA drops the
-  last stop once served, so arrivals were never recorded for buses already in
-  layover; and the recorded value was a smoothed prediction, not an
-  observation. VP is now the primary source for arrival/departure *facts*:
+- **2026-08-14 — VehiclePositions as sole fact source**: TripUpdates-only fact
+  recording was inaccurate for arrivals because CTA drops the last stop once
+  served, and the recorded value was a smoothed prediction rather than an
+  observation. VP records arrival/departure *facts*:
   a vehicle on trip T observed at T's last stop (stopId or stopSequence)
   records arrival for `nextTrip(T)` at the VP timestamp (clamped to now);
   sequence/stopId advancing past T's first stop (or a tripId flip) records
-  T's departure. TU heuristics remain as fallback and TU is still the source
-  for *predictions* (incoming ETA). Priority: VP overrides TU, never the
-  reverse; first-write-wins within each source (`RunRecord.arrivalSource`/
-  `departureSource`). VP fetch is parallel to TU; `CTA_VP_URL` env +
+  T's departure. TU remains the source for *predictions* (incoming ETA). VP
+  fetch is parallel to TU; `CTA_VP_URL` env +
   `realtime.vehiclePositionsUrl` config (backfilled for saved configs).
 
 - **2026-08-14 — Bus-only static load**: `loadStatic` filters GTFS to
@@ -309,18 +312,6 @@ I/O) so it can be reviewed and unit-tested in isolation.
 
 ## Next steps
 
-1. Implement Phase 7 (triplet dispatch refactor) — hand off to a worker agent;
-   see the checklist above plus IMPLEMENTATION.md §8.5 and README "How dispatch
-   decisions work".
-2. Seed a real CTA API key + run `npm run dev` against live feeds.
-3. Optional: expose `vehiclePosition.stopId`-based ETA (currently delay-based).
-4. Optional: persist the run ledger to SQLite so arrival/departure facts survive
-   restarts.
-5. Optional: re-lock a hold only when the recomputed value drifts beyond a small
-   threshold (e.g. 1 min) before departure.
-6. Optional: co-located multi-route terminal view in the UI.
-7. **Known gap (on-demand refresh)**: arrival facts for a bus that never appears
-   in TripUpdates (no realtime data) are not locked into the ledger; such a bus's
-   EDT falls back to scheduled. "Recently departed" is now recorded globally and
-   is correct for all terminals. Minor: persists ledger to SQLite to survive
-   restarts (see next step 4).
+1. Seed a real CTA API key and run `npm run dev` against live feeds.
+2. Add browser-level tests for queue actions and WebSocket reconnect behavior.
+3. Add co-located multi-route terminal view improvements.

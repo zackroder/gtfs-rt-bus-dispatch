@@ -1,3 +1,4 @@
+/** Runtime settings editor for dispatch thresholds and GTFS data sources. */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getConfig, putConfig, reloadStatic } from '../api';
@@ -9,6 +10,7 @@ export default function ConfigPage() {
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
+    // The textarea mirrors terminals as JSON because terminals are edited as a list.
     getConfig()
       .then((cfg) => {
         setConfig(cfg);
@@ -22,6 +24,7 @@ export default function ConfigPage() {
   if (!config) return <div className="loading">Loading settings…</div>;
 
   const setNumber = (key: keyof AppConfig, value: string) => {
+    // Inputs are strings, but the shared config contract requires numeric thresholds.
     setConfig({ ...config, [key]: Number(value) });
   };
 
@@ -37,11 +40,13 @@ export default function ConfigPage() {
     try {
       let terminals: AppConfig['terminals'];
       try {
+        // Parse separately so malformed editor text gets a focused user-facing error.
         terminals = JSON.parse(terminalsJson) as AppConfig['terminals'];
       } catch {
         throw new Error('Terminals JSON is not valid');
       }
       const candidate = appConfigSchema.parse({ ...config, terminals });
+      // Client validation gives immediate feedback; the server validates again at its boundary.
       const saved = await putConfig(candidate);
       setConfig(saved);
       setMessage({ kind: 'ok', text: 'Saved. Rule changes apply on the next refresh.' });
@@ -55,6 +60,7 @@ export default function ConfigPage() {
 
   const reload = async () => {
     try {
+      // Static reload is independent of saving runtime thresholds.
       await reloadStatic();
       setMessage({ kind: 'ok', text: 'Static GTFS reload triggered.' });
     } catch (err) {
@@ -81,6 +87,7 @@ export default function ConfigPage() {
 
       <section className="route-group">
         <h2>Rule parameters</h2>
+        {/* Labels and matching ids preserve a usable form for keyboard and assistive-tech users. */}
         {rows.map(([label, key]) => (
           <div className="form-row" key={key}>
             <label htmlFor={key}>{label}</label>

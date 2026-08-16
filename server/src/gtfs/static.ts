@@ -14,6 +14,8 @@ import type {
 } from '../providers/types';
 import { detectServiceDayStart, parseGtfsTime } from './time';
 
+// This module turns a downloaded GTFS zip into normalized provider DTOs. It intentionally
+// leaves persistence and table replacement to db/staticLoader.ts.
 export interface GtfsStaticOptions {
   url: string;
   cachePath?: string;
@@ -44,7 +46,10 @@ async function fetchZip(url: string): Promise<Buffer> {
   return buffer;
 }
 
+// Load a valid cached zip or download and optionally cache a fresh static feed.
 export async function downloadStatic(url: string, cachePath?: string): Promise<Buffer> {
+  // A valid local cache avoids an unnecessary download; invalid cache bytes are removed so
+  // the next attempt cannot repeatedly parse the same bad artifact.
   if (cachePath && fs.existsSync(cachePath)) {
     const cached = fs.readFileSync(cachePath);
     if (isZip(cached)) return cached;
@@ -80,6 +85,7 @@ function toNumber(value: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+// Parse the required GTFS CSV members and normalize them into provider DTOs.
 export function parseStatic(buffer: Buffer): ParsedStaticGtfs {
   const zip = new AdmZip(buffer);
 
@@ -113,6 +119,8 @@ export function parseStatic(buffer: Buffer): ParsedStaticGtfs {
 
   const stopTimes: ParsedStopTime[] = [];
   for (const row of readCsv(zip, 'stop_times.txt')) {
+    // Arrival/departure are interchangeable at a stop for the fallback case, but a row with
+    // neither time cannot participate in scheduling and is discarded.
     const arrivalRaw = pick(row, 'arrival_time');
     const departureRaw = pick(row, 'departure_time');
     const arrival = arrivalRaw !== undefined ? parseGtfsTime(arrivalRaw) : null;
@@ -144,6 +152,7 @@ export function parseStatic(buffer: Buffer): ParsedStaticGtfs {
     }
   }
   const serviceDayStartSeconds = detectServiceDayStart(
+    // Detect the operational boundary from the full set of trip spans before normalization.
     Array.from(spanByTrip.values(), (span) => ({ startRaw: span.start, endRaw: span.end })),
   );
 
@@ -184,7 +193,9 @@ export function parseStatic(buffer: Buffer): ParsedStaticGtfs {
 export class GtfsStaticProvider implements StaticProvider {
   constructor(private options: GtfsStaticOptions) {}
 
+  // Load the configured static feed using the provider's cache policy.
   async load(): Promise<ParsedStaticGtfs> {
+    // Forced reloads bypass the cache; normal loads use it as the offline/startup fallback.
     const buffer = this.options.force
       ? await downloadStatic(this.options.url, undefined)
       : await downloadStatic(this.options.url, this.options.cachePath);

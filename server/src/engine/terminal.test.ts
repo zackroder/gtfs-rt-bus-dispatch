@@ -5,6 +5,8 @@ import { autoDiscoverTerminals, outboundTrips, inboundTrips } from './terminal';
 import { syntheticGtfs } from '../test/fixtures';
 import { activeServiceIds } from '../gtfs/time';
 
+// Terminal fixtures use short two-stop routes to make endpoint direction and pickup/drop-off
+// filtering explicit without depending on a full agency schedule.
 describe('terminal resolution', () => {
   it('auto-discovers terminals from route first stops, grouped when co-located', () => {
     const db = createDatabase(':memory:');

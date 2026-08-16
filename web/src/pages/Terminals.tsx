@@ -1,3 +1,4 @@
+/** Terminal index page grouped by route for quick dispatch-area selection. */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getTerminals, type TerminalsResponse } from '../api';
@@ -8,6 +9,7 @@ export default function Terminals() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Ignore a response after navigation so an old request cannot overwrite this page.
     let disposed = false;
     getTerminals()
       .then((response) => {
@@ -24,6 +26,7 @@ export default function Terminals() {
   if (error) return <div className="error">{error}</div>;
   if (!data) return <div className="loading">Loading terminals…</div>;
   if (data.terminals.length === 0) {
+    // Static GTFS must be loaded before the server can discover configured routes.
     return (
       <div className="terminals-page">
         <h1>Terminals</h1>
@@ -38,6 +41,7 @@ export default function Terminals() {
   return (
     <div className="terminals-page">
       <h1>Terminals</h1>
+      {/* Route grouping follows the server's normalized route index. */}
       {data.routes.map((route) => (
         <div key={route.routeId} className="route-group">
           <h2>
@@ -49,6 +53,7 @@ export default function Terminals() {
             {route.longName && <span className="route-name">{route.longName}</span>}
           </h2>
           {route.terminalIds.map((terminalId) => {
+            // A stale route index entry should not produce a broken link.
             const terminal = data.terminals.find((t) => t.id === terminalId);
             if (!terminal) return null;
             return (

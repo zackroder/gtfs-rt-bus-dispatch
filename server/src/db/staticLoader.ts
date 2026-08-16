@@ -2,44 +2,52 @@ import type { Database } from 'better-sqlite3';
 import type { ParsedStaticGtfs } from '../providers/types';
 import { normalizeServiceSeconds } from '../gtfs/time';
 
+// Block chains connect an inbound trip to the next outbound trip assigned to the same vehicle.
+// They are derived from schedule order, then filtered by service date at query time.
+// Rebuild all block-chain rows from the currently loaded static tables.
 export function deriveBlockTrips(db: Database): void {
   db.exec(`DELETE FROM block_trips`);
   const tripRows = db
-    .prepare(`SELECT trip_id, route_id, block_id FROM trips WHERE block_id IS NOT NULL`)
-    .all() as Array<{ trip_id: string; route_id: string; block_id: string }>;
+    .prepare(`SELECT trip_id, route_id, block_id, service_id FROM trips WHERE block_id IS NOT NULL`)
+    .all() as Array<{ trip_id: string; route_id: string; block_id: string; service_id: string }>;
   const firstDepartures = db
     .prepare(`SELECT trip_id, MIN(departure_time) AS dep FROM stop_times GROUP BY trip_id`)
     .all() as Array<{ trip_id: string; dep: number }>;
   const departureByTrip = new Map<string, number>();
   for (const row of firstDepartures) departureByTrip.set(row.trip_id, row.dep);
 
-  const chains = new Map<string, Array<{ tripId: string; routeId: string; start: number }>>();
+  const chains = new Map<string, Array<{ tripId: string; routeId: string; serviceId: string; start: number }>>();
   for (const trip of tripRows) {
     const chain = chains.get(trip.block_id) ?? [];
     chain.push({
       tripId: trip.trip_id,
       routeId: trip.route_id,
+      serviceId: trip.service_id,
       start: departureByTrip.get(trip.trip_id) ?? 0,
     });
     chains.set(trip.block_id, chain);
   }
 
   const insert = db.prepare(
-    `INSERT INTO block_trips (block_id, seq, trip_id, start_time, route_id) VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO block_trips (block_id, seq, trip_id, start_time, route_id, service_id) VALUES (?, ?, ?, ?, ?, ?)`,
   );
   const run = db.transaction(() => {
+    // Rebuilding the derived table in one transaction prevents readers from seeing a partial chain.
     for (const [blockId, chain] of chains) {
       chain.sort((a, b) => a.start - b.start || a.tripId.localeCompare(b.tripId));
       chain.forEach((trip, seq) => {
-        insert.run(blockId, seq, trip.tripId, trip.start, trip.routeId);
+        insert.run(blockId, seq, trip.tripId, trip.start, trip.routeId, trip.serviceId);
       });
     }
   });
   run();
 }
 
+// Replace the static projection and persist the service-day metadata in one transaction.
 export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
   const BUS_ROUTE_TYPE = 3;
+  // Dispatch is a bus-terminal workflow; filtering early avoids mixing rail/non-bus schedules
+  // into terminal discovery and the engine's stop-time queries.
   const busRouteIds = new Set(
     gtfs.routes.filter((r) => r.type === BUS_ROUTE_TYPE).map((r) => r.routeId),
   );
@@ -73,6 +81,8 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
   );
 
   const run = db.transaction(() => {
+    // Static reload replaces the feed rather than appending, while the transaction preserves
+    // the previous coherent dataset until every insert and derived chain succeeds.
     db.exec(`DELETE FROM stops; DELETE FROM routes; DELETE FROM trips;
              DELETE FROM stop_times; DELETE FROM calendar; DELETE FROM calendar_dates;`);
     for (const stop of stops) {
@@ -104,6 +114,7 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
         st.tripId,
         st.stopSequence,
         st.stopId,
+        // Store all schedule times on the same service-day clock, including GTFS 24:00+ values.
         normalizeServiceSeconds(st.arrivalTime, gtfs.serviceDayStartSeconds),
         normalizeServiceSeconds(st.departureTime, gtfs.serviceDayStartSeconds),
         st.pickupType ?? 0,
@@ -128,6 +139,7 @@ export function loadStatic(db: Database, gtfs: ParsedStaticGtfs): void {
       insertCalendarDate.run(cd.serviceId, cd.date, cd.exceptionType);
     }
     deriveBlockTrips(db);
+    // Persist the clock origin and load timestamp alongside the schedule for future refresh decisions.
     saveSetting.run('serviceDayStartSeconds', JSON.stringify(gtfs.serviceDayStartSeconds));
     saveSetting.run('staticLoadedAt', JSON.stringify(Date.now()));
   });

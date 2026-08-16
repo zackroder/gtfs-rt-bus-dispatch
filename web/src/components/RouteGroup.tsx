@@ -1,3 +1,4 @@
+/** Renders one route's operational groups in the order useful to a dispatcher. */
 import type { RouteState } from '../../../shared/types';
 import { BusCard } from './BusCard';
 import { LayoverCard } from './LayoverCard';
@@ -14,6 +15,8 @@ export function RouteGroup({
   generatedAt: number;
   serviceDayStartSeconds: number;
 }) {
+  // Empty is computed across all groups because an intervention is activity even
+  // when no vehicle currently occupies the lookahead lists.
   const empty =
     route.incoming.length === 0 &&
     route.layovers.length === 0 &&
@@ -31,6 +34,7 @@ export function RouteGroup({
       </h2>
       {route.layovers.length > 0 && (
         <div className="group">
+          {/* Layovers come first because they are the immediate dispatch decision set. */}
           <h3>Laying over</h3>
           {route.layovers.map((bus) => (
             <LayoverCard

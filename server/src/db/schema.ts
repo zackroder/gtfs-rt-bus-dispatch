@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 
+// Schema creation is idempotent because the same path is opened on startup and by tests.
+// WAL improves concurrent API reads while foreign keys protect operational references.
+// Open the database and ensure both static and operational tables exist.
 export function createDatabase(dbPath: string): Database.Database {
   if (dbPath !== ':memory:') {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -10,6 +13,7 @@ export function createDatabase(dbPath: string): Database.Database {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(`
+    /* Static GTFS tables are replaced as a unit when a feed is loaded. */
     CREATE TABLE IF NOT EXISTS stops (
       stop_id TEXT PRIMARY KEY,
       stop_code TEXT,
@@ -72,7 +76,8 @@ export function createDatabase(dbPath: string): Database.Database {
       seq INTEGER,
       trip_id TEXT,
       start_time INTEGER,
-      route_id TEXT
+      route_id TEXT,
+      service_id TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_bt_block ON block_trips(block_id);
 
@@ -80,13 +85,83 @@ export function createDatabase(dbPath: string): Database.Database {
       key TEXT PRIMARY KEY,
       value_json TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS interventions (
+      id TEXT PRIMARY KEY,
+      service_date TEXT NOT NULL,
+      terminal_id TEXT NOT NULL,
+      route_id TEXT NOT NULL,
+      rule TEXT NOT NULL,
+      trip_id TEXT NOT NULL,
+      vehicle_id TEXT,
+      leader_vehicle_id TEXT,
+      follower_vehicle_id TEXT,
+      hold_seconds INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      until_seconds INTEGER,
+      generated_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'declined', 'canceled', 'expired', 'completed')),
+      applied_at INTEGER,
+      resolved_at INTEGER,
+      UNIQUE (service_date, terminal_id, route_id, trip_id, rule)
+    );
+    CREATE INDEX IF NOT EXISTS idx_interventions_terminal_date
+      ON interventions(terminal_id, service_date, generated_at);
+    CREATE INDEX IF NOT EXISTS idx_interventions_status
+      ON interventions(status, service_date);
+
+    CREATE TABLE IF NOT EXISTS intervention_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      intervention_id TEXT NOT NULL REFERENCES interventions(id),
+      action TEXT NOT NULL CHECK (action IN ('created', 'viewed', 'applied', 'declined', 'canceled', 'expired', 'completed')),
+      occurred_at INTEGER NOT NULL,
+      actor_id TEXT NOT NULL,
+      request_id TEXT,
+      metadata_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_intervention_events_intervention
+      ON intervention_events(intervention_id, occurred_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_intervention_events_request
+      ON intervention_events(intervention_id, action, request_id)
+      WHERE request_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS config_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      occurred_at INTEGER NOT NULL,
+      actor_id TEXT NOT NULL,
+      request_id TEXT,
+      config_json TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_config_events_request
+      ON config_events(occurred_at, request_id)
+      WHERE request_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS run_facts (
+      service_date TEXT NOT NULL,
+      trip_id TEXT NOT NULL,
+      arrival_seconds INTEGER,
+      departure_seconds INTEGER,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (service_date, trip_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_facts_trip ON run_facts(trip_id);
   `);
+  // These additive migrations keep databases created by earlier builds usable without
+  // destructive recreation, and the backfill supplies service scope to old block rows.
   ensureColumn(db, 'routes', 'color', 'TEXT');
   ensureColumn(db, 'routes', 'text_color', 'TEXT');
+  ensureColumn(db, 'block_trips', 'service_id', 'TEXT');
+  db.exec(`
+    UPDATE block_trips
+    SET service_id = (SELECT service_id FROM trips WHERE trips.trip_id = block_trips.trip_id)
+    WHERE service_id IS NULL
+  `);
   return db;
 }
 
 function ensureColumn(db: Database.Database, table: string, column: string, type: string): void {
+  // SQLite has no general IF NOT EXISTS form for ADD COLUMN, so inspect table_info first.
   const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
   if (!columns.some((c) => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);

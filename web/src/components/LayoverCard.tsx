@@ -1,3 +1,4 @@
+/** Card for a bus at the terminal awaiting its next scheduled departure. */
 import type { LayoverBus } from '../../../shared/types';
 import { Countdown } from './Countdown';
 import { formatClock, formatHold } from '../format';
@@ -11,9 +12,12 @@ export function LayoverCard({
   generatedAt: number;
   serviceDayStartSeconds: number;
 }) {
-  const late = bus.terminalArrival > bus.scheduledArrival;
-  const arrival =
-    bus.terminalArrival > 0 ? formatClock(bus.terminalArrival, serviceDayStartSeconds) : '—';
+  // Arrival can be observed or estimated; absent arrival data is deliberately shown
+  // as unknown rather than inferred from the scheduled departure.
+  const late = bus.terminalArrival !== undefined && bus.terminalArrival > bus.scheduledArrival;
+  const arrival = bus.terminalArrival !== undefined
+    ? formatClock(bus.terminalArrival, serviceDayStartSeconds)
+    : '—';
   const scheduledArrival =
     bus.scheduledArrival > 0 ? formatClock(bus.scheduledArrival, serviceDayStartSeconds) : '—';
   return (
@@ -25,13 +29,15 @@ export function LayoverCard({
       </div>
       <div className="card-side">
         <span className={`arrival ${late ? 'late' : ''}`}>
-          arr {arrival} / sched {scheduledArrival}
+          {bus.terminalArrivalSource === 'estimated' ? 'est ' : 'arr '}
+          {arrival} / sched {scheduledArrival}
         </span>
         <span className="departs">
           dep {formatClock(bus.predictedDeparture, serviceDayStartSeconds)} / sched{' '}
           {formatClock(bus.scheduledDeparture, serviceDayStartSeconds)}
         </span>
         <Countdown seconds={bus.countdownSeconds} generatedAt={generatedAt} />
+        {/* A hold is optional because most layovers have no intervention override. */}
         {bus.hold && (
           <span className="hold-badge">
             held {formatHold(bus.hold.holdSeconds)} {'->'}{' '}

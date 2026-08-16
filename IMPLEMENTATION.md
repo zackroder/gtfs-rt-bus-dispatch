@@ -140,7 +140,8 @@ export interface LayoverBus {
   vehicleId?: string;
   scheduledDeparture: number; // service-day seconds
   scheduledArrival: number;   // scheduled terminal arrival of previous trip in block
-  terminalArrival: number;    // recorded arrival (VP fact, else TU prediction); 0 if unknown
+  terminalArrival?: number;    // observed arrival from VehiclePositions
+  terminalArrivalSource?: 'observed' | 'estimated';
   expectedDeparture: number;  // EDT = max(scheduled, arrival + minRest)
   predictedDeparture: number; // effective: held time if held, else EDT
   countdownSeconds: number;   // predictedDeparture - nowSvc (timer target)
@@ -164,9 +165,11 @@ export type InterventionRule = 'hold';
 
 export interface Intervention {
   id: string;
+  serviceDate: string;
   terminalId: string;
   routeId: string;
   rule: InterventionRule;
+  tripId: string;
   vehicleId?: string;         // the center bus to hold
   leaderVehicleId?: string;
   followerVehicleId?: string;
@@ -174,6 +177,10 @@ export interface Intervention {
   reason: string;
   until?: number;             // service-day seconds
   generatedAt: number;        // unix seconds
+  expiresAt?: number;
+  status: 'pending' | 'applied' | 'declined' | 'canceled' | 'expired' | 'completed';
+  appliedAt?: number;
+  resolvedAt?: number;
 }
 
 export interface RouteState {
@@ -283,7 +290,8 @@ CREATE TABLE IF NOT EXISTS block_trips (
   seq INTEGER,
   trip_id TEXT,
   start_time INTEGER,   -- service-day seconds of trip's first departure
-  route_id TEXT
+  route_id TEXT,
+  service_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_bt_block ON block_trips(block_id);
 
@@ -292,6 +300,13 @@ CREATE TABLE IF NOT EXISTS settings (
   value_json TEXT
 );
 ```
+
+Operational state is stored separately from static/config data in persistent
+`interventions`, append-only `intervention_events`, `config_events`, and
+service-date-scoped `run_facts` tables.
+An intervention identity is stable for a service date, terminal, route, trip,
+and rule. Pending suggestions do not enter dispatch calculations; only
+`applied` suggestions hydrate the active hold ledger.
 
 `stop_times` holds **normalized** service-day seconds (not raw `HH:MM:SS`).
 Only rows for the active service day are needed by the engine, but load the
@@ -451,8 +466,9 @@ Sort the list chronologically by **effective departure** (actual departure if
 - **incoming**: predicted arrival at the terminal from TripUpdates — prefer
   `arrivalTime` (absolute), else `scheduledArrival + arrivalDelay`, else
   trip-level `delay` (exactly today's `arrivalAtTerminal`).
-- **layover**: the *recorded* actual arrival (frozen in the run ledger once the
-  vehicle is at the terminal).
+- **layover**: the observed actual arrival from VehiclePositions, when
+  available. A TripUpdates arrival prediction may be used as an estimated EDT
+  input but is never written as a recorded arrival fact.
 
 ```
 EDT = max(scheduledDeparture, terminalArrival + minRestMinutes*60)
@@ -464,17 +480,19 @@ ETA for an incoming bus = `predictedArrival - nowSvc`.
 
 ### 8.4 Run ledger (in-memory)
 
-A per-process map (keyed by `tripId`), carried across refreshes, that records
-terminal-arrival and departure **facts**:
+A per-process map keyed by the active service date and `tripId`, carried across
+refreshes, that records terminal-arrival and departure **facts**. Applied hold
+state is persisted separately and restored into this ledger:
 
-- `arrivalSeconds` — frozen once a vehicle is observed at/past the terminal
-  (the last predicted arrival becomes the recorded arrival).
+- `arrivalSeconds` — frozen once VehiclePositions observes a vehicle at/past
+  the terminal.
 - `departureSeconds` — the actual departure once observed (§8.5 detection).
-- `hold` — the locked `{ holdSeconds, until }` once decided.
+- `hold` — the locked `{ holdSeconds, until }` only after a pending suggestion
+  is explicitly applied.
 
-The ledger resets on process restart (pilot limitation; SQLite persistence is
-future work). Only `layover`/`departed` facts come from the ledger; `incoming`
-buses get fresh predictions each tick.
+Observed arrival/departure facts are restored from `run_facts` on process
+restart. Only `layover`/`departed` facts come from the ledger; `incoming` buses
+get fresh predictions each tick.
 
 ### 8.5 Dispatch core (`dispatch.ts`)
 
@@ -490,9 +508,12 @@ For each center at index `i` in `[1, n-2]`:
    held `until`, else EDT). Follower reference = `EDT` of `i+1`.
 4. `H_f = center.EDT - leader`, `H_b = follower - center.EDT`.
 5. `holdSeconds = min(max((H_b - H_f)/2, 0), maxHoldMinutes*60)`.
-6. If `holdSeconds > 0`: lock `{ holdSeconds, until = center.EDT + holdSeconds }`
-   and emit the intervention. The locked `until` becomes the center's effective
-   departure for subsequent triplets and for the countdown.
+6. Round the hold to the nearest 30 seconds. If the unrounded hold is less than
+   60 seconds, emit no suggestion. If the resulting hold is positive, create a
+   persistent `pending` suggestion with `until = center.EDT + holdSeconds`.
+   It does not become the center's effective departure until the manager applies
+   it. An applied hold's `until` becomes the center's effective departure for
+   subsequent triplets and for the countdown.
 
 Properties: the `max(…, 0)` floor means a bus is never dispatched early; the
 `min(…, maxHold)` ceiling bounds every hold. The first and last departures have
@@ -525,8 +546,12 @@ For each terminal: group by route; build `RouteState`:
 - `GET /api/config` -> `AppConfig` (redact `apiKey`).
 - `PUT /api/config` -> validate (zod) + persist to `settings` + apply.
 - `POST /api/static/reload` -> re-download + reload static (manual trigger).
-- `WS /api/ws` -> on connect sends current snapshot; on each refresh sends
-  the updated snapshots (message `{ type: 'snapshots', snapshots: [...] }`).
+- `GET /api/interventions?terminalId=T` -> persistent active-service-day queue.
+- `GET /api/interventions/:id` -> intervention detail.
+- `POST /api/interventions/:id/view|apply|decline|cancel` -> audited interaction/state transition.
+- `GET /api/diagnostics/vp` -> read-only VP observations, transition candidates,
+  recorded fact events, and feed freshness/errors.
+- `WS /api/ws` -> sends subscribed terminal snapshots on refresh and after queue actions.
 
 ## 10. Frontend
 
@@ -540,14 +565,14 @@ Mobile-first (max-width container, large tap targets). `react-router-dom`:
   with late arrival red, expected vs scheduled departure, `Countdown`, hold
   badge if held), **Recently departed** (recorded vs scheduled departure,
   purple when held, destination and current stop from VP), and **Interventions**
-  (`InterventionCard`: "Hold <vehicle> until hh:mm (+N min)" + reason).
+  (`InterventionCard`: persistent status with Apply, Decline, and Cancel actions).
 
 Every route header (home + terminal view) and the inbound "Next trip" line
 render a `RouteBadge` — a rounded pill with the route number on the GTFS
 `route_color` background (text `route_text_color`, else auto-contrast
 black/white). Headers put the route long name next to the badge.
 
-`hooks/useCountdown(seconds)` ticks every second and renders `MM:SS`
+`hooks/useCountdown(seconds)` uses a shared page clock and renders `MM:SS`
 (color: green > 2 min, amber 0-2 min, red < 0).
 
 `hooks/useStream.ts`: open WS, fall back to 10s polling of
@@ -570,7 +595,10 @@ Header shows last-updated time and data-source status.
   - triplet pass: the README worked example (holds 2 min then 0), left-to-right
     propagation, first/last never held.
   - trigger window measured from EDT; no fire before it opens.
-  - lock-at-decision: a locked hold is not re-derived on later ticks.
+  - pending suggestions do not change effective departures;
+  - applied holds hydrate after restart and are not re-derived;
+  - declined, canceled, and expired suggestions do not affect dispatch;
+  - hold rounding and the one-minute minimum.
 - Engine (synthetic schedule + synthetic realtime):
   - rest-delayed flag set when a late arrival pushes EDT past scheduled.
   - departed leader uses its actual (recorded) departure in the triplet.
@@ -586,10 +614,12 @@ Header shows last-updated time and data-source status.
 4. Terminal view shows inbound scheduled/estimated arrivals, layover
    recorded/scheduled arrivals with countdowns, recently-departed actual/scheduled
    departures (purple when held) with current stops, and hold badges.
-5. Triplet holds are emitted per §8.5 (EDT + `(H_b - H_f)/2`, floor + cap),
-   locked at decision time, and covered by tests.
+5. Triplet suggestions are emitted per §8.5 with 30-second rounding and the
+   one-minute minimum, then require explicit approval before affecting dispatch.
 6. `PUT /api/config` updates rules live; persisted in SQLite.
-7. `npm run build && npm start` serves the built web bundle from the server.
+7. Intervention state transitions and views are persisted and audited.
+8. VehiclePositions are the only source for recorded arrival/departure facts.
+9. `npm run build && npm start` serves the built web bundle from the server.
 
 ## 13. Sequencing
 

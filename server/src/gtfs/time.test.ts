@@ -11,6 +11,7 @@ import {
 } from './time';
 import { createDatabase } from '../db/schema';
 
+// Time tests pin the service-day clock independently from timezone/date-sensitive engine behavior.
 describe('parseGtfsTime', () => {
   it('parses normal times', () => {
     expect(parseGtfsTime('05:30:00')).toBe(5 * 3600 + 30 * 60);
@@ -31,6 +32,7 @@ describe('parseGtfsTime', () => {
 });
 
 describe('detectServiceDayStart', () => {
+  // Synthetic spans cover normal, overnight, uniform, and empty schedule shapes.
   it('finds the largest overnight lull and returns the first minute after it', () => {
     const spans = [
       { startRaw: 5 * 3600, endRaw: 21 * 3600 },
@@ -104,6 +106,7 @@ describe('activeServiceDate', () => {
 });
 
 describe('activeServiceIds', () => {
+  // These cases verify recurring calendar rows and date exceptions are combined in the documented order.
   it('unions calendar weekday service and calendar_dates, minus removals', () => {
     const db = createDatabase(':memory:');
     db.exec(`
