@@ -67,6 +67,33 @@ export function createApi(deps: ApiDeps): Router {
     sendJson(res, 200, deps.getVpDiagnostics());
   });
 
+  router.get('/run-events', (req, res) => {
+    // Read-only audit of observed arrivals/departures for debugging and tuning. Filterable by
+    // service date, terminal, and event type, with a bounded limit to keep responses small.
+    const serviceDate = typeof req.query.serviceDate === 'string'
+      ? req.query.serviceDate
+      : activeServiceDate(new Date(), getServiceDayStart(deps.db));
+    const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
+    const eventType = typeof req.query.type === 'string' ? req.query.type : undefined;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 2000);
+    const clauses: string[] = ['service_date = ?'];
+    const params: Array<string | number> = [serviceDate];
+    if (terminalId) { clauses.push('terminal_id = ?'); params.push(terminalId); }
+    if (eventType === 'arrival' || eventType === 'departure') { clauses.push('event_type = ?'); params.push(eventType); }
+    const rows = deps.db
+      .prepare(
+        `SELECT service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
+                value_seconds, generated_at, classification, edt_seconds,
+                scheduled_departure, scheduled_arrival
+         FROM run_events
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY generated_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(...params, limit);
+    sendJson(res, 200, { serviceDate, terminalId, eventType, rows });
+  });
+
   router.get('/interventions', (req, res) => {
     // All queue reads are scoped to the currently active service date, including after midnight.
     const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db));

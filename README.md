@@ -228,6 +228,8 @@ global `arrivalRadiusMeters` for that terminal.
 - `POST /api/interventions/:id/view|apply|decline|cancel` — record an interaction or transition its status.
 - `GET /api/diagnostics/vp` — read-only latest Vehicle Position observations,
   transition candidates, recorded fact events, and feed freshness/errors.
+- `GET /api/run-events` — append-only history of recorded arrivals/departures with
+  terminal/route context and dispatch state; filter by `serviceDate`/`terminalId`/`type`.
 - `GET /api/config`, `PUT /api/config` — read/update runtime config.
 - `WS /api/ws` — pushes terminal snapshots on each refresh tick.
 

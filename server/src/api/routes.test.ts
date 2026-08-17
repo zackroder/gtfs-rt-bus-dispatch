@@ -200,4 +200,24 @@ describe('api routes', () => {
     expect(applied.status).toBe(200);
     expect((await applied.json() as { status: string }).status).toBe('applied');
   });
+
+  it('returns the append-only run events log, filterable by terminal', async () => {
+    const deps = makeDeps();
+    const now = Math.floor(Date.now() / 1000);
+    deps.db.prepare(
+      `INSERT INTO run_events
+         (service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
+          value_seconds, generated_at, classification, edt_seconds,
+          scheduled_departure, scheduled_arrival, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run('20260813', 'arrival', 'D1', 'V1', 'T1', '1', 'vp', 1000, now, 'layover', 1100, 1200, 900, now);
+    const base = await startServer(deps);
+    const all = await fetch(`${base}/run-events?serviceDate=20260813`);
+    expect(all.status).toBe(200);
+    const body = (await all.json()) as { rows: Array<{ trip_id: string; event_type: string }> };
+    expect(body.rows.some((r) => r.trip_id === 'D1' && r.event_type === 'arrival')).toBe(true);
+
+    const filtered = await fetch(`${base}/run-events?serviceDate=20260813&terminalId=T1&type=departure`);
+    expect((await filtered.json() as { rows: unknown[] }).rows).toEqual([]);
+  });
 });

@@ -349,6 +349,14 @@ I/O) so it can be reviewed and unit-tested in isolation.
   + movement allowance), and departure requires leaving that zone under motion
   for `departPings`. The headway fallback now keeps an ambiguous bus `incoming`
   rather than silently `departed`, so a tracked vehicle never disappears.
+- **2026-08-17 — Append-only run events audit**: added `run_events` to store a
+  durable timeline of every distinct observed arrival/departure fact (service
+  date, trip, vehicle, terminal, route, source, value, and the classification +
+  EDT at record time). `run_facts` is rewritten per observation for runtime
+  restore, so it loses prior values on correction; `run_events` preserves the
+  history for debugging and tuning the dispatch algorithm. Idempotent via
+  `UNIQUE(service_date, trip_id, event_type, value_seconds)`; exposed read-only
+  via `GET /api/run-events`.
 
 ## Build notes
 

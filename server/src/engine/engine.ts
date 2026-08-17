@@ -19,6 +19,7 @@ import {
   type BlockChains,
   type ArrivalAtStop,
   type FactSource,
+  type OutboundDeparture,
   type RunRecord,
   type TripEnd,
   type VehicleTerminalState,
@@ -338,6 +339,43 @@ export class Engine {
   private recordFactEvent(event: FactEventDiagnostic): void {
     this.factEvents.push(event);
     if (this.factEvents.length > 100) this.factEvents.shift();
+  }
+
+  // Append observed arrival/departure facts to the run_events audit log, carrying the
+  // terminal/route context and the dispatch state (classification, EDT) at the moment the fact
+  // was rendered. UNIQUE(service_date, trip_id, event_type, value_seconds) keeps the log
+  // idempotent across refreshes while preserving every distinct recorded value.
+  private recordRunEvents(
+    departure: OutboundDeparture,
+    terminalId: string,
+    routeId: string,
+    ctx: RefreshContext,
+  ): void {
+    const record = this.ledger.get(departure.tripId);
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO run_events
+         (service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
+          value_seconds, generated_at, classification, edt_seconds,
+          scheduled_departure, scheduled_arrival, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const createdAt = Math.floor(Date.now() / 1000);
+    if (departure.terminalArrival !== undefined && record?.arrivalSource !== undefined) {
+      insert.run(
+        ctx.serviceDate, 'arrival', departure.tripId, departure.vehicleId ?? null,
+        terminalId, routeId, record.arrivalSource, departure.terminalArrival,
+        ctx.generatedAt, departure.state, departure.edt,
+        departure.scheduledDeparture, departure.scheduledArrival, createdAt,
+      );
+    }
+    if (departure.departedSeconds !== undefined && record?.departureSource !== undefined) {
+      insert.run(
+        ctx.serviceDate, 'departure', departure.tripId, departure.vehicleId ?? null,
+        terminalId, routeId, record.departureSource, departure.departedSeconds,
+        ctx.generatedAt, departure.state, departure.edt,
+        departure.scheduledDeparture, departure.scheduledArrival, createdAt,
+      );
+    }
   }
 
   private loadRunFacts(serviceDate: string): void {
@@ -734,6 +772,7 @@ export class Engine {
       const layovers: LayoverBus[] = [];
       const departed: DepartedBus[] = [];
       for (const departure of departures) {
+        this.recordRunEvents(departure, terminal.id, routeId, ctx);
         if (departure.state === 'incoming') {
           incoming.push({
             routeId,

@@ -308,6 +308,29 @@ describe('engine triplet dispatch', () => {
     expect(d2.countdownSeconds).toBe(svc('08:14') - svc('08:08'));
   });
 
+  it('appends observed run events with terminal/route context and dispatch state', () => {
+    const engine = makeEngine();
+    const db = testData(engine).db;
+    engine.refresh(stdRt(), nowAt('08:08'));
+    engine.refresh(stdRt(), nowAt('08:09'));
+    const rows = db
+      .prepare(`SELECT event_type, trip_id, vehicle_id, terminal_id, route_id, source, value_seconds, classification, edt_seconds FROM run_events ORDER BY id`)
+      .all() as Array<{
+      event_type: string; trip_id: string; vehicle_id: string | null;
+      terminal_id: string; route_id: string; source: string;
+      value_seconds: number; classification: string; edt_seconds: number;
+    }>;
+    // D1 departed and D2 arrived (observed facts) in the fixture.
+    const departure = rows.find((r) => r.event_type === 'departure' && r.trip_id === 'D1')!;
+    expect(departure.vehicle_id).toBe('V1');
+    expect(departure.terminal_id).toBe('T');
+    expect(departure.route_id).toBe('1');
+    expect(departure.value_seconds).toBe(svc('08:05'));
+    const arrival = rows.find((r) => r.event_type === 'arrival' && r.trip_id === 'D2')!;
+    expect(arrival.terminal_id).toBe('T');
+    expect(arrival.classification).toBe('layover');
+  });
+
   it('exposes incoming buses with predicted arrival and ETA', () => {
     const engine = makeEngine();
     const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;

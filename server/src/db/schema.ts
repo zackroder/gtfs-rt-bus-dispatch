@@ -146,6 +146,30 @@ export function createDatabase(dbPath: string): Database.Database {
       PRIMARY KEY (service_date, trip_id)
     );
     CREATE INDEX IF NOT EXISTS idx_run_facts_trip ON run_facts(trip_id);
+
+    /* Append-only audit of observed arrival/departure facts, for debugging and tuning the
+       dispatch algorithm. Unlike run_facts (rewritten per observation), this preserves every
+       distinct recorded value with the terminal/route context and dispatch state at the time. */
+    CREATE TABLE IF NOT EXISTS run_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      service_date TEXT NOT NULL,
+      event_type TEXT NOT NULL CHECK (event_type IN ('arrival', 'departure')),
+      trip_id TEXT NOT NULL,
+      vehicle_id TEXT,
+      terminal_id TEXT,
+      route_id TEXT,
+      source TEXT NOT NULL CHECK (source IN ('vp', 'tu')),
+      value_seconds INTEGER NOT NULL,
+      generated_at INTEGER NOT NULL,
+      classification TEXT,
+      edt_seconds INTEGER,
+      scheduled_departure INTEGER,
+      scheduled_arrival INTEGER,
+      created_at INTEGER NOT NULL,
+      UNIQUE (service_date, trip_id, event_type, value_seconds)
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_events_date ON run_events(service_date, generated_at);
+    CREATE INDEX IF NOT EXISTS idx_run_events_trip ON run_events(trip_id);
   `);
   // These additive migrations keep databases created by earlier builds usable without
   // destructive recreation, and the backfill supplies service scope to old block rows.

@@ -314,6 +314,15 @@ An intervention identity is stable for a service date, terminal, route, trip,
 and rule. Pending suggestions do not enter dispatch calculations; only
 `applied` suggestions hydrate the active hold ledger.
 
+**`run_events`** is an append-only audit of every distinct observed
+arrival/departure fact, carrying the terminal/route context and the dispatch
+state (classification, EDT, scheduled times) at the moment it was recorded.
+Unlike `run_facts` (rewritten per observation), this preserves the full
+timeline for debugging and tuning the algorithm. A `UNIQUE(service_date,
+trip_id, event_type, value_seconds)` keeps it idempotent across refreshes while
+retaining each distinct recorded value. Queryable via `GET /api/run-events`
+(filter by `serviceDate`/`terminalId`/`type`, `limit`).
+
 `stop_times` holds **normalized** service-day seconds (not raw `HH:MM:SS`).
 Only rows for the active service day are needed by the engine, but load the
 whole feed into SQLite (read-only reference).
