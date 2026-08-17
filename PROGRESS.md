@@ -303,6 +303,26 @@ I/O) so it can be reviewed and unit-tested in isolation.
   plus the long name; the inbound "Next trip" line uses a mini badge. `routes`
   gains `color`/`text_color` columns (migration adds them to existing DBs).
   `GET /api/terminals` now sorts routes numeric-aware by short name.
+- **2026-08-16 — Geometry-based run facts (arrival/layover/departure)**: live CTA
+  feed analysis (see `FEED_ANALYSIS.md`) showed the existing transition paths
+  cannot fire on CTA: VP carries `stop_id` only ~8% of the time and never
+  `current_stop_sequence`; TU carries no timing fields at all (0/6115 entities);
+  `current_status` is always `IN_TRANSIT_TO`. The engine's stop-matched
+  `at_last_stop`/`past_first_stop` and the TU "known arrival" path were starved,
+  which is why buses stalled in `incoming`. Replaced with a **per-vehicle
+  geometric tracker**: arrival arms when a bus is parked (stationary within the
+  terminal buffer) — first parked ping timestamps the fact, `confirm_pings`
+  consecutive parked pings commit it, and the VP trip flip upgrades/confirms;
+  departure is recorded when a laid-over bus leaves the terminal buffer under
+  motion, with the flip away from the outbound trip as the certain-but-late
+  fallback. Terminal anchor = current trip's last stop (arrival) and stop-1 of
+  the outbound trip (departure), matching observed staging geometry. A
+  scheduled-arm fallback (`scheduled arrival + grace` passed while in buffer)
+  prevents stuck-incoming when CTA omits TU terminal predictions. Static block
+  chains predict the re-key target ~97% of the time, so the flip's only job is
+  confirmation, not linkage. Config knobs: `arrivalRadiusMeters` (default 150,
+  per-terminal `radiusMeters` override), `stationaryDisplacementMeters`,
+  `confirmPings`/`departPings` (default 2), `scheduleArmGraceSeconds`.
 
 ## Build notes
 
@@ -312,6 +332,8 @@ I/O) so it can be reviewed and unit-tested in isolation.
 
 ## Next steps
 
-1. Seed a real CTA API key and run `npm run dev` against live feeds.
+1. Live smoke-test the geometric fact detection against CTA feeds; tune the
+   default radius (150 m) and per-terminal overrides using
+   `/api/diagnostics/vp` (`dist_to_terminal_m`, parked/armed/flip reasons).
 2. Add browser-level tests for queue actions and WebSocket reconnect behavior.
 3. Add co-located multi-route terminal view improvements.

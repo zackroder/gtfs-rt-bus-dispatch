@@ -215,6 +215,11 @@ export interface AppConfig {
   leadTimeMinutes: number;          // 5  (evaluate before expected departure)
   lookaheadMinutes: number;         // 90
   terminals: Terminal[];            // auto-discovered, then editable
+  arrivalRadiusMeters?: number;          // 150, soft arm buffer around a terminal stop
+  stationaryDisplacementMeters?: number; // 20, displacement/poll that counts as parked
+  confirmPings?: number;                 // 2, parked pings before an arm commits
+  departPings?: number;                  // 2, motion pings before a layover departs
+  scheduleArmGraceSeconds?: number;      // 120, grace after scheduled arrival for the fallback
 }
 ```
 
@@ -484,8 +489,8 @@ A per-process map keyed by the active service date and `tripId`, carried across
 refreshes, that records terminal-arrival and departure **facts**. Applied hold
 state is persisted separately and restored into this ledger:
 
-- `arrivalSeconds` — frozen once VehiclePositions observes a vehicle at/past
-  the terminal.
+- `arrivalSeconds` — frozen once the per-vehicle geometric tracker commits an
+  arm (see below) or a VP trip flip confirms it.
 - `departureSeconds` — the actual departure once observed (§8.5 detection).
 - `hold` — the locked `{ holdSeconds, until }` only after a pending suggestion
   is explicitly applied.
@@ -493,6 +498,35 @@ state is persisted separately and restored into this ledger:
 Observed arrival/departure facts are restored from `run_facts` on process
 restart. Only `layover`/`departed` facts come from the ledger; `incoming` buses
 get fresh predictions each tick.
+
+**Geometric fact detection.** VehiclePositions provide the primary transition
+signals on a per-vehicle tracker (`engine.ts recordFacts`), replacing the older
+stop-matched heuristics that CTA's feed cannot drive (VP carries `stop_id` only
+~8% of the time and never `current_stop_sequence`; TripUpdates carry no timing
+fields; `current_status` is always `IN_TRANSIT_TO`). For each vehicle:
+
+- **Arrival arm**: a vehicle parked (stationary, displacement below
+  `stationaryDisplacementMeters`) inside the terminal buffer (within
+  `arrivalRadiusMeters` of the current trip's last stop, default 150 m,
+  per-terminal `radiusMeters` override) arms an arrival. The first parked ping
+  timestamps the fact; `confirmPings` consecutive parked pings commit it keyed
+  to the outbound trip the vehicle will operate (its own trip if already on the
+  outbound leg, else the block successor, else the TU-lookahead assignment). A
+  VP trip flip onto an outbound trip confirms/upgrades the fact (certain-but-late
+  fallback).
+- **Departure**: a laid-over bus that leaves the terminal buffer (stop-1 of the
+  outbound trip) under motion for `departPings` consecutive pings records its
+  departure at the first motion ping. A flip away from an outbound trip is the
+  certain-but-late departure fallback, and a bus first seen mid-route on an
+  outbound trip out of the buffer is treated as departed immediately.
+- **Scheduled-arm fallback**: a bus inside the buffer whose scheduled arrival
+  passed by `scheduleArmGraceSeconds` is classified as an estimated layover even
+  when never observed stationary, preventing the stuck-incoming failure mode.
+
+Flip semantics follow the corrected model: flipping onto a trip records that
+trip's arrival, never the previous inbound leg's departure (the inbound leg
+departed its far-end terminal long before). Static block chains predict the
+re-key target ~97% of the time, so the flip is confirmation, not linkage.
 
 ### 8.5 Dispatch core (`dispatch.ts`)
 
