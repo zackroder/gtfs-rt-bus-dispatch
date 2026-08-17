@@ -339,10 +339,11 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     if (departed) state = 'departed';
     else if (arrivedAtTerminal) state = 'layover';
     else if (onPrevLeg) state = 'incoming';
-    // A bus with no live assignment or arrival signal is ambiguous: prefer a quiet incoming
-    // over an unobservable "departed" so a tracked vehicle never silently disappears from the
-    // terminal view while it is in fact still at the terminal.
-    else state = 'incoming';
+    // A tracked vehicle with an ambiguous posture is still real — show it inbound so it never
+    // silently vanishes. An outbound trip with no vehicle at all is not an inbound bus: keep it
+    // departed (unrendered) rather than fabricating a phantom inbound card.
+    else if (vehicleId !== undefined) state = 'incoming';
+    else state = 'departed';
 
     departures.push({
       tripId: ob.tripId,

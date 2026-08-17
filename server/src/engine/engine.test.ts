@@ -680,6 +680,21 @@ describe('engine triplet dispatch', () => {
     expect(d3.terminalArrivalSource).toBe('estimated');
   });
 
+  it('does not fabricate an inbound card for a scheduled trip with no live vehicle', () => {
+    const engine = makeEngine();
+    // All four block predecessors (P1..P4) are scheduled in the static feed, but no realtime
+    // vehicle is assigned to D1/D2/D3/D4 in the lookahead window. A scheduled trip that is not
+    // active in GTFS-RT (likely missed/cancelled) must not appear as a phantom incoming bus.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    expect(snapshot.routes[0]!.incoming).toEqual([]);
+    expect(snapshot.routes[0]!.layovers).toEqual([]);
+  });
+
   it('keeps a layover when the bus inches forward within the terminal (no drop / no false departure)', () => {
     const engine = makeEngine();
     testData(engine).config.confirmPings = 2;
