@@ -323,6 +323,32 @@ describe('engine triplet dispatch', () => {
     expect(d3.restDelayed).toBe(true);
   });
 
+  it('uses the TripUpdate arrival.time at the inbound last stop as the estimated arrival', () => {
+    const engine = makeEngine();
+    // CTA TripUpdates carry arrival.time on the inbound trip's terminal stop; that absolute
+    // value should drive the estimated inbound arrival rather than falling back to schedule.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        {
+          tripId: 'P2',
+          vehicleId: 'V2',
+          stopTimeUpdates: [
+            { stopId: 'T', stopSequence: 1, arrivalTime: unixAt('08:09') },
+          ],
+          timestamp: 1700000000,
+        },
+      ],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'B', '08:08')],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    const p2 = route.incoming.find((i) => i.tripId === 'P2')!;
+    expect(p2.predictedArrival).toBe(svc('08:09'));
+    expect(p2.delaySeconds).toBe(svc('08:09') - svc('08:07'));
+    expect(p2.etaSeconds).toBe(svc('08:09') - svc('08:08'));
+  });
+
   it('records departures globally so recently-departed survives unviewed gaps', () => {
     const engine = makeEngine();
     const rt = stdRt();

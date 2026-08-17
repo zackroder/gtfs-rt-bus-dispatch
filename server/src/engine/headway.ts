@@ -186,30 +186,27 @@ export interface ArrivalAtStop {
 }
 
 // Look up a trip's scheduled terminal arrival and apply its realtime prediction when available.
+// The terminal is the trip's own last stop (max stop_sequence), not a terminal's configured stops,
+// because the arrival bay often differs from the departure bay and counting only configured stops
+// can miss the genuine endpoint.
 export function arrivalAtTerminal(
   db: Database,
   rt: RealtimeSnapshot,
   tripId: string,
-  stopIds: string[],
+  _stopIds: string[],
   serviceDayStartSeconds: number,
   tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
 ): ArrivalAtStop {
-  const placeholders = stopIds.map(() => '?').join(',');
-  const rows = db
+  const row = db
     .prepare(
       `SELECT stop_id, arrival_time, departure_time, stop_sequence
-       FROM stop_times WHERE trip_id = ? AND stop_id IN (${placeholders})`,
+       FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence DESC LIMIT 1`,
     )
-    .all(tripId, ...stopIds) as Array<{
-    stop_id: string;
-    arrival_time: number;
-    departure_time: number;
-    stop_sequence: number;
-  }>;
-  if (rows.length === 0) return { scheduled: 0, predicted: 0, known: false };
-  rows.sort((a, b) => a.stop_sequence - b.stop_sequence);
-  const last = rows[rows.length - 1]!;
-  const scheduled = last.arrival_time ?? last.departure_time;
+    .get(tripId) as
+    | { stop_id: string; arrival_time: number; departure_time: number; stop_sequence: number }
+    | undefined;
+  if (!row) return { scheduled: 0, predicted: 0, known: false };
+  const scheduled = row.arrival_time ?? row.departure_time;
 
   const tripUpdate = tripUpdatesById?.get(tripId) ?? rt.tripUpdates.find((u) => u.tripId === tripId);
   // A terminal prediction is only useful when the TU identifies the corresponding trip.
@@ -217,8 +214,8 @@ export function arrivalAtTerminal(
 
   const fact = arrivalFact(
     tripUpdate,
-    last.stop_id,
-    last.stop_sequence,
+    row.stop_id,
+    row.stop_sequence,
     scheduled,
     serviceDayStartSeconds,
   );
