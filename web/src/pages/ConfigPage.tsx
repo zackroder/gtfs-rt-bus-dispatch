@@ -76,6 +76,11 @@ export default function ConfigPage() {
     ['Max hold (min)', 'maxHoldMinutes'],
     ['Lead time (min)', 'leadTimeMinutes'],
     ['Lookahead (min)', 'lookaheadMinutes'],
+    ['Arrival radius (m)', 'arrivalRadiusMeters'],
+    ['Stationary displacement (m)', 'stationaryDisplacementMeters'],
+    ['Confirm pings', 'confirmPings'],
+    ['Depart pings', 'departPings'],
+    ['Scheduled-arm grace (s)', 'scheduleArmGraceSeconds'],
   ];
 
   return (

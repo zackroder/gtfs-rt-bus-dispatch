@@ -12,6 +12,8 @@ export interface Terminal {
   name: string;
   stopIds: string[];
   routeIds?: string[];
+  /** Optional per-terminal proximity radius (meters) for arrival/layover detection. */
+  radiusMeters?: number;
 }
 
 /** The small stop projection needed by terminal resolution and display. */
@@ -49,6 +51,8 @@ export interface VehiclePositionInfo {
   tripId?: string;
   stopId?: string;
   currentStopSequence?: number;
+  lat?: number;
+  lon?: number;
   timestamp: number;
 }
 
@@ -184,6 +188,16 @@ export interface AppConfig {
   leadTimeMinutes: number;
   lookaheadMinutes: number;
   terminals: Terminal[];
+  /** Radius (meters) around a terminal stop within which a parked bus is counted as arrived. */
+  arrivalRadiusMeters?: number;
+  /** Displacement (meters) between polls that still counts as "parked" for arrival/departure arms. */
+  stationaryDisplacementMeters?: number;
+  /** Consecutive parked polls required before a proximity arm becomes a committed arrival fact. */
+  confirmPings?: number;
+  /** Consecutive moving/outside-buffer polls required before a layover becomes a committed departure. */
+  departPings?: number;
+  /** Grace (seconds) after the scheduled arrival before the scheduled-arm fallback fires. */
+  scheduleArmGraceSeconds?: number;
 }
 
 /** Validates terminal identity and its non-empty stop membership. */
@@ -192,6 +206,7 @@ export const terminalSchema = z.object({
   name: z.string().min(1),
   stopIds: z.array(z.string().min(1)).min(1),
   routeIds: z.array(z.string().min(1)).optional(),
+  radiusMeters: z.number().int().min(0).max(5000).optional(),
 });
 
 /** Optional metadata sent with an intervention action for tracing/audit purposes. */
@@ -215,6 +230,11 @@ export const appConfigSchema = z.object({
   leadTimeMinutes: z.number().int().min(0).max(600),
   lookaheadMinutes: z.number().int().min(5).max(1440),
   terminals: z.array(terminalSchema),
+  arrivalRadiusMeters: z.number().int().min(0).max(5000).optional(),
+  stationaryDisplacementMeters: z.number().int().min(0).max(1000).optional(),
+  confirmPings: z.number().int().min(1).max(30).optional(),
+  departPings: z.number().int().min(1).max(30).optional(),
+  scheduleArmGraceSeconds: z.number().int().min(0).max(3600).optional(),
 });
 
 // Nested vehicle DTO schemas are kept private because callers consume them through

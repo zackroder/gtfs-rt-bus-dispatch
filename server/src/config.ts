@@ -23,9 +23,33 @@ const DEFAULT_URLS = {
   staticGtfsUrl: 'https://www.transitchicago.com/downloads/sch_data/google_transit.zip',
 };
 
+// Geometry-detection defaults, applied when a saved or env-derived config omits them
+// so an older persisted config transparently gains the new keys after a reload.
+export const GEOMETRY_DEFAULTS = {
+  arrivalRadiusMeters: 150,
+  stationaryDisplacementMeters: 20,
+  confirmPings: 2,
+  departPings: 2,
+  scheduleArmGraceSeconds: 120,
+} as const;
+
+// Fill missing geometry settings from defaults; keeps schema-optional fields present at runtime.
+function withGeometryDefaults(config: AppConfig): AppConfig {
+  return {
+    ...config,
+    arrivalRadiusMeters: config.arrivalRadiusMeters ?? GEOMETRY_DEFAULTS.arrivalRadiusMeters,
+    stationaryDisplacementMeters:
+      config.stationaryDisplacementMeters ?? GEOMETRY_DEFAULTS.stationaryDisplacementMeters,
+    confirmPings: config.confirmPings ?? GEOMETRY_DEFAULTS.confirmPings,
+    departPings: config.departPings ?? GEOMETRY_DEFAULTS.departPings,
+    scheduleArmGraceSeconds:
+      config.scheduleArmGraceSeconds ?? GEOMETRY_DEFAULTS.scheduleArmGraceSeconds,
+  };
+}
+
 // Environment variables provide first-run defaults; persisted settings take precedence afterward.
 function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
-  return {
+  const config: AppConfig = {
     realtime: {
       tripUpdatesUrl: env.CTA_TU_URL ?? DEFAULT_URLS.tripUpdatesUrl,
       vehiclePositionsUrl: env.CTA_VP_URL ?? DEFAULT_URLS.vehiclePositionsUrl,
@@ -40,6 +64,7 @@ function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
     lookaheadMinutes: 90,
     terminals: [],
   };
+  return withGeometryDefaults(config);
 }
 
 export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
@@ -51,7 +76,7 @@ export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
     return config;
   }
   const parsed: unknown = JSON.parse(saved);
-  const config = appConfigSchema.parse(parsed);
+  const config = appConfigSchema.parse(withGeometryDefaults(parsed as AppConfig));
   let mutated = false;
   // Secrets and newly introduced feed settings may still be supplied by the environment
   // without overwriting the operator's other persisted choices.
@@ -77,7 +102,7 @@ export function applyConfig(db: Database, current: AppConfig, next: AppConfig): 
       apiKey: next.realtime.apiKey || current.realtime.apiKey,
     },
   };
-  const validated = appConfigSchema.parse(merged);
+  const validated = appConfigSchema.parse(withGeometryDefaults(merged));
   setSetting(db, 'appConfig', validated);
   return validated;
 }

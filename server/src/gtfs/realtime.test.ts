@@ -101,6 +101,8 @@ describe('realtime decode', () => {
         tripId: 'T1',
         stopId: 'STOP12',
         currentStopSequence: 12,
+        lat: 41.88,
+        lon: -87.63,
         timestamp: 1700000005,
       },
       {
@@ -108,6 +110,8 @@ describe('realtime decode', () => {
         tripId: undefined,
         stopId: undefined,
         currentStopSequence: undefined,
+        lat: undefined,
+        lon: undefined,
         timestamp: 1700000006,
       },
     ]);

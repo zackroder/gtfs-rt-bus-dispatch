@@ -85,11 +85,17 @@ export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number
     const tripId = vp.trip?.tripId;
     const stopId = vp.stopId ?? undefined;
     const stopSequence = toSeconds(vp.currentStopSequence);
+    // Position coordinates are required for proximity-based terminal detection; a provider
+    // that omits them simply leaves the geometry fields unset.
+    const lat = vp.position ? toSeconds(vp.position.latitude) : undefined;
+    const lon = vp.position ? toSeconds(vp.position.longitude) : undefined;
     positions.push({
       vehicleId,
       tripId: tripId || undefined,
       stopId: stopId || undefined,
       currentStopSequence: stopSequence !== undefined && stopSequence > 0 ? stopSequence : undefined,
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lon: Number.isFinite(lon) ? lon : undefined,
       timestamp: toSeconds(vp.timestamp) ?? timestamp,
     });
   }
