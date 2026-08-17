@@ -111,6 +111,14 @@ function fixtureTrips(): TripSpec[] {
         { stopId: 'B', arr: '09:00:00', dep: '09:00:00', dropOff: 0 },
       ],
     },
+    // First trip of its block (no block_id predecessor): hatches out of a non-rev/deadhead leg.
+    {
+      tripId: 'D5',
+      stopTimes: [
+        { stopId: 'T', arr: '08:35:00', dep: '08:35:00', pickup: 0 },
+        { stopId: 'B', arr: '09:05:00', dep: '09:05:00', dropOff: 0 },
+      ],
+    },
   ];
 }
 
@@ -810,5 +818,41 @@ describe('engine triplet dispatch', () => {
     const after = route1(engine.refresh(leftRt, nowAt('08:14'))[0]!);
     expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(false);
     expect(after.departed.some((d) => d.tripId === 'D2')).toBe(true);
+  });
+
+  it('classifies a first-of-block bus as layover from TU assignment at the terminal (no inbound leg)', () => {
+    const engine = makeEngine();
+    // V9 has no VP trip (deadhead / non-rev leg not in static) and is parked at terminal T.
+    // TU operates outbound trip D5 (first trip of its block, no block predecessor). Posture
+    // + TU assignment must classify it as layover without any inbound trip identity.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:35'),
+      tripUpdates: [
+        {
+          tripId: 'D5',
+          vehicleId: 'V9',
+          stopTimeUpdates: [
+            { stopId: 'T', stopSequence: 0, departureTime: unixAt('08:35') },
+          ],
+          timestamp: 1700000000,
+        },
+      ],
+      vehiclePositions: [{ vehicleId: 'V9', lat: 41.8, lon: -87.6, timestamp: unixAt('08:35') }],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:35'))[0]!;
+    const route = route1(snapshot);
+    const d5 = route.layovers.find((l) => l.tripId === 'D5')!;
+    expect(d5.vehicleId).toBe('V9');
+    expect(d5.terminalArrivalSource).toBe('estimated');
+    // A bus not present at the terminal must not be pulled into layover by TU assignment alone.
+    const elsewhere: RealtimeSnapshot = {
+      timestamp: unixAt('08:35'),
+      tripUpdates: [
+        { tripId: 'D5', vehicleId: 'V9', stopTimeUpdates: [], timestamp: 1700000000 },
+      ],
+      vehiclePositions: [{ vehicleId: 'V9', lat: 41.6, lon: -87.9, timestamp: unixAt('08:35') }],
+    };
+    const snapshot2 = route1(engine.refresh(elsewhere, nowAt('08:35'))[0]!);
+    expect(snapshot2.layovers.some((l) => l.tripId === 'D5')).toBe(false);
   });
 });

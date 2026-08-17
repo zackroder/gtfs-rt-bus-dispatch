@@ -26,7 +26,7 @@ import {
 } from './headway';
 import { decideTriplets } from './dispatch';
 import { outboundRoutesAtTerminal, routeStyle } from './terminal';
-import { distanceMeters, distanceToStopMeters, stopCoordinates, type GeoPoint } from './geometry';
+import { distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
 
 // Engine owns the cross-refresh ledger: realtime snapshots are transient, while observed
 // VP facts and approved interventions must survive feed gaps and process restarts.
@@ -496,8 +496,22 @@ export class Engine {
         reasons: [],
       };
       if (!vp.tripId || !ends.has(vp.tripId)) {
+        // A deadhead / non-revenue / first-of-block leg has no static trip, so we cannot resolve
+        // its endpoint — but we can still record whether the vehicle is parked at a terminal from
+        // pure geometry. That posture is what lets a TU assignment confirm a layover independent
+        // of the inbound trip's identity.
+        const nearest = nearestStopMeters(this.stopCoords(), Array.from(terminalStopIds), point);
+        diagnostic.distToTerminalM = Number.isFinite(nearest.meters) ? Math.round(nearest.meters) : undefined;
+        diagnostic.inTerminalBuffer = nearest.meters <= this.terminalRadiusMeters(nearest.stopId);
+        diagnostic.parked =
+          diagnostic.inTerminalBuffer && (displacementM === undefined || displacementM < stationaryMeters);
         diagnostic.reasons.push(!vp.tripId ? 'missing_trip_id' : 'trip_not_in_static_feed');
         this.vpDiagnostics.push(diagnostic);
+        vpTerminalState.set(vp.vehicleId, {
+          inBuffer: diagnostic.inTerminalBuffer,
+          parked: diagnostic.parked,
+          distToTerminalM: diagnostic.distToTerminalM,
+        });
         track.tripId = vp.tripId ?? track.tripId;
         track.lat = point?.lat;
         track.lon = point?.lon;

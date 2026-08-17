@@ -304,6 +304,11 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     // has passed by the grace window. An active arm/layover posture on this outbound trip keeps
     // the bus in layover while it inches within the terminal.
     const parkedAtTerminal = terminalState?.inBuffer === true && terminalState.parked === true;
+    // TU-assignment layover: no preceding leg in the schedule (first-of-block / post-deadhead).
+    // If TU is operating this outbound trip and the vehicle is sitting at the terminal, it is
+    // laying over for ob even though there is no inbound trip identity to arm against.
+    const tuOperatesOb = vehicleId !== undefined && vehicleToTrip.get(vehicleId) === ob.tripId;
+    const assignedAtTerminal = terminalState?.inBuffer === true && tuOperatesOb;
     const hasPostureForTrip =
       terminalState?.armTripId === ob.tripId || terminalState?.layoverTripId === ob.tripId;
     const grace = opts.scheduleArmGraceSeconds ?? 120;
@@ -319,10 +324,10 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const terminalArrival = record?.arrivalSeconds;
     const arrivalSource = terminalArrival !== undefined
       ? 'observed'
-      : parkedAtTerminal || scheduledArm || hasPostureForTrip || hasArrivalInfo
+      : parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal || hasArrivalInfo
         ? 'estimated'
         : undefined;
-    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm || hasPostureForTrip
+    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal
       ? Math.max(scheduledArrival, opts.nowSvc)
       : onPrevLeg && hasArrivalInfo
         ? predictedArrival
@@ -337,6 +342,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       parkedAtTerminal ||
       scheduledArm ||
       hasPostureForTrip ||
+      assignedAtTerminal ||
       (onPrevLeg && hasArrivalInfo && predictedArrival <= opts.nowSvc) ||
       record?.arrivalSeconds !== undefined;
     let state: VehicleState;
