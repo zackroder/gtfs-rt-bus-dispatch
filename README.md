@@ -199,17 +199,23 @@ SQLite. Env vars only seed the initial defaults.
 | `CTA_VP_URL` | CTA vehicles.pb | VehiclePositions feed (keyed) |
 | `CTA_TU_URL` | CTA tripupdates.pb | TripUpdates feed (keyed) |
 | `CTA_API_KEY` | — | Required; GTFS-RT API key (appended as `?key=`) |
-| `refresh_interval_seconds` | 10 | Realtime poll interval |
-| `static_refresh_hours` | 24 | Re-load static GTFS |
-| `min_rest_minutes` | 5 | Mandatory operator rest (used in EDT) |
-| `max_hold_minutes` | 10 | Absolute ceiling on any hold |
-| `lead_time_minutes` | 5 | Evaluate a hold this far before expected departure |
-| `lookahead_minutes` | 90 | Horizon of departures to consider |
-| `terminals` | auto-discovered | `[{ id, name, stop_ids[], route_ids[]? }]` |
+| `refreshIntervalSeconds` | 10 | Realtime poll interval |
+| `staticRefreshHours` | 24 | Re-load static GTFS |
+| `minRestMinutes` | 5 | Mandatory operator rest (used in EDT) |
+| `maxHoldMinutes` | 10 | Absolute ceiling on any hold |
+| `leadTimeMinutes` | 5 | Evaluate a hold this far before expected departure |
+| `lookaheadMinutes` | 90 | Horizon of departures to consider |
+| `arrivalRadiusMeters` | 150 | Soft arm buffer around a terminal stop |
+| `stationaryDisplacementMeters` | 20 | Displacement/poll that counts as parked |
+| `confirmPings` | 2 | Parked pings before an arrival arm commits |
+| `departPings` | 2 | Motion pings before a layover departs |
+| `scheduleArmGraceSeconds` | 120 | Grace after scheduled arrival for the fallback |
+| `terminals` | auto-discovered | `[{ id, name, stopIds[], routeIds[]?, radiusMeters? }]` |
 
 Terminals are auto-discovered from GTFS (stops that are a route's first/last
 stop) and can be curated via config or the UI. A terminal may map to multiple
-`stop_id`s and routes (co-located terminals).
+`stop_id`s and routes (co-located terminals); `radiusMeters` overrides the
+global `arrivalRadiusMeters` for that terminal.
 
 ## API
 

@@ -60,19 +60,25 @@ this file (and the decisions log) after finishing any milestone.
 
 ## Phase 3 — Join engine
 
+> Note: the headway-pair rule described in this phase was **superseded by the
+> triplet/EDT model (Phase 7)**. The current dispatch rule is the middle-bus
+> even-headway hold in `dispatch.ts`; see Phase 7 below.
+
 - [x] `server/src/engine/terminal.ts` — resolve a terminal: which trips
       depart/arrive at its `stop_id`s, per route (first/last stop detection).
 - [x] `server/src/engine/headway.ts` — ordered outbound departures for a
       route/terminal in the lookahead window; assign vehicles via
       block trip chaining + realtime trip assignment; classify each as
       `layover` vs `incoming`; compute scheduled headway `H` per pair.
+      *(Superseded: EDT + triplet hold replaced pair-headway math.)*
 - [x] Predicted departure: from TripUpdate terminal stop prediction, else
       `max(predicted_arrival, now) + min_rest`.
 - [x] `server/src/engine/interventions.ts` — unified headway rule using
       scheduled headway per pair: `P > gap_factor*H` -> hold leader;
       `P < bunch_factor*H` -> hold follower; plus gap alert + min-rest
       advisory. Emit `Intervention` DTOs with `hold_minutes`, `reason`,
-      `expires_at`.
+      `expires_at`. *(Superseded: file removed in Phase 7; the gap/bunch
+      factors no longer exist.)*
 - [x] `server/src/engine/engine.ts` — orchestrates refresh -> normalized
       `TerminalSnapshot` for each configured terminal.
 - [x] Tests: synthetic schedule + synthetic realtime fixtures for each rule
@@ -192,20 +198,26 @@ I/O) so it can be reviewed and unit-tested in isolation.
   read-only static tables + `settings` key/value for runtime config.
 - **2026-08-13 — Interventions**: four rules for v1 (hold leader = primary;
   hold follower anti-bunching; gap alert; min-rest advisory). Hold propagation
-  across pairs computed independently for now.
+  across pairs computed independently for now. *(Superseded 2026-08-14 by the
+  single triplet hold rule — see the "Triplet dispatch model" entry below.)*
 - **2026-08-13 — Leader vs follower**: unified headway rule — hold leader when
   predicted headway > max_gap (gap); hold follower when < min_headway
   (bunching). Leader hold = split follower lateness; follower hold = restore
-  min spacing.
+  min spacing. *(Superseded 2026-08-14 by the triplet model; there is no
+  leader/follower pair rule anymore.)*
 - **2026-08-13 — Gap/bunch thresholds**: relative to scheduled headway
   (`gap_factor` 1.5x, `bunch_factor` 0.5x) rather than absolute minutes, so
   they scale with route and time of day; `max_hold_minutes` remains the
-  absolute cap.
+  absolute cap. *(Superseded 2026-08-14: `gap_factor`/`bunch_factor` removed;
+  the hold formula is now `min(max((H_b - H_f)/2, 0), max_hold)` around the
+  middle bus.)*
 - **2026-08-13 — Service-day start**: auto-detected from GTFS stop_times
   (largest overnight gap in trip activity) rather than a fixed/configurable
   hour; fallback to 03:00 for 24h operation.
 - **2026-08-13 — Countdown**: layover countdown targets scheduled departure;
   holds shown as an override badge, not baked into the countdown.
+  *(Superseded 2026-08-14: the countdown now targets the effective departure —
+  the locked hold `until` when held, else EDT.)*
 - **2026-08-13 — Terminals**: auto-discovered from GTFS first/last stop; manual
   curation via config for co-located multi-stop terminals.
 - **2026-08-13 — Predicted departure (layover)**: `max(scheduledDeparture,
@@ -213,12 +225,16 @@ I/O) so it can be reviewed and unit-tested in isolation.
   scheduled time; spec §8.3's `max(arrival, now) + minRest` is the earliest-
   permissible case and is a lower bound. Holds are attached as badges and
   never feed back into pair math (independent holds per §8.4).
+  *(Last sentence superseded 2026-08-14: an applied hold's `until` becomes the
+  bus's effective departure and propagates left-to-right; see "Applied holds
+  are locked".)*
 - **2026-08-13 — min_rest interpretation**: advisory fires when the *scheduled*
   departure would leave less than `min_rest` after the predicted arrival
   (`scheduledDeparture - predictedArrival < minRestMinutes*60`). Using the
   rest-adjusted predicted departure alone would never trip (it embeds min_rest
   by construction); the scheduled comparison is the only reachable reading of
-  README rule 4.
+  README rule 4. *(Superseded 2026-08-14: the min-rest advisory was dropped with
+  the four-rule model; min rest is now expressed only through EDT.)*
 - **2026-08-13 — Incoming buses**: derived from outbound departures (a bus is
   "incoming" when its block's previous trip is inbound with a future arrival),
   per §8.2. Buses whose next outbound trip falls outside the lookahead window
