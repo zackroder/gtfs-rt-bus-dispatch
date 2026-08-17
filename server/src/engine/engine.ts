@@ -579,11 +579,14 @@ export class Engine {
       diagnostic.parked =
         diagnostic.inTerminalBuffer && (displacementM === undefined || displacementM < stationaryMeters);
 
-      // Arrival arm: commit once confirmPings parked pings elapse, keyed to the outbound trip the
-      // vehicle forms. The flip onto that trip remains the certain-but-late fallback. The arm is
-      // gated on stationarity so a through-bus merely crossing the buffer cannot phantom-arm, but
-      // once armed it survives movement within the hold zone (terminal inching).
-      if (diagnostic.inTerminalBuffer && diagnostic.parked) {
+      // Arrival arm: commit once the vehicle has dwelled in the terminal hold zone for
+      // confirmPings refreshes, keyed to the outbound trip it forms. "Dwell" means being inside
+      // the hold zone (parked OR inching within it) with a resolved target — modest local
+      // movement is tolerated so a bus that parks then pulls forward still latches. The flip
+      // onto that trip remains the certain-but-late fallback, and arrivalTargetFor restricts the
+      // target to ob that actually starts at this terminal on this route (anti-phantom guard).
+      const inHoldZone = inTerminal && (atAnchorStop || distToTerminal <= holdRadius);
+      if (inHoldZone) {
         const target = this.arrivalTargetFor(vp.tripId, vp.vehicleId, rt, chains);
         if (target) {
           const alreadyArrived = this.ledger.get(target)?.arrivalSeconds !== undefined;
@@ -608,7 +611,7 @@ export class Engine {
               track.parkedStreak = 0;
               track.armTripId = undefined;
             } else {
-              diagnostic.reasons.push('arrival_armed');
+              diagnostic.reasons.push(diagnostic.parked ? 'arrival_armed' : 'arrival_dwelling');
             }
           } else {
             diagnostic.reasons.push('arrival_already_recorded');
@@ -616,17 +619,15 @@ export class Engine {
         } else {
           diagnostic.reasons.push('no_arrival_target');
         }
-      } else if (inTerminal && (atAnchorStop || distToTerminal <= holdRadius)) {
-        // Inside the hold zone: movement is tolerated. Keep an existing arm alive so a bus that
-        // arrives then inches forward still commits; a never-armed bus just passing through resets.
-        if (track.armTripId) {
-          diagnostic.reasons.push('arrival_armed_holding');
-        } else {
-          diagnostic.reasons.push('in_hold_zone_unarmed');
-          track.parkedStreak = 0;
-        }
       } else if (diagnostic.parked) {
         diagnostic.reasons.push('parked_not_in_terminal_buffer');
+      } else if (track.armTripId) {
+        // Left the hold zone entirely: drop the pending arm so a bus that pulls out before the
+        // arm latches does not linger as a would-be layover.
+        diagnostic.reasons.push('left_hold_zone_abort');
+        track.parkedStreak = 0;
+        track.armTripId = undefined;
+        track.armAtSvc = undefined;
       }
 
       // Position-based departure: a vehicle already operating an outbound trip and beyond the

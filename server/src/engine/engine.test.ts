@@ -175,6 +175,10 @@ function stdRt(): RealtimeSnapshot {
     vehiclePositions: [
       vpAtStop('V1', 'D1', 'B', '08:05', 1),
       vpAtStop('V2', 'P2', 'T', '08:07', 1),
+      // The incoming buses are observed on their inbound legs via VP (as CTA carries tripId on
+      // VP); TU alone no longer implies currentTrip, so these are required for incoming state.
+      vpAtStop('V3', 'P3', 'MID', '08:20'),
+      vpAtStop('V4', 'P4', 'MID', '08:27'),
     ],
   };
 }
@@ -259,6 +263,8 @@ describe('engine triplet dispatch', () => {
       vehiclePositions: [
         vpAtStop('V1', 'D1', 'B', '08:07', 1),
         vpAtStop('V2', 'P2', 'T', '08:07', 1),
+        vpAtStop('V3', 'P3', 'MID', '08:20'),
+        vpAtStop('V4', 'P4', 'MID', '08:27'),
       ],
     };
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
@@ -564,18 +570,46 @@ describe('engine triplet dispatch', () => {
 
   it('records terminal arrival from a vehicle position at the last stop, overriding the TU prediction', () => {
     const engine = makeEngine();
-    const tuOnly = stdRt();
-    engine.refresh(tuOnly, nowAt('08:18'), new Set());
-    const d3First = route1(engine.refresh(tuOnly, nowAt('08:18'))[0]!).layovers.find((l) => l.tripId === 'D3')!;
-    expect(d3First.terminalArrival).toBeUndefined();
+    const base: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        arrUpdate('P1', 'V1'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
+      vehiclePositions: [
+        vpAtStop('V1', 'D1', 'MID', '08:12'),
+        vpAtStop('V2', 'P2', 'T', '08:07', 1),
+        // V3 on the inbound leg, not yet at the terminal.
+        vpAtStop('V3', 'P3', 'MID', '08:18'),
+      ],
+    };
+    // V3 inbound mid-route: D3 is an estimated layover (TU prediction passed, no recorded arrival).
+    const before = route1(engine.refresh(base, nowAt('08:18'))[0]!);
+    const d3Est = before.layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3Est.terminalArrivalSource).toBe('estimated');
+    expect(d3Est.terminalArrival).toBeUndefined();
 
+    // Now a fresh engine observes V3 parked at the terminal's last stop: the recorded arrival
+    // overrides the TU prediction (first parked observation arms and commits with confirmPings=1).
+    const fresh = makeEngine();
     const withVp: RealtimeSnapshot = {
-      ...tuOnly,
+      timestamp: unixAt('08:19'),
+      tripUpdates: [
+        depUpdate('D1', 'V1', '08:05'),
+        arrUpdate('P1', 'V1'),
+        arrUpdate('P2', 'V2'),
+        arrUpdate('P3', 'V3'),
+        arrUpdate('P4', 'V4'),
+      ],
       vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:19', 1)],
     };
-    const snapshot = engine.refresh(withVp, nowAt('08:19'))[0]!;
+    const snapshot = fresh.refresh(withVp, nowAt('08:19'))[0]!;
     const d3 = route1(snapshot).layovers.find((l) => l.tripId === 'D3')!;
     expect(d3.terminalArrival).toBe(svc('08:19'));
+    expect(d3.terminalArrivalSource).toBe('observed');
     expect(d3.scheduledArrival).toBe(svc('08:18'));
     expect(d3.expectedDeparture).toBe(svc('08:24'));
   });
@@ -730,9 +764,10 @@ describe('engine triplet dispatch', () => {
     expect(d2.departureSeconds).toBe(svc('08:12'));
   });
 
-  it('scheduled-arm fallback: a bus in the buffer past its scheduled arrival is a layover even when not stationary', () => {    const engine = makeEngine();
-    // confirmPings stays at the production default of 2 so no observed fact is recorded; the
-    // fallback must classify on geometry + schedule alone.
+  it('latches a layover on hold-zone dwell even while the bus is moving in the terminal', () => {
+    const engine = makeEngine();
+    // confirmPings stays at the production default of 2; two hold-zone dwell pings (parked or
+    // inching) commit the arrival to observed, so the bus latches rather than flickering.
     testData(engine).config.confirmPings = 2;
     testData(engine).config.departPings = 2;
     const first: RealtimeSnapshot = {
@@ -741,9 +776,9 @@ describe('engine triplet dispatch', () => {
       vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:20')],
     };
     engine.refresh(first, nowAt('08:20'));
-    // Second ping: still inside the buffer (≈60m from T) but moving (>20m displacement from the
-    // first ping at T), so parked=false and no geometric arm can commit; P3's scheduled arrival
-    // (08:18) plus grace (120s) has passed.
+    // Second ping: still inside the hold zone (≈55m from T) but moving (>20m displacement from
+    // the first ping). Hold-zone dwell tolerates this inching, so the arm latches to observed on
+    // the second ping rather than bouncing back to incoming.
     const moving: RealtimeSnapshot = {
       timestamp: unixAt('08:21'),
       tripUpdates: [],
@@ -761,7 +796,8 @@ describe('engine triplet dispatch', () => {
     const route = route1(snapshot);
     expect(route.incoming.some((i) => i.tripId === 'P3')).toBe(false);
     const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
-    expect(d3.terminalArrivalSource).toBe('estimated');
+    expect(d3.terminalArrivalSource).toBe('observed');
+    expect(d3.terminalArrival).toBe(svc('08:20'));
   });
 
   it('does not fabricate an inbound card for a scheduled trip with no live vehicle', () => {
@@ -881,5 +917,31 @@ describe('engine triplet dispatch', () => {
     };
     const snapshot2 = route1(engine.refresh(elsewhere, nowAt('08:35'))[0]!);
     expect(snapshot2.layovers.some((l) => l.tripId === 'D5')).toBe(false);
+  });
+
+  it('latches a layover after dwell so it does not flicker back to incoming', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const parked: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    engine.refresh(parked, nowAt('08:08'));
+    engine.refresh(parked, nowAt('08:09'));
+    // Dwell latches: arrival is recorded, so D2 is a layover.
+    expect(route1(engine.refresh(parked, nowAt('08:10'))[0]!).layovers.some((l) => l.tripId === 'D2')).toBe(true);
+
+    // A refresh with no live posture or TU for the vehicle (feed gap) must NOT demote it to
+    // incoming: the recorded arrival keeps it latched as layover.
+    const gap: RealtimeSnapshot = {
+      timestamp: unixAt('08:11'),
+      tripUpdates: [],
+      vehiclePositions: [],
+    };
+    const after = route1(engine.refresh(gap, nowAt('08:11'))[0]!);
+    expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(true);
+    expect(after.incoming.some((i) => i.tripId === 'P2')).toBe(false);
   });
 });

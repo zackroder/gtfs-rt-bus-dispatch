@@ -268,8 +268,6 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   for (const update of opts.rt.tripUpdates) {
     if (update.tripId && update.vehicleId) tripToVehicle.set(update.tripId, update.vehicleId);
   }
-  const vehicleToTrip = new Map<string, string>();
-  for (const [trip, vehicle] of tripToVehicle) vehicleToTrip.set(vehicle, trip);
   const vpTripByVehicle = new Map<string, string>();
   for (const vp of opts.rt.vehiclePositions) {
     // VP is the stronger assignment signal when TU and VP disagree; TU remains a fallback
@@ -285,9 +283,11 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const prevTripId = prevTrip.get(ob.tripId);
     const vehicleId =
       tripToVehicle.get(ob.tripId) ?? (prevTripId ? tripToVehicle.get(prevTripId) : undefined);
-    const currentTrip = vehicleId
-      ? (vpTripByVehicle.get(vehicleId) ?? vehicleToTrip.get(vehicleId))
-      : undefined;
+    // The trip a vehicle is currently operating comes from VehiclePositions alone (single tripId
+    // per vehicle, authoritative). We deliberately do NOT fall back to the map-inverted TU
+    // assignment: CTA can carry a vehicle on both the inbound and upcoming outbound TU entity, so
+    // that inversion is order-dependent and unreliable for "which trip is it serving right now".
+    const currentTrip = vehicleId ? vpTripByVehicle.get(vehicleId) : undefined;
     const currentTripFromVp = vehicleId !== undefined && vpTripByVehicle.has(vehicleId);
 
     let scheduledArrival = ob.departureTime;
@@ -327,8 +327,12 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const parkedAtTerminal = terminalState?.inBuffer === true && terminalState.parked === true;
     // TU-assignment layover: no preceding leg in the schedule (first-of-block / post-deadhead).
     // If TU is operating this outbound trip and the vehicle is sitting at the terminal, it is
-    // laying over for ob even though there is no inbound trip identity to arm against.
-    const tuOperatesOb = vehicleId !== undefined && vehicleToTrip.get(vehicleId) === ob.tripId;
+    // laying over for ob even though there is no inbound trip identity to arm against. We check
+    // TU directly (by vehicle + trip) rather than the map-inverted vehicleToTrip, which cannot be
+    // trusted when CTA carries the same vehicle on both the inbound and upcoming outbound entity.
+    const tuOperatesOb =
+      vehicleId !== undefined &&
+      opts.rt.tripUpdates.some((u) => u.vehicleId === vehicleId && u.tripId === ob.tripId);
     const assignedAtTerminal = terminalState?.inBuffer === true && tuOperatesOb;
     const hasPostureForTrip =
       terminalState?.armTripId === ob.tripId || terminalState?.layoverTripId === ob.tripId;
