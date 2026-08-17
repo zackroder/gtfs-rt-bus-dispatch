@@ -93,7 +93,10 @@ export function useStream(terminalId: string, route?: string): StreamState {
       };
       ws.onmessage = onWsMessage;
       ws.onclose = () => {
-        wsRef.current = null;
+        // Guard by identity so a stale socket's close (possible under React StrictMode's dev
+        // double-mount, where a discarded socket shares this handler closure) cannot null out a
+        // newer, still-live socket's reference.
+        if (wsRef.current === ws) wsRef.current = null;
         if (disposed) return;
         startPolling();
         setSource('polling');
@@ -105,7 +108,10 @@ export function useStream(terminalId: string, route?: string): StreamState {
           }, 5000);
         }
       };
-      ws.onerror = () => ws.close();
+      // The socket closes itself on error; onclose (below) owns teardown and reconnection, so we
+      // do not call close() here (calling it on a failed/connecting socket throws a redundant
+      // "closed before established" error).
+      ws.onerror = () => {};
     };
 
     void poll();
@@ -113,7 +119,12 @@ export function useStream(terminalId: string, route?: string): StreamState {
     connectWs();
     return () => {
       disposed = true;
-      wsRef.current?.close();
+      // Only actively close an open socket. Closing a still-CONNECTING socket makes the browser
+      // throw "WebSocket is closed before the connection is established", which React StrictMode's
+      // dev double-mount would otherwise surface on the very first render.
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
       wsRef.current = null;
       stopPolling();
       if (reconnectRef.current !== undefined) {
