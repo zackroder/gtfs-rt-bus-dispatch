@@ -196,6 +196,7 @@ export function arrivalAtTerminal(
   _stopIds: string[],
   serviceDayStartSeconds: number,
   tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
+  vehicleId?: string,
 ): ArrivalAtStop {
   const row = db
     .prepare(
@@ -208,7 +209,12 @@ export function arrivalAtTerminal(
   if (!row) return { scheduled: 0, predicted: 0, known: false };
   const scheduled = row.arrival_time ?? row.departure_time;
 
-  const tripUpdate = tripUpdatesById?.get(tripId) ?? rt.tripUpdates.find((u) => u.tripId === tripId);
+  // Match the TripUpdate by trip ID first, then fall back to the vehicle's live assignment so a
+  // block predecessor whose ID differs from the TU entity still yields a real prediction.
+  let tripUpdate = tripUpdatesById?.get(tripId) ?? rt.tripUpdates.find((u) => u.tripId === tripId);
+  if (!tripUpdate && vehicleId !== undefined) {
+    tripUpdate = rt.tripUpdates.find((u) => u.vehicleId === vehicleId);
+  }
   // A terminal prediction is only useful when the TU identifies the corresponding trip.
   if (!tripUpdate) return { scheduled, predicted: scheduled, known: false };
 
@@ -276,6 +282,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
         opts.terminal.stopIds,
         opts.serviceDayStartSeconds,
         opts.tripUpdatesById,
+        vehicleId,
       );
       opts.arrivalCache?.set(cacheKey, arrival);
       scheduledArrival = arrival.scheduled;
