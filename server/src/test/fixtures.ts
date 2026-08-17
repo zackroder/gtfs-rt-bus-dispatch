@@ -29,6 +29,8 @@ export interface RouteSpec {
 export interface StopSpec {
   stopId: string;
   name: string;
+  lat?: number;
+  lon?: number;
 }
 
 function rawSeconds(time: string): number {
@@ -54,16 +56,18 @@ export function syntheticGtfs(opts: {
     color: r.color,
     textColor: r.textColor,
   }));
+  // Stop coordinates default to separated locations so proximity logic can distinguish the
+  // terminal (T) from the far endpoint (B) without explicit per-test fixtures.
   const stops = (opts.stops ?? [
-    { stopId: 'T', name: 'Terminal' },
-    { stopId: 'B', name: 'Far Stop' },
+    { stopId: 'T', name: 'Terminal', lat: 41.8, lon: -87.6 },
+    { stopId: 'B', name: 'Far Stop', lat: 41.7, lon: -87.7 },
   ]).map((s) => ({
     stopId: s.stopId,
     stopCode: s.stopId,
     stopName: s.name,
     parentStation: undefined,
-    lat: 41.8,
-    lon: -87.6,
+    lat: s.lat ?? 41.8,
+    lon: s.lon ?? -87.6,
   }));
   const trips = opts.trips.map((t) => ({
     tripId: t.tripId,

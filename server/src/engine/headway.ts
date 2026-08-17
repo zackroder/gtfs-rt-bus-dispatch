@@ -68,6 +68,18 @@ export interface BuildDeparturesOptions {
   blockChains?: BlockChains;
   tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>;
   arrivalCache?: Map<string, ArrivalAtStop>;
+  // Per-vehicle terminal posture from the geometric fact pass, for layover classification.
+  vpTerminalState?: ReadonlyMap<string, VehicleTerminalState>;
+  scheduleArmGraceSeconds?: number;
+}
+
+// What the geometric fact pass observed about a vehicle near a terminal this refresh.
+export interface VehicleTerminalState {
+  inBuffer: boolean;
+  parked: boolean;
+  distToTerminalM?: number;
+  armTripId?: string;
+  layoverTripId?: string;
 }
 
 // Build predecessor/successor links for trips assigned to the same block.
@@ -278,19 +290,45 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const onPrevLeg =
       vehicleId !== undefined && prevTripId !== undefined && currentTrip === prevTripId;
     const onOutboundLeg = currentTripFromVp && currentTrip === ob.tripId;
+    // Geometric posture: the vehicle is sitting inside the terminal buffer this refresh. This
+    // is the timely signal that upgrades an incoming bus to layover before the VP flip confirms
+    // it, and it is independent of both block chains and TU stop predictions.
+    const terminalState = vehicleId ? opts.vpTerminalState?.get(vehicleId) : undefined;
+    // A vehicle parked inside the terminal buffer is the timely geometric arrival signal. The
+    // scheduled-arm fallback covers a bus that reached the terminal area but never registered as
+    // stationary (e.g. staging just beyond the stop or a feed gap), once its scheduled arrival
+    // has passed by the grace window.
+    const parkedAtTerminal = terminalState?.inBuffer === true && terminalState.parked === true;
+    const grace = opts.scheduleArmGraceSeconds ?? 120;
+    const scheduledArm =
+      terminalState?.inBuffer === true &&
+      !terminalState.parked &&
+      scheduledArrival !== undefined &&
+      scheduledArrival + grace <= opts.nowSvc;
 
     const departed = record?.departureSeconds !== undefined;
     const departedSeconds = record?.departureSeconds;
 
     const terminalArrival = record?.arrivalSeconds;
-    const arrivalSource = terminalArrival !== undefined ? 'observed' : hasArrivalInfo ? 'estimated' : undefined;
-    const arrivalForEdt = terminalArrival ?? (onPrevLeg && hasArrivalInfo ? predictedArrival : undefined);
-    // Observed VP arrival wins over a TU estimate; estimates are used for EDT only while the bus
-    // is demonstrably still on the previous leg.
+    const arrivalSource = terminalArrival !== undefined
+      ? 'observed'
+      : parkedAtTerminal || scheduledArm || hasArrivalInfo
+        ? 'estimated'
+        : undefined;
+    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm
+      ? Math.max(scheduledArrival, opts.nowSvc)
+      : onPrevLeg && hasArrivalInfo
+        ? predictedArrival
+        : undefined);
+    // Observed VP arrival wins over an estimate; while parked the bus is physically there, so its
+    // estimated arrival is at least the current time. Estimates are used for EDT only while the
+    // bus is demonstrably still on the previous leg.
     const edt = expectedDepartureTime(ob.departureTime, arrivalForEdt, opts.minRestSeconds);
 
     const arrivedAtTerminal =
       onOutboundLeg ||
+      parkedAtTerminal ||
+      scheduledArm ||
       (onPrevLeg && hasArrivalInfo && predictedArrival <= opts.nowSvc) ||
       record?.arrivalSeconds !== undefined;
     let state: VehicleState;

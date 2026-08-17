@@ -95,25 +95,25 @@ describe('realtime decode', () => {
     );
 
     const positions = decodeVehiclePositions(buffer, 1700000000);
-    expect(positions).toEqual([
-      {
-        vehicleId: 'V1',
-        tripId: 'T1',
-        stopId: 'STOP12',
-        currentStopSequence: 12,
-        lat: 41.88,
-        lon: -87.63,
-        timestamp: 1700000005,
-      },
-      {
-        vehicleId: 'V2',
-        tripId: undefined,
-        stopId: undefined,
-        currentStopSequence: undefined,
-        lat: undefined,
-        lon: undefined,
-        timestamp: 1700000006,
-      },
-    ]);
+    // Lat/lon pass through the protobuf 32-bit float boundary, so compare within float precision.
+    expect(positions).toHaveLength(2);
+    expect(positions[0]).toMatchObject({
+      vehicleId: 'V1',
+      tripId: 'T1',
+      stopId: 'STOP12',
+      currentStopSequence: 12,
+      timestamp: 1700000005,
+    });
+    expect(positions[0]!.lat).toBeCloseTo(41.88, 4);
+    expect(positions[0]!.lon).toBeCloseTo(-87.63, 4);
+    expect(positions[1]).toEqual({
+      vehicleId: 'V2',
+      tripId: undefined,
+      stopId: undefined,
+      currentStopSequence: undefined,
+      lat: undefined,
+      lon: undefined,
+      timestamp: 1700000006,
+    });
   });
 });

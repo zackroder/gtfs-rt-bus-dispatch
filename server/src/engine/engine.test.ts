@@ -136,6 +136,12 @@ function makeEngine(): Engine {
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
     terminals: [{ id: 'T', name: 'Terminal', stopIds: ['T'], routeIds: ['1'] }],
+    // Deterministic unit tests commit on a single parked ping; production keeps the two-ping
+    // default and is covered by a dedicated arm test below.
+    arrivalRadiusMeters: 150,
+    stationaryDisplacementMeters: 20,
+    confirmPings: 1,
+    departPings: 1,
   };
   const interventions = new InterventionStore(db);
   const engine = new Engine(db, () => cfg, interventions);
@@ -177,9 +183,20 @@ function vpAtStop(
     tripId,
     stopId,
     currentStopSequence,
+    // Position the vehicle at the fixture's stop coordinates so the geometric fact pass has
+    // lat/lon to measure proximity against terminal stops.
+    lat: stopCoord(stopId).lat,
+    lon: stopCoord(stopId).lon,
     timestamp: unixAt(hhmm),
   };
 }
+
+// Fixture stops mirror the synthetic GTFS coordinates (T = terminal, B = far stop).
+const stopCoord = (stopId: string): { lat: number; lon: number } => {
+  if (stopId === 'T') return { lat: 41.8, lon: -87.6 };
+  if (stopId === 'MID') return { lat: 41.75, lon: -87.65 };
+  return { lat: 41.7, lon: -87.7 };
+};
 
 function route1(snapshot: ReturnType<Engine['refresh']>[number]) {
   return snapshot.routes.find((r) => r.routeId === '1')!;
@@ -378,10 +395,14 @@ describe('engine triplet dispatch', () => {
     const observations = engine.getVehiclePositionDiagnostics();
     const leader = observations.find((observation) => observation.vehicleId === 'V1')!;
     const layover = observations.find((observation) => observation.vehicleId === 'V2')!;
-    expect(leader.pastFirstStop).toBe(true);
+    // The geometric pass records a departure for the mid-route leader and an arrival for the
+    // parked layover, exposing the buffer/stationarity signals that drove each transition.
     expect(leader.recordedDeparture).toBe(true);
-    expect(layover.atLastStop).toBe(true);
+    expect(leader.inTerminalBuffer).toBe(false);
+    expect(leader.departureCandidateTripId).toBe('D1');
     expect(layover.recordedArrival).toBe(true);
+    expect(layover.inTerminalBuffer).toBe(true);
+    expect(layover.arrivalCandidateTripId).toBe('D2');
     expect(engine.getFactEventDiagnostics().map((event) => event.action)).toEqual(['departure', 'arrival']);
   });
 
@@ -538,5 +559,125 @@ describe('engine triplet dispatch', () => {
     const snapshot = engine.refresh(rt, nowAt('08:26'))[0]!;
     const d4 = route1(snapshot).layovers.find((l) => l.tripId === 'D4')!;
     expect(d4.terminalArrival).toBe(svc('08:26'));
+  });
+
+  it('arms an arrival on the first parked ping and commits on the second with the production default', () => {
+    // Production keeps confirmPings=2; a single parked observation must not record a fact.
+    const engine = makeEngine();
+    const parked: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    // Force the production two-ping default for this scenario.
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+
+    const first = route1(engine.refresh(parked, nowAt('08:08'))[0]!);
+    // Armed but not committed: the bus shows as layover (parked in buffer) but has no fact yet.
+    const d2First = first.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2First.terminalArrival).toBeUndefined();
+    expect(d2First.terminalArrivalSource).toBe('estimated');
+    expect(engine.getVehiclePositionDiagnostics()[0]!.reasons).toContain('arrival_armed');
+
+    const second = route1(engine.refresh(parked, nowAt('08:09'))[0]!);
+    const d2 = second.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+  });
+
+  it('records an arrival from proximity to the terminal even without a stop match', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      // No stopId: proximity alone (lat/lon within the 150m buffer of terminal stop T) arms the layover.
+      vehiclePositions: [
+        {
+          vehicleId: 'V2',
+          tripId: 'P2',
+          lat: 41.800001,
+          lon: -87.600001,
+          timestamp: unixAt('08:08'),
+        },
+      ],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const d2 = route1(snapshot).layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+  });
+
+  it('treats a bus parked at the terminal as layover even when no TU prediction exists (stuck-incoming fix)', () => {
+    const engine = makeEngine();
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      // P2 arrived at T but CTA provides no TU prediction for its terminal arrival. Previously the
+      // bus stayed "incoming" forever; geometric posture must move it to layover immediately.
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const route = route1(snapshot);
+    expect(route.incoming.some((i) => i.tripId === 'P2')).toBe(false);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+  });
+
+  it('records a departure when a laid-over bus leaves the terminal buffer under motion', () => {
+    const engine = makeEngine();
+    const layoverRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    engine.refresh(layoverRt, nowAt('08:08'));
+    expect(route1(engine.refresh(layoverRt, nowAt('08:09'))[0]!).layovers.some((l) => l.tripId === 'D2')).toBe(true);
+
+    const leftRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      // The vehicle moved past the terminal stop-1 anchor and out of buffer.
+      vehiclePositions: [vpAtStop('V2', 'D2', 'MID', '08:12')],
+    };
+    const after = route1(engine.refresh(leftRt, nowAt('08:12'))[0]!);
+    expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const d2 = after.departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+  });
+
+  it('scheduled-arm fallback: a bus in the buffer past its scheduled arrival is a layover even when not stationary', () => {
+    const engine = makeEngine();
+    // confirmPings stays at the production default of 2 so no observed fact is recorded; the
+    // fallback must classify on geometry + schedule alone.
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const first: RealtimeSnapshot = {
+      timestamp: unixAt('08:20'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:20')],
+    };
+    engine.refresh(first, nowAt('08:20'));
+    // Second ping: still inside the buffer (≈60m from T) but moving (>20m displacement from the
+    // first ping at T), so parked=false and no geometric arm can commit; P3's scheduled arrival
+    // (08:18) plus grace (120s) has passed.
+    const moving: RealtimeSnapshot = {
+      timestamp: unixAt('08:21'),
+      tripUpdates: [],
+      vehiclePositions: [
+        {
+          vehicleId: 'V3',
+          tripId: 'P3',
+          lat: 41.8005,
+          lon: -87.6,
+          timestamp: unixAt('08:21'),
+        },
+      ],
+    };
+    const snapshot = engine.refresh(moving, nowAt('08:21'))[0]!;
+    const route = route1(snapshot);
+    expect(route.incoming.some((i) => i.tripId === 'P3')).toBe(false);
+    const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.terminalArrivalSource).toBe('estimated');
   });
 });
