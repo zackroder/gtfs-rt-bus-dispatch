@@ -216,6 +216,7 @@ export interface AppConfig {
   lookaheadMinutes: number;         // 90
   terminals: Terminal[];            // auto-discovered, then editable
   arrivalRadiusMeters?: number;          // 150, soft arm buffer around a terminal stop
+  terminalMovementMeters?: number;       // 75, extra tolerance for terminal inching
   stationaryDisplacementMeters?: number; // 20, displacement/poll that counts as parked
   confirmPings?: number;                 // 2, parked pings before an arm commits
   departPings?: number;                  // 2, motion pings before a layover departs
@@ -514,11 +515,14 @@ fields; `current_status` is always `IN_TRANSIT_TO`). For each vehicle:
   outbound leg, else the block successor, else the TU-lookahead assignment). A
   VP trip flip onto an outbound trip confirms/upgrades the fact (certain-but-late
   fallback).
-- **Departure**: a laid-over bus that leaves the terminal buffer (stop-1 of the
-  outbound trip) under motion for `departPings` consecutive pings records its
-  departure at the first motion ping. A flip away from an outbound trip is the
-  certain-but-late departure fallback, and a bus first seen mid-route on an
-  outbound trip out of the buffer is treated as departed immediately.
+- **Departure**: a laid-over bus that leaves the terminal hold zone (arrival
+  radius + `terminalMovementMeters` movement allowance, default +75 m) under
+  motion for `departPings` consecutive pings records its departure at the first
+  motion ping. A flip away from an outbound trip is the certain-but-late
+  departure fallback, and a bus first seen mid-route on an outbound trip out of
+  the hold zone is treated as departed immediately. The movement allowance keeps
+  a bus that pulls forward within the terminal in layover instead of dropping it
+  or mis-recording a departure.
 - **Scheduled-arm fallback**: a bus inside the buffer whose scheduled arrival
   passed by `scheduleArmGraceSeconds` is classified as an estimated layover even
   when never observed stationary, preventing the stuck-incoming failure mode.

@@ -190,6 +190,9 @@ export interface AppConfig {
   terminals: Terminal[];
   /** Radius (meters) around a terminal stop within which a parked bus is counted as arrived. */
   arrivalRadiusMeters?: number;
+  /** Additional meters tolerated around the arrival radius once a bus is laid over, so a bus
+   *  pulling forward within the terminal is not dropped or mis-recorded as departed. */
+  terminalMovementMeters?: number;
   /** Displacement (meters) between polls that still counts as "parked" for arrival/departure arms. */
   stationaryDisplacementMeters?: number;
   /** Consecutive parked polls required before a proximity arm becomes a committed arrival fact. */
@@ -231,6 +234,7 @@ export const appConfigSchema = z.object({
   lookaheadMinutes: z.number().int().min(5).max(1440),
   terminals: z.array(terminalSchema),
   arrivalRadiusMeters: z.number().int().min(0).max(5000).optional(),
+  terminalMovementMeters: z.number().int().min(0).max(5000).optional(),
   stationaryDisplacementMeters: z.number().int().min(0).max(1000).optional(),
   confirmPings: z.number().int().min(1).max(30).optional(),
   departPings: z.number().int().min(1).max(30).optional(),

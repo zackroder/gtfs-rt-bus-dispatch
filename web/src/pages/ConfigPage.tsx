@@ -77,6 +77,7 @@ export default function ConfigPage() {
     ['Lead time (min)', 'leadTimeMinutes'],
     ['Lookahead (min)', 'lookaheadMinutes'],
     ['Arrival radius (m)', 'arrivalRadiusMeters'],
+    ['Terminal movement (m)', 'terminalMovementMeters'],
     ['Stationary displacement (m)', 'stationaryDisplacementMeters'],
     ['Confirm pings', 'confirmPings'],
     ['Depart pings', 'departPings'],

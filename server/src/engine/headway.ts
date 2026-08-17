@@ -297,8 +297,11 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     // A vehicle parked inside the terminal buffer is the timely geometric arrival signal. The
     // scheduled-arm fallback covers a bus that reached the terminal area but never registered as
     // stationary (e.g. staging just beyond the stop or a feed gap), once its scheduled arrival
-    // has passed by the grace window.
+    // has passed by the grace window. An active arm/layover posture on this outbound trip keeps
+    // the bus in layover while it inches within the terminal.
     const parkedAtTerminal = terminalState?.inBuffer === true && terminalState.parked === true;
+    const hasPostureForTrip =
+      terminalState?.armTripId === ob.tripId || terminalState?.layoverTripId === ob.tripId;
     const grace = opts.scheduleArmGraceSeconds ?? 120;
     const scheduledArm =
       terminalState?.inBuffer === true &&
@@ -312,10 +315,10 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const terminalArrival = record?.arrivalSeconds;
     const arrivalSource = terminalArrival !== undefined
       ? 'observed'
-      : parkedAtTerminal || scheduledArm || hasArrivalInfo
+      : parkedAtTerminal || scheduledArm || hasPostureForTrip || hasArrivalInfo
         ? 'estimated'
         : undefined;
-    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm
+    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm || hasPostureForTrip
       ? Math.max(scheduledArrival, opts.nowSvc)
       : onPrevLeg && hasArrivalInfo
         ? predictedArrival
@@ -329,15 +332,17 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       onOutboundLeg ||
       parkedAtTerminal ||
       scheduledArm ||
+      hasPostureForTrip ||
       (onPrevLeg && hasArrivalInfo && predictedArrival <= opts.nowSvc) ||
       record?.arrivalSeconds !== undefined;
     let state: VehicleState;
     if (departed) state = 'departed';
-    else if (onPrevLeg && !arrivedAtTerminal) state = 'incoming';
     else if (arrivedAtTerminal) state = 'layover';
-    else state = 'departed';
-    // A bus with no reliable live assignment is treated as departed rather than shown as waiting;
-    // this avoids presenting an untracked vehicle as an actionable layover.
+    else if (onPrevLeg) state = 'incoming';
+    // A bus with no live assignment or arrival signal is ambiguous: prefer a quiet incoming
+    // over an unobservable "departed" so a tracked vehicle never silently disappears from the
+    // terminal view while it is in fact still at the terminal.
+    else state = 'incoming';
 
     departures.push({
       tripId: ob.tripId,

@@ -646,8 +646,7 @@ describe('engine triplet dispatch', () => {
     expect(d2.departureSeconds).toBe(svc('08:12'));
   });
 
-  it('scheduled-arm fallback: a bus in the buffer past its scheduled arrival is a layover even when not stationary', () => {
-    const engine = makeEngine();
+  it('scheduled-arm fallback: a bus in the buffer past its scheduled arrival is a layover even when not stationary', () => {    const engine = makeEngine();
     // confirmPings stays at the production default of 2 so no observed fact is recorded; the
     // fallback must classify on geometry + schedule alone.
     testData(engine).config.confirmPings = 2;
@@ -679,5 +678,73 @@ describe('engine triplet dispatch', () => {
     expect(route.incoming.some((i) => i.tripId === 'P3')).toBe(false);
     const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
     expect(d3.terminalArrivalSource).toBe('estimated');
+  });
+
+  it('keeps a layover when the bus inches forward within the terminal (no drop / no false departure)', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    // First parked ping arms; second parked ping commits the arrival.
+    engine.refresh(rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:09'));
+    expect(route1(engine.refresh(rt, nowAt('08:10'))[0]!).layovers.some((l) => l.tripId === 'D2')).toBe(true);
+
+    // The bus inches forward within the terminal: still in the hold zone (movement allowance),
+    // so it must remain a layover and must NOT be recorded as departed.
+    const inchedRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [],
+      vehiclePositions: [
+        {
+          vehicleId: 'V2',
+          tripId: 'P2',
+          lat: 41.801,
+          lon: -87.6, // ~110m north of terminal stop T: inside 150m radius + 75m movement allowance
+          timestamp: unixAt('08:12'),
+        },
+      ],
+    };
+    const after = route1(engine.refresh(inchedRt, nowAt('08:12'))[0]!);
+    expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(true);
+    expect(after.departed.some((d) => d.tripId === 'D2')).toBe(false);
+    expect(engine.getFactEventDiagnostics().some((e) => e.action === 'departure')).toBe(false);
+  });
+
+  it('records a departure only once a layover leaves the terminal hold zone under motion', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    };
+    engine.refresh(rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:09'));
+    engine.refresh(rt, nowAt('08:10'));
+    expect(route1(engine.refresh(rt, nowAt('08:11'))[0]!).layovers.some((l) => l.tripId === 'D2')).toBe(true);
+
+    // Bus leaves the hold zone: well beyond terminal T and moving (displacement > 20m).
+    const leftRt: RealtimeSnapshot = {
+      timestamp: unixAt('08:14'),
+      tripUpdates: [],
+      vehiclePositions: [
+        {
+          vehicleId: 'V2',
+          tripId: 'D2',
+          lat: 41.72,
+          lon: -87.69, // ~9km from terminal: clearly departed
+          timestamp: unixAt('08:14'),
+        },
+      ],
+    };
+    const after = route1(engine.refresh(leftRt, nowAt('08:14'))[0]!);
+    expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    expect(after.departed.some((d) => d.tripId === 'D2')).toBe(true);
   });
 });

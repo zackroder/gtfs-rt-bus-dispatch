@@ -337,8 +337,18 @@ I/O) so it can be reviewed and unit-tested in isolation.
   prevents stuck-incoming when CTA omits TU terminal predictions. Static block
   chains predict the re-key target ~97% of the time, so the flip's only job is
   confirmation, not linkage. Config knobs: `arrivalRadiusMeters` (default 150,
-  per-terminal `radiusMeters` override), `stationaryDisplacementMeters`,
-  `confirmPings`/`departPings` (default 2), `scheduleArmGraceSeconds`.
+  per-terminal `radiusMeters` override), `terminalMovementMeters` (default 75),
+  `stationaryDisplacementMeters`, `confirmPings`/`departPings` (default 2),
+  `scheduleArmGraceSeconds`.
+- **2026-08-16 — Terminal movement allowance**: live testing showed a bus that
+  pulled forward within the terminal could drop off the layover view (or be
+  mis-recorded as departed), because the departure radius equaled the tight arm
+  radius and the headway fallback quietly classified an untracked bus as
+  `departed`. Added `terminalMovementMeters` (default 75): once a bus has an arm
+  or committed layover, it stays layover while inside the hold zone (arm radius
+  + movement allowance), and departure requires leaving that zone under motion
+  for `departPings`. The headway fallback now keeps an ambiguous bus `incoming`
+  rather than silently `departed`, so a tracked vehicle never disappears.
 
 ## Build notes
 

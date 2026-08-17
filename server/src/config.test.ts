@@ -27,6 +27,7 @@ describe('config geometry knobs', () => {
     const db = createDatabase(':memory:');
     const config = loadConfig(db, {});
     expect(config.arrivalRadiusMeters).toBe(GEOMETRY_DEFAULTS.arrivalRadiusMeters);
+    expect(config.terminalMovementMeters).toBe(GEOMETRY_DEFAULTS.terminalMovementMeters);
     expect(config.stationaryDisplacementMeters).toBe(GEOMETRY_DEFAULTS.stationaryDisplacementMeters);
     expect(config.confirmPings).toBe(GEOMETRY_DEFAULTS.confirmPings);
     expect(config.departPings).toBe(GEOMETRY_DEFAULTS.departPings);
@@ -38,6 +39,7 @@ describe('config geometry knobs', () => {
     // Persist a config from before the geometry feature: only the original keys exist.
     const legacy: Record<string, unknown> = { ...minimalConfig };
     delete legacy.arrivalRadiusMeters;
+    delete legacy.terminalMovementMeters;
     delete legacy.stationaryDisplacementMeters;
     delete legacy.confirmPings;
     delete legacy.departPings;
@@ -45,6 +47,7 @@ describe('config geometry knobs', () => {
     setSetting(db, 'appConfig', legacy);
     const config = loadConfig(db, {});
     expect(config.arrivalRadiusMeters).toBe(GEOMETRY_DEFAULTS.arrivalRadiusMeters);
+    expect(config.terminalMovementMeters).toBe(GEOMETRY_DEFAULTS.terminalMovementMeters);
     expect(config.confirmPings).toBe(GEOMETRY_DEFAULTS.confirmPings);
   });
 
@@ -54,6 +57,7 @@ describe('config geometry knobs', () => {
     const next: AppConfig = {
       ...current,
       arrivalRadiusMeters: 300,
+      terminalMovementMeters: 120,
       confirmPings: 3,
       departPings: 4,
       scheduleArmGraceSeconds: 90,
@@ -61,6 +65,7 @@ describe('config geometry knobs', () => {
     };
     const saved = applyConfig(db, current, next);
     expect(saved.arrivalRadiusMeters).toBe(300);
+    expect(saved.terminalMovementMeters).toBe(120);
     expect(saved.confirmPings).toBe(3);
     expect(saved.departPings).toBe(4);
     expect(saved.scheduleArmGraceSeconds).toBe(90);

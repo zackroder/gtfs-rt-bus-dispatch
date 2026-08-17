@@ -27,6 +27,7 @@ const DEFAULT_URLS = {
 // so an older persisted config transparently gains the new keys after a reload.
 export const GEOMETRY_DEFAULTS = {
   arrivalRadiusMeters: 150,
+  terminalMovementMeters: 75,
   stationaryDisplacementMeters: 20,
   confirmPings: 2,
   departPings: 2,
@@ -38,6 +39,7 @@ function withGeometryDefaults(config: AppConfig): AppConfig {
   return {
     ...config,
     arrivalRadiusMeters: config.arrivalRadiusMeters ?? GEOMETRY_DEFAULTS.arrivalRadiusMeters,
+    terminalMovementMeters: config.terminalMovementMeters ?? GEOMETRY_DEFAULTS.terminalMovementMeters,
     stationaryDisplacementMeters:
       config.stationaryDisplacementMeters ?? GEOMETRY_DEFAULTS.stationaryDisplacementMeters,
     confirmPings: config.confirmPings ?? GEOMETRY_DEFAULTS.confirmPings,

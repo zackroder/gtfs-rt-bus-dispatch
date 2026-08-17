@@ -206,6 +206,7 @@ SQLite. Env vars only seed the initial defaults.
 | `leadTimeMinutes` | 5 | Evaluate a hold this far before expected departure |
 | `lookaheadMinutes` | 90 | Horizon of departures to consider |
 | `arrivalRadiusMeters` | 150 | Soft arm buffer around a terminal stop |
+| `terminalMovementMeters` | 75 | Extra tolerance so a bus can inch within the terminal |
 | `stationaryDisplacementMeters` | 20 | Displacement/poll that counts as parked |
 | `confirmPings` | 2 | Parked pings before an arrival arm commits |
 | `departPings` | 2 | Motion pings before a layover departs |

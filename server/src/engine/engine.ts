@@ -418,6 +418,10 @@ export class Engine {
     const stationaryMeters = config.stationaryDisplacementMeters ?? 20;
     const confirmPings = config.confirmPings ?? 2;
     const departPings = config.departPings ?? 2;
+    // Movement allowance: once a bus has a layover posture, it stays layover while it remains
+    // inside the hold zone (arrival radius + movement allowance). This lets a bus pull forward
+    // within the terminal without being dropped from layover or mis-recorded as departed.
+    const movementMeters = config.terminalMovementMeters ?? 75;
 
     for (const vp of rt.vehiclePositions) {
       const vpSeconds = vp.timestamp > generatedAt
@@ -507,13 +511,16 @@ export class Engine {
       }
 
       // The terminal anchor is the last stop of the current (inbound) trip. A stop_id match is a
-      // cheap authoritative hint (CTA sends it ~8% of the time); proximity covers the rest.
+      // cheap authoritative hint (CTA sends it ~8% of the time); proximity covers the rest. The
+      // hold zone widens the arm radius by the movement allowance so a bus that pulls forward
+      // within the terminal is neither dropped from layover nor mis-recorded as departed.
       const anchorStopId = end.lastStopId;
       const inTerminal = anchorStopId !== undefined && terminalStopIds.has(anchorStopId);
       const distToTerminal = inTerminal && point
         ? distanceToStopMeters(this.stopCoords(), anchorStopId, point)
         : Infinity;
       const radius = this.terminalRadiusMeters(anchorStopId);
+      const holdRadius = radius + movementMeters;
       const atAnchorStop = inTerminal && vp.stopId === anchorStopId;
       diagnostic.distToTerminalM = Number.isFinite(distToTerminal) ? Math.round(distToTerminal) : undefined;
       diagnostic.inTerminalBuffer = inTerminal && (atAnchorStop || distToTerminal <= radius);
@@ -522,7 +529,8 @@ export class Engine {
 
       // Arrival arm: commit once confirmPings parked pings elapse, keyed to the outbound trip the
       // vehicle forms. The flip onto that trip remains the certain-but-late fallback. The arm is
-      // gated on stationarity so a through-bus merely crossing the buffer cannot phantom-arm.
+      // gated on stationarity so a through-bus merely crossing the buffer cannot phantom-arm, but
+      // once armed it survives movement within the hold zone (terminal inching).
       if (diagnostic.inTerminalBuffer && diagnostic.parked) {
         const target = this.arrivalTargetFor(vp.tripId, vp.vehicleId, rt, chains);
         if (target) {
@@ -556,20 +564,25 @@ export class Engine {
         } else {
           diagnostic.reasons.push('no_arrival_target');
         }
-      } else if (diagnostic.inTerminalBuffer && !diagnostic.parked) {
-        diagnostic.reasons.push('in_buffer_but_moving');
-        track.parkedStreak = 0;
-        track.armTripId = undefined;
+      } else if (inTerminal && (atAnchorStop || distToTerminal <= holdRadius)) {
+        // Inside the hold zone: movement is tolerated. Keep an existing arm alive so a bus that
+        // arrives then inches forward still commits; a never-armed bus just passing through resets.
+        if (track.armTripId) {
+          diagnostic.reasons.push('arrival_armed_holding');
+        } else {
+          diagnostic.reasons.push('in_hold_zone_unarmed');
+          track.parkedStreak = 0;
+        }
       } else if (diagnostic.parked) {
         diagnostic.reasons.push('parked_not_in_terminal_buffer');
       }
 
       // Position-based departure: a vehicle already operating an outbound trip and beyond the
-      // terminal buffer has left. This recovers departures for buses first seen mid-route when
-      // the pull-out motion was never observed, mirroring the old past-first-stop rule.
+      // hold zone has left. This recovers departures for buses first seen mid-route when the
+      // pull-out motion was never observed, mirroring the old past-first-stop rule.
       if (end.firstStopId && terminalStopIds.has(end.firstStopId) && point) {
         const outDist = distanceToStopMeters(this.stopCoords(), end.firstStopId, point);
-        if (outDist > radius) {
+        if (outDist > holdRadius) {
           diagnostic.departureCandidateTripId = vp.tripId;
           diagnostic.recordedDeparture = this.recordDeparture(
             vp.tripId,
@@ -589,12 +602,13 @@ export class Engine {
         }
       }
 
-      // Layover departure by motion: a committed layover that leaves the terminal buffer and
-      // shows motion for confirmPings-consistent consecutive pings has pulled out. The anchor
-      // is stop 1 of the outbound trip (the departure bay), per the corrected geometry.
+      // Layover departure by motion: a committed layover that leaves the hold zone and shows
+      // motion for departPings consecutive pings has pulled out. The anchor is stop 1 of the
+      // outbound trip (the departure bay), per the corrected geometry; the hold zone tolerance
+      // keeps a bus that inches within the terminal in layover.
       if (track.layoverTripId && track.layoverAnchorStopId && point) {
         const layoverDist = distanceToStopMeters(this.stopCoords(), track.layoverAnchorStopId, point);
-        const layoverRadius = this.terminalRadiusMeters(track.layoverAnchorStopId);
+        const layoverRadius = this.terminalRadiusMeters(track.layoverAnchorStopId) + movementMeters;
         const inLayoverBuffer = layoverDist <= layoverRadius;
         const moving = displacementM !== undefined && displacementM >= stationaryMeters;
         if (!inLayoverBuffer && moving) {
