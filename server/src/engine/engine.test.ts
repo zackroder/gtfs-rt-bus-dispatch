@@ -380,6 +380,33 @@ describe('engine triplet dispatch', () => {
     expect(p2.etaSeconds).toBe(svc('08:09') - svc('08:08'));
   });
 
+  it('extends an intermediate stop prediction to the terminus by the scheduled offset', () => {
+    const engine = makeEngine();
+    // CTA omits the terminus (T) from the carried window but predicts an earlier stop (B), and the
+    // vehicle is operating the inbound trip. The estimate must use B's realtime arrival advanced by
+    // the scheduled B->T travel time (08:07 - 08:00 = 7 min).
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        {
+          tripId: 'P2',
+          vehicleId: 'V2',
+          stopTimeUpdates: [
+            { stopId: 'B', stopSequence: 0, arrivalTime: unixAt('08:08') },
+          ],
+          timestamp: 1700000000,
+        },
+      ],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'B', '08:08')],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
+    const p2 = route1(snapshot).incoming.find((i) => i.tripId === 'P2')!;
+    // B realtime 08:08 + (sched T 08:07 - sched B 08:00) = 08:15
+    expect(p2.predictedArrival).toBe(svc('08:15'));
+    expect(p2.scheduledArrival).toBe(svc('08:07'));
+    expect(p2.delaySeconds).toBe(svc('08:15') - svc('08:07'));
+  });
+
   it('records departures globally so recently-departed survives unviewed gaps', () => {
     const engine = makeEngine();
     const rt = stdRt();

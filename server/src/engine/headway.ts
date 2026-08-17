@@ -197,16 +197,21 @@ export function arrivalAtTerminal(
   serviceDayStartSeconds: number,
   tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
 ): ArrivalAtStop {
-  const row = db
+  const stops = db
     .prepare(
       `SELECT stop_id, arrival_time, departure_time, stop_sequence
-       FROM stop_times WHERE trip_id = ? ORDER BY stop_sequence DESC LIMIT 1`,
+       FROM stop_times WHERE trip_id = ?
+       ORDER BY stop_sequence ASC`,
     )
-    .get(tripId) as
-    | { stop_id: string; arrival_time: number; departure_time: number; stop_sequence: number }
-    | undefined;
-  if (!row) return { scheduled: 0, predicted: 0, known: false };
-  const scheduled = row.arrival_time ?? row.departure_time;
+    .all(tripId) as Array<{
+    stop_id: string;
+    arrival_time: number;
+    departure_time: number;
+    stop_sequence: number;
+  }>;
+  if (stops.length === 0) return { scheduled: 0, predicted: 0, known: false };
+  const last = stops[stops.length - 1]!;
+  const scheduled = last.arrival_time ?? last.departure_time;
 
   // Key the prediction strictly to the inbound trip's own TU entity. We deliberately do NOT fall
   // back by vehicleId: once CTA re-keys the vehicle to the outbound trip (the "flip"), that TU's
@@ -215,10 +220,30 @@ export function arrivalAtTerminal(
   // A terminal prediction is only useful when the TU identifies the corresponding inbound trip.
   if (!tripUpdate) return { scheduled, predicted: scheduled, known: false };
 
+  // CTA often omits the exact terminus from the carried prediction window (it hands off to the
+  // outbound trip at the shared terminal stop), but does predict stops just before it. Pick the
+  // greatest carried stop that still has an absolute arrival time, then extend its realtime
+  // arrival by the scheduled travel time from that stop to the terminus.
+  const bySeq = new Map(stops.map((s) => [s.stop_sequence, s]));
+  const carried = tripUpdate.stopTimeUpdates
+    .filter((u) => u.arrivalTime !== undefined && bySeq.has(u.stopSequence))
+    .sort((a, b) => b.stopSequence - a.stopSequence)[0];
+  if (carried) {
+    const carriedStop = bySeq.get(carried.stopSequence)!;
+    const carriedScheduled = carriedStop.arrival_time ?? carriedStop.departure_time;
+    const offset = scheduled - carriedScheduled;
+    return {
+      scheduled,
+      predicted: unixToServiceSeconds(carried.arrivalTime!, serviceDayStartSeconds) + offset,
+      known: true,
+    };
+  }
+
+  // Fall back to the per-stop delay or trip delay if the terminus itself is predicted.
   const fact = arrivalFact(
     tripUpdate,
-    row.stop_id,
-    row.stop_sequence,
+    last.stop_id,
+    last.stop_sequence,
     scheduled,
     serviceDayStartSeconds,
   );
