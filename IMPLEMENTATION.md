@@ -221,6 +221,7 @@ export interface AppConfig {
   confirmPings?: number;                 // 2, parked pings before an arm commits
   departPings?: number;                  // 2, motion pings before a layover departs
   scheduleArmGraceSeconds?: number;      // 120, grace after scheduled arrival for the fallback
+  vehiclePositionMaxAgeSeconds?: number; // 300, max VP age for new transition facts
 }
 ```
 
@@ -511,30 +512,36 @@ get fresh predictions each tick.
 
 **Geometric fact detection.** VehiclePositions provide the primary transition
 signals on a per-vehicle tracker (`engine.ts recordFacts`), replacing the older
-stop-matched heuristics that CTA's feed cannot drive (VP carries `stop_id` only
-~8% of the time and never `current_stop_sequence`; TripUpdates carry no timing
-fields; `current_status` is always `IN_TRANSIT_TO`). For each vehicle:
+stop-matched heuristics that CTA's feed cannot drive (VP omits `stop_id` and
+`current_status` is always `IN_TRANSIT_TO`). For each vehicle:
 
-- **Arrival arm**: a vehicle parked (stationary, displacement below
-  `stationaryDisplacementMeters`) inside the terminal buffer (within
-  `arrivalRadiusMeters` of the current trip's last stop, default 150 m,
-  per-terminal `radiusMeters` override) arms an arrival. The first parked ping
-  timestamps the fact; `confirmPings` consecutive parked pings commit it keyed
-  to the outbound trip the vehicle will operate (its own trip if already on the
-  outbound leg, else the block successor, else the TU-lookahead assignment). A
-  VP trip flip onto an outbound trip confirms/upgrades the fact (certain-but-late
-  fallback).
-- **Departure**: a laid-over bus that leaves the terminal hold zone (arrival
-  radius + `terminalMovementMeters` movement allowance, default +75 m) under
-  motion for `departPings` consecutive pings records its departure at the first
-  motion ping. A flip away from an outbound trip is the certain-but-late
-  departure fallback, and a bus first seen mid-route on an outbound trip out of
-  the hold zone is treated as departed immediately. The movement allowance keeps
-  a bus that pulls forward within the terminal in layover instead of dropping it
-  or mis-recording a departure.
+- **Arrival arm**: entering `arrivalRadiusMeters` of the current trip's static
+  last stop (default 150 m, per-terminal `radiusMeters` override) creates a
+  terminal candidate. The first entry timestamps the candidate. The vehicle
+  must then provide `confirmPings` distinct, fresh samples with low displacement
+  inside the radius plus movement allowance before the arrival fact commits.
+  Movement from the stop into the layover bay keeps the candidate alive but does
+  not count as dwell. A VP trip flip onto the outbound trip confirms the fact
+  and upgrades its evidence without replacing an earlier event timestamp. A
+  trip flip away from an outbound trip does not record departure because CTA can
+  re-key a vehicle while it is still laying over.
+- **Departure**: a laid-over bus more than `departureTriggerMeters` beyond the
+  outbound trip's first-stop coordinate (default 75 m) and under motion for
+  `departPings` consecutive fresh pings records its departure at the first
+  motion ping. A bus first seen mid-route on an outbound trip beyond the same
+  trigger is treated as departed immediately. `terminalMovementMeters` remains
+  arrival-side hysteresis: it lets a candidate move from the inbound last stop
+  into the layover bay without aborting. It is not added to the departure
+  trigger. During the confirmation interval the layover is marked departing and
+  is excluded from new hold decisions.
 - **Scheduled-arm fallback**: a bus inside the buffer whose scheduled arrival
   passed by `scheduleArmGraceSeconds` is classified as an estimated layover even
   when never observed stationary, preventing the stuck-incoming failure mode.
+
+Only fresh VP observations can advance these transitions. Cached, duplicate,
+out-of-order, or older-than-`vehiclePositionMaxAgeSeconds` observations may
+preserve display posture but cannot commit a new fact. Terminal geometry uses
+static GTFS endpoint identity and VP coordinates; VP `stop_id` is not required.
 
 Flip semantics follow the corrected model: flipping onto a trip records that
 trip's arrival, never the previous inbound leg's departure (the inbound leg

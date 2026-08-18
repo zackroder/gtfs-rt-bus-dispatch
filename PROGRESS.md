@@ -339,7 +339,8 @@ I/O) so it can be reviewed and unit-tested in isolation.
   confirmation, not linkage. Config knobs: `arrivalRadiusMeters` (default 150,
   per-terminal `radiusMeters` override), `terminalMovementMeters` (default 75),
   `stationaryDisplacementMeters`, `confirmPings`/`departPings` (default 2),
-  `scheduleArmGraceSeconds`.
+-  `scheduleArmGraceSeconds`. Superseded for departure geometry by the
+   2026-08-17 departure-trigger decision below.
 - **2026-08-16 — Terminal movement allowance**: live testing showed a bus that
   pulled forward within the terminal could drop off the layover view (or be
   mis-recorded as departed), because the departure radius equaled the tight arm
@@ -357,6 +358,20 @@ I/O) so it can be reviewed and unit-tested in isolation.
   history for debugging and tuning the dispatch algorithm. Idempotent via
   `UNIQUE(service_date, trip_id, event_type, value_seconds)`; exposed read-only
   via `GET /api/run-events`.
+- **2026-08-17 — Fresh VP terminal state**: terminal mechanics use static GTFS
+  endpoint identity plus VP coordinates, not VP `stop_id` or `current_status`.
+  Radius entry creates a UI-visible arrival candidate; fresh low-displacement
+  samples confirm it. Trip flips confirm identity and preserve the earliest
+  candidate timestamp. A trip flip is assignment/arrival confirmation only, not
+  a departure signal. Cached, duplicate, out-of-order, and over-age VP samples
+  cannot create new facts. Run-event evidence records whether a fact came from
+  geofence dwell, trip flip, motion exit, or an out-of-buffer fallback.
+- **2026-08-17 — Departure trigger and pending state**: arrival uses the inbound
+  last-stop radius (default 150 m), while departure uses a separate 75 m trigger
+  beyond the outbound first stop. `terminalMovementMeters` is arrival-side
+  hysteresis and is not added to the departure trigger. The first moving sample
+  starts `departurePending` (red UI indicator); `departPings` fresh moving samples
+  confirm the departure. Trip flips never confirm departure.
 
 ## Build notes
 

@@ -211,6 +211,8 @@ SQLite. Env vars only seed the initial defaults.
 | `confirmPings` | 2 | Parked pings before an arrival arm commits |
 | `departPings` | 2 | Motion pings before a layover departs |
 | `scheduleArmGraceSeconds` | 120 | Grace after scheduled arrival for the fallback |
+| `vehiclePositionMaxAgeSeconds` | 300 | Maximum VP sample age allowed to create a new transition fact |
+| `departureTriggerMeters` | 75 | Distance beyond the outbound first stop that starts departure confirmation |
 | `terminals` | auto-discovered | `[{ id, name, stopIds[], routeIds[]?, radiusMeters? }]` |
 
 Terminals are auto-discovered from GTFS (stops that are a route's first/last
@@ -254,10 +256,24 @@ Local testing: `npm run dev`.
 - Observed arrival/departure facts are persisted in SQLite by service date;
   applied intervention state and its audit history are persisted alongside
   them.
-- Actual arrival/departure facts are recorded only from VehiclePositions
-  (vehicle observed at a trip's terminal stop, sequence advancing past the
-  first stop, or a tripId flip). TripUpdates remain predictions and are labeled
-  as estimated when used for EDT inputs.
+- Actual arrival/departure facts are recorded only from fresh VehiclePositions.
+  Coordinates are measured against the static inbound last stop; entering the
+  radius creates an "arriving" candidate, and distinct low-displacement samples
+  confirm the layover. A tripId flip confirms outbound assignment and uses the
+  earliest candidate timestamp when one exists; it is not a departure signal.
+  TripUpdates remain predictions and are
+  labeled as estimated when used for EDT inputs.
+- Departure confirmation uses a separate tighter trigger: a laid-over bus more
+  than `departureTriggerMeters` beyond the outbound first-stop coordinate and
+  moving for `departPings` fresh observations becomes recently departed. The
+  default is 75 m, independent of the 150 m arrival radius. During confirmation
+  the layover card shows a flashing red `departing` indicator and no new hold is
+  suggested.
+- VP `stop_id` and `current_status` are not required for terminal mechanics.
+  The production feed omits `stop_id`; VP coordinates plus static GTFS endpoint
+  identity are the transition inputs.
+- Cached, duplicate, out-of-order, and over-age VP observations may preserve
+  display posture but cannot create new arrival/departure facts.
 - The first and last departures in a route have no neighbor on one side and are
   never held by the triplet rule.
 - ETA when TripUpdates lack a terminal prediction is a simple delay-based
