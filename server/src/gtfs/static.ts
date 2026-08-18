@@ -31,19 +31,25 @@ function isZip(buffer: Buffer): boolean {
   );
 }
 
-async function fetchZip(url: string): Promise<Buffer> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`GTFS static download failed: ${res.status} ${res.statusText}`);
+async function fetchZip(url: string, timeoutMs = 30000): Promise<Buffer> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`GTFS static download failed: ${res.status} ${res.statusText}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!isZip(buffer)) {
+      throw new Error(
+        `GTFS static download did not return a zip file (${buffer.length} bytes received); ` +
+          `check the URL or place a valid zip at the cache path`,
+      );
+    }
+    return buffer;
+  } finally {
+    clearTimeout(timeout);
   }
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (!isZip(buffer)) {
-    throw new Error(
-      `GTFS static download did not return a zip file (${buffer.length} bytes received); ` +
-        `check the URL or place a valid zip at the cache path`,
-    );
-  }
-  return buffer;
 }
 
 // Load a valid cached zip or download and optionally cache a fresh static feed.

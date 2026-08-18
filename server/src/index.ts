@@ -50,6 +50,16 @@ let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
 let refreshInFlight: Promise<void> | null = null;
 let staticLoadInFlight: Promise<void> | null = null;
+type ServerPhase = 'starting' | 'loading_static' | 'ready' | 'refreshing' | 'error';
+let serverPhase: ServerPhase = staticLoadedAt === null ? 'starting' : 'ready';
+let startupError: string | null = null;
+let lastRefreshError: string | null = null;
+let lastStaticLoadDurationMs: number | null = null;
+let lastRefreshDurationMs: number | null = null;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function discoverTerminals(): void {
   // Discovery is only a first-run convenience; an explicit terminal configuration is preserved.
@@ -66,9 +76,26 @@ function discoverTerminals(): void {
 async function ensureStaticLoaded(force = false): Promise<void> {
   // Coalesce concurrent startup, reload, and request-triggered loads into one operation.
   if (staticLoadInFlight) return staticLoadInFlight;
-  staticLoadInFlight = ensureStaticLoadedInternal(force).finally(() => {
-    staticLoadInFlight = null;
-  });
+  const startedAt = Date.now();
+  serverPhase = 'loading_static';
+  startupError = null;
+  console.log(`[static] begin force=${force}`);
+  staticLoadInFlight = ensureStaticLoadedInternal(force)
+    .then(() => {
+      serverPhase = 'ready';
+      lastStaticLoadDurationMs = Date.now() - startedAt;
+      console.log(`[static] ready duration_ms=${lastStaticLoadDurationMs}`);
+    })
+    .catch((error: unknown) => {
+      serverPhase = 'error';
+      startupError = errorMessage(error);
+      lastStaticLoadDurationMs = Date.now() - startedAt;
+      console.error(`[static] failed duration_ms=${lastStaticLoadDurationMs} error=${startupError}`);
+      throw error;
+    })
+    .finally(() => {
+      staticLoadInFlight = null;
+    });
   return staticLoadInFlight;
 }
 
@@ -79,9 +106,11 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
     savedLoadedAt !== null &&
     config.staticRefreshHours > 0 &&
     Date.now() - savedLoadedAt > config.staticRefreshHours * 3600 * 1000;
+  console.log(`[static] inspect stops=${stopCount} saved_loaded_at=${savedLoadedAt ?? 'none'} stale=${stale}`);
   if (!force && stopCount > 0 && !stale) {
     // Static tables are reusable until their configured refresh age is exceeded.
     discoverTerminals();
+    console.log(`[static] reuse terminals=${config.terminals.length}`);
     return;
   }
 
@@ -90,8 +119,15 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
     cachePath: STATIC_GTFS_PATH,
     force,
   });
+  console.log(`[static] load source=${config.staticGtfsUrl} cache=${STATIC_GTFS_PATH}`);
   const gtfs = await providerInstance.load();
+  console.log(
+    `[static] parsed stops=${gtfs.stops.length} routes=${gtfs.routes.length} ` +
+      `trips=${gtfs.trips.length} stop_times=${gtfs.stopTimes.length}`,
+  );
+  const persistStartedAt = Date.now();
   loadStatic(db, gtfs);
+  console.log(`[static] persisted duration_ms=${Date.now() - persistStartedAt}`);
   try {
     db.pragma('wal_checkpoint(TRUNCATE)');
   } catch {
@@ -139,22 +175,47 @@ function unsubscribe(terminalId: string): void {
 }
 
 async function refreshInternal(): Promise<void> {
-  if (staticLoadInFlight) await staticLoadInFlight;
+  const startedAt = Date.now();
+  console.log(`[refresh] begin subscribed=${subscriptions.size}`);
   try {
+    if (staticLoadInFlight) {
+      console.log('[refresh] waiting_for_static_load');
+      await staticLoadInFlight;
+    }
+    serverPhase = 'refreshing';
+    const fetchStartedAt = Date.now();
     latestRt = await provider.fetch();
+    lastRefreshError = null;
+    console.log(
+      `[refresh] feeds duration_ms=${Date.now() - fetchStartedAt} ` +
+        `tu=${latestRt.tripUpdates.length} vp=${latestRt.vehiclePositions.length} ` +
+        `vp_cached=${latestRt.vehiclePositionsFromCache === true}`,
+    );
   } catch (err) {
-    console.error('realtime fetch failed:', err instanceof Error ? err.message : err);
+    lastRefreshError = errorMessage(err);
+    console.error(`[refresh] preparation/feed failed error=${lastRefreshError}`);
   }
-  if (!latestRt) return;
-  // The engine always records facts globally, but only builds snapshots for subscribed terminals.
-  const wanted = new Set(subscriptions.keys());
-  const fresh = engine.refresh(latestRt, new Date(), wanted);
-  for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
-  for (const terminalId of wanted) {
-    if (!fresh.some((snapshot) => snapshot.terminalId === terminalId)) snapshots.delete(terminalId);
+  try {
+    if (!latestRt) return;
+    // The engine always records facts globally, but only builds snapshots for subscribed terminals.
+    const wanted = new Set(subscriptions.keys());
+    const fresh = engine.refresh(latestRt, new Date(), wanted);
+    for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
+    for (const terminalId of wanted) {
+      if (!fresh.some((snapshot) => snapshot.terminalId === terminalId)) snapshots.delete(terminalId);
+    }
+    lastRefreshAt = Date.now();
+    broadcaster?.broadcast(fresh);
+    console.log(`[refresh] complete duration_ms=${Date.now() - startedAt} snapshots=${fresh.length}`);
+  } catch (err) {
+    lastRefreshError = errorMessage(err);
+    console.error(`[refresh] engine failed error=${lastRefreshError}`);
+    throw err;
+  } finally {
+    lastRefreshDurationMs = Date.now() - startedAt;
+    if (serverPhase === 'refreshing') serverPhase = 'ready';
+    console.log(`[refresh] end duration_ms=${lastRefreshDurationMs}`);
   }
-  lastRefreshAt = Date.now();
-  broadcaster?.broadcast(fresh);
 }
 
 async function refreshOnce(): Promise<void> {
@@ -180,6 +241,13 @@ function scheduleRefresh(): void {
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+app.use('/api', (req, res, next) => {
+  const startedAt = Date.now();
+  res.once('finish', () => {
+    console.log(`[http] ${req.method} ${req.originalUrl} status=${res.statusCode} duration_ms=${Date.now() - startedAt}`);
+  });
+  next();
+});
 app.use(
   '/api',
   createApi({
@@ -199,7 +267,19 @@ app.use(
       recentFacts: engine.getFactEventDiagnostics(),
       provider: provider.getDiagnostics(),
     }),
-    getHealth: () => ({ ok: true, lastRefreshAt, staticLoadedAt }),
+    getHealth: () => ({
+      ok: true,
+      ready: serverPhase === 'ready' || serverPhase === 'refreshing',
+      phase: serverPhase,
+      staticLoading: staticLoadInFlight !== null,
+      refreshInFlight: refreshInFlight !== null,
+      startupError,
+      lastRefreshError,
+      lastStaticLoadDurationMs,
+      lastRefreshDurationMs,
+      lastRefreshAt,
+      staticLoadedAt,
+    }),
     reloadStatic: () => ensureStaticLoaded(true),
     refreshOnce,
   }),
@@ -220,7 +300,7 @@ broadcaster = setupWs(httpServer, {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`dispatch listening on :${PORT}`);
+  console.log(`dispatch listening on :${PORT} phase=${serverPhase}`);
   ensureStaticLoaded()
     .catch((err: unknown) => {
       console.error('static load failed:', err instanceof Error ? err.message : err);

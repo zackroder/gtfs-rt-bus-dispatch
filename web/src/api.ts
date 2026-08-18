@@ -34,6 +34,14 @@ export interface Health {
   ok: boolean;
   lastRefreshAt: number | null;
   staticLoadedAt: number | null;
+  ready?: boolean;
+  phase?: 'starting' | 'loading_static' | 'ready' | 'refreshing' | 'error';
+  staticLoading?: boolean;
+  refreshInFlight?: boolean;
+  startupError?: string | null;
+  lastRefreshError?: string | null;
+  lastStaticLoadDurationMs?: number | null;
+  lastRefreshDurationMs?: number | null;
 }
 
 // This deliberately matches the small interface needed by Zod's parse methods.
