@@ -159,6 +159,7 @@ export function createDatabase(dbPath: string): Database.Database {
       terminal_id TEXT,
       route_id TEXT,
       source TEXT NOT NULL CHECK (source IN ('vp', 'tu')),
+      evidence TEXT,
       value_seconds INTEGER NOT NULL,
       generated_at INTEGER NOT NULL,
       classification TEXT,
@@ -176,6 +177,7 @@ export function createDatabase(dbPath: string): Database.Database {
   ensureColumn(db, 'routes', 'color', 'TEXT');
   ensureColumn(db, 'routes', 'text_color', 'TEXT');
   ensureColumn(db, 'block_trips', 'service_id', 'TEXT');
+  ensureColumn(db, 'run_events', 'evidence', 'TEXT');
   db.exec(`
     UPDATE block_trips
     SET service_id = (SELECT service_id FROM trips WHERE trips.trip_id = block_trips.trip_id)

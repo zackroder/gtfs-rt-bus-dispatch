@@ -82,6 +82,8 @@ export default function ConfigPage() {
     ['Confirm pings', 'confirmPings'],
     ['Depart pings', 'departPings'],
     ['Scheduled-arm grace (s)', 'scheduleArmGraceSeconds'],
+    ['Max VP age for facts (s)', 'vehiclePositionMaxAgeSeconds'],
+    ['Departure trigger (m)', 'departureTriggerMeters'],
   ];
 
   return (

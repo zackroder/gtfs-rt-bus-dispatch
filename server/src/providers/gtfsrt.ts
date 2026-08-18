@@ -67,7 +67,12 @@ export class GtfsRealtimeProvider implements RealtimeProvider {
       this.vehiclePositionsFromCache = true;
     }
     if (vpResult.status === 'rejected') console.error('vehicle positions feed failed:', vpResult.reason);
-    return { timestamp, tripUpdates, vehiclePositions };
+    return {
+      timestamp,
+      tripUpdates,
+      vehiclePositions,
+      vehiclePositionsFromCache: this.vehiclePositionsFromCache,
+    };
   }
 
   // Expose feed health without exposing the configured URLs or API credential.

@@ -6,6 +6,8 @@ export interface RealtimeSnapshot {
   timestamp: number;
   tripUpdates: TripUpdateInfo[];
   vehiclePositions: VehiclePositionInfo[];
+  /** True when VP entities are retained from a failed fetch rather than freshly observed. */
+  vehiclePositionsFromCache?: boolean;
 }
 
 export interface RealtimeProvider {

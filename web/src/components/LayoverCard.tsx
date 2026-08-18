@@ -25,6 +25,8 @@ export function LayoverCard({
       <div className="card-main">
         <span className="vehicle-id">{bus.vehicleId ? `#${bus.vehicleId}` : bus.tripId}</span>
         <span className="run">{bus.tripId}</span>
+        {bus.arrivalPending && <span className="arrival-pending"><span className="arrival-pending-dot" /> arriving</span>}
+        {bus.departurePending && <span className="departure-pending"><span className="departure-pending-dot" /> departing</span>}
         {bus.restDelayed && <span className="badge rest-delayed">delayed</span>}
       </div>
       <div className="card-side">

@@ -27,7 +27,19 @@ export interface ApiDeps {
   getConfig(): AppConfig;
   applyConfig(next: AppConfig): AppConfig;
   computeTerminal(terminalId: string): TerminalSnapshot | undefined;
-  getHealth(): { ok: boolean; lastRefreshAt: number | null; staticLoadedAt: number | null };
+  getHealth(): {
+    ok: boolean;
+    lastRefreshAt: number | null;
+    staticLoadedAt: number | null;
+    ready?: boolean;
+    phase?: 'starting' | 'loading_static' | 'ready' | 'refreshing' | 'error';
+    staticLoading?: boolean;
+    refreshInFlight?: boolean;
+    startupError?: string | null;
+    lastRefreshError?: string | null;
+    lastStaticLoadDurationMs?: number | null;
+    lastRefreshDurationMs?: number | null;
+  };
   getVpDiagnostics(): unknown;
   reloadStatic(): Promise<void>;
   refreshOnce(): Promise<void>;
@@ -82,7 +94,7 @@ export function createApi(deps: ApiDeps): Router {
     if (eventType === 'arrival' || eventType === 'departure') { clauses.push('event_type = ?'); params.push(eventType); }
     const rows = deps.db
       .prepare(
-        `SELECT service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
+       `SELECT service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source, evidence,
                 value_seconds, generated_at, classification, edt_seconds,
                 scheduled_departure, scheduled_arrival
          FROM run_events

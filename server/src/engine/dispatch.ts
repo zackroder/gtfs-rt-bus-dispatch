@@ -11,6 +11,7 @@ export interface DispatchDeparture {
   edt: number;
   departedSeconds?: number;
   hold?: HoldOverride;
+  departurePending?: boolean;
 }
 
 // Calculate the earliest departure allowed by schedule and minimum terminal rest.
@@ -82,6 +83,7 @@ export function decideTriplets(
   for (let i = 1; i < working.length - 1; i++) {
     const center = working[i]!;
     if (center.state === 'departed') continue;
+    if (center.departurePending) continue;
     if (center.hold) continue;
     if (opts.requireObservedArrival && center.arrivalSource !== 'observed') continue;
     // Production engine calls requireObservedArrival so a recommendation is never based solely

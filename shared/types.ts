@@ -102,6 +102,10 @@ export interface LayoverBus {
   scheduledArrival: number;   // scheduled terminal arrival of the previous trip in block
   terminalArrival?: number;
   terminalArrivalSource?: 'observed' | 'estimated';
+  /** True while the vehicle is inside the arrival geofence but dwell is not confirmed yet. */
+  arrivalPending?: boolean;
+  /** True while a laid-over vehicle has crossed the departure trigger but lacks confirmation. */
+  departurePending?: boolean;
   expectedDeparture: number;
   predictedDeparture: number;
   countdownSeconds: number;
@@ -190,8 +194,8 @@ export interface AppConfig {
   terminals: Terminal[];
   /** Radius (meters) around a terminal stop within which a parked bus is counted as arrived. */
   arrivalRadiusMeters?: number;
-  /** Additional meters tolerated around the arrival radius once a bus is laid over, so a bus
-   *  pulling forward within the terminal is not dropped or mis-recorded as departed. */
+  /** Additional meters tolerated while an arrival candidate moves from the inbound stop into the
+   *  layover bay; departure uses the separate departureTriggerMeters setting. */
   terminalMovementMeters?: number;
   /** Displacement (meters) between polls that still counts as "parked" for arrival/departure arms. */
   stationaryDisplacementMeters?: number;
@@ -201,6 +205,10 @@ export interface AppConfig {
   departPings?: number;
   /** Grace (seconds) after the scheduled arrival before the scheduled-arm fallback fires. */
   scheduleArmGraceSeconds?: number;
+  /** Maximum age of a VP sample that may create a new transition fact. */
+  vehiclePositionMaxAgeSeconds?: number;
+  /** Distance beyond the outbound first stop that starts departure confirmation. */
+  departureTriggerMeters?: number;
 }
 
 /** Validates terminal identity and its non-empty stop membership. */
@@ -239,6 +247,8 @@ export const appConfigSchema = z.object({
   confirmPings: z.number().int().min(1).max(30).optional(),
   departPings: z.number().int().min(1).max(30).optional(),
   scheduleArmGraceSeconds: z.number().int().min(0).max(3600).optional(),
+  vehiclePositionMaxAgeSeconds: z.number().int().min(10).max(3600).optional(),
+  departureTriggerMeters: z.number().int().min(0).max(5000).optional(),
 });
 
 // Nested vehicle DTO schemas are kept private because callers consume them through
@@ -276,6 +286,8 @@ const layoverBusSchema = z.object({
   scheduledArrival: z.number(),
   terminalArrival: z.number().optional(),
   terminalArrivalSource: z.enum(['observed', 'estimated']).optional(),
+  arrivalPending: z.boolean().optional(),
+  departurePending: z.boolean().optional(),
   expectedDeparture: z.number(),
   predictedDeparture: z.number(),
   countdownSeconds: z.number(),
@@ -349,6 +361,14 @@ export const healthSchema = z.object({
   ok: z.boolean(),
   lastRefreshAt: z.number().nullable(),
   staticLoadedAt: z.number().nullable(),
+  ready: z.boolean().optional(),
+  phase: z.enum(['starting', 'loading_static', 'ready', 'refreshing', 'error']).optional(),
+  staticLoading: z.boolean().optional(),
+  refreshInFlight: z.boolean().optional(),
+  startupError: z.string().nullable().optional(),
+  lastRefreshError: z.string().nullable().optional(),
+  lastStaticLoadDurationMs: z.number().nullable().optional(),
+  lastRefreshDurationMs: z.number().nullable().optional(),
 });
 
 /** The terminal index plus route-to-terminal grouping used by the landing page. */

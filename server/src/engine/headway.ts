@@ -12,12 +12,20 @@ export type VehicleState = 'incoming' | 'layover' | 'departed';
 export const PAST_WINDOW_SECONDS = 30 * 60;
 
 export type FactSource = 'vp' | 'tu';
+export type FactEvidence =
+  | 'geofence_dwell'
+  | 'trip_flip'
+  | 'motion_exit'
+  | 'out_of_buffer'
+  | 'restored_vp';
 
 export interface RunRecord {
   arrivalSeconds?: number;
   arrivalSource?: FactSource;
+  arrivalEvidence?: FactEvidence;
   departureSeconds?: number;
   departureSource?: FactSource;
+  departureEvidence?: FactEvidence;
   hold?: HoldOverride;
 }
 
@@ -47,12 +55,16 @@ export interface OutboundDeparture {
   predictedArrival: number;
   terminalArrival?: number;
   arrivalSource?: 'observed' | 'estimated';
+  arrivalEvidence?: FactEvidence;
   arrivalForEdt?: number;
   edt: number;
   departedSeconds?: number;
+  departureEvidence?: FactEvidence;
   state: VehicleState;
   hold?: HoldOverride;
   hasArrivalInfo: boolean;
+  arrivalPending: boolean;
+  departurePending: boolean;
 }
 
 export interface BuildDeparturesOptions {
@@ -75,11 +87,20 @@ export interface BuildDeparturesOptions {
 
 // What the geometric fact pass observed about a vehicle near a terminal this refresh.
 export interface VehicleTerminalState {
+  terminalId: string;
   inBuffer: boolean;
   parked: boolean;
   distToTerminalM?: number;
   armTripId?: string;
   layoverTripId?: string;
+  departurePending: boolean;
+}
+
+// Terminal posture is keyed by both vehicle and terminal. A vehicle can be working
+// multiple configured terminals during the same service day, so a vehicle-only key can
+// incorrectly make a bus at terminal A appear laid over at terminal B.
+export function vehicleTerminalKey(vehicleId: string, terminalId: string): string {
+  return `${vehicleId}|${terminalId}`;
 }
 
 // Build predecessor/successor links for trips assigned to the same block.
@@ -318,7 +339,9 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     // Geometric posture: the vehicle is sitting inside the terminal buffer this refresh. This
     // is the timely signal that upgrades an incoming bus to layover before the VP flip confirms
     // it, and it is independent of both block chains and TU stop predictions.
-    const terminalState = vehicleId ? opts.vpTerminalState?.get(vehicleId) : undefined;
+    const terminalState = vehicleId
+      ? opts.vpTerminalState?.get(vehicleTerminalKey(vehicleId, opts.terminal.id))
+      : undefined;
     // A vehicle parked inside the terminal buffer is the timely geometric arrival signal. The
     // scheduled-arm fallback covers a bus that reached the terminal area but never registered as
     // stationary (e.g. staging just beyond the stop or a feed gap), once its scheduled arrival
@@ -336,6 +359,8 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const assignedAtTerminal = terminalState?.inBuffer === true && tuOperatesOb;
     const hasPostureForTrip =
       terminalState?.armTripId === ob.tripId || terminalState?.layoverTripId === ob.tripId;
+    const arrivalPending = terminalState?.armTripId === ob.tripId && record?.arrivalSeconds === undefined;
+    const departurePending = terminalState?.departurePending === true && record?.departureSeconds === undefined;
     const grace = opts.scheduleArmGraceSeconds ?? 120;
     const scheduledArm =
       terminalState?.inBuffer === true &&
@@ -391,12 +416,16 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       predictedArrival,
       terminalArrival,
       arrivalSource,
+      arrivalEvidence: record?.arrivalEvidence,
       arrivalForEdt,
       edt,
       departedSeconds,
+      departureEvidence: record?.departureEvidence,
       state,
       hold: record?.hold,
       hasArrivalInfo,
+      arrivalPending,
+      departurePending,
     });
   }
 

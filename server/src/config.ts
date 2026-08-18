@@ -32,6 +32,8 @@ export const GEOMETRY_DEFAULTS = {
   confirmPings: 2,
   departPings: 2,
   scheduleArmGraceSeconds: 120,
+  vehiclePositionMaxAgeSeconds: 300,
+  departureTriggerMeters: 75,
 } as const;
 
 // Fill missing geometry settings from defaults; keeps schema-optional fields present at runtime.
@@ -46,6 +48,9 @@ function withGeometryDefaults(config: AppConfig): AppConfig {
     departPings: config.departPings ?? GEOMETRY_DEFAULTS.departPings,
     scheduleArmGraceSeconds:
       config.scheduleArmGraceSeconds ?? GEOMETRY_DEFAULTS.scheduleArmGraceSeconds,
+    vehiclePositionMaxAgeSeconds:
+      config.vehiclePositionMaxAgeSeconds ?? GEOMETRY_DEFAULTS.vehiclePositionMaxAgeSeconds,
+    departureTriggerMeters: config.departureTriggerMeters ?? GEOMETRY_DEFAULTS.departureTriggerMeters,
   };
 }
 

@@ -225,6 +225,50 @@ h3 {
   color: var(--late);
 }
 
+.arrival-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ok);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.arrival-pending-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: arrival-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes arrival-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.departure-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--late);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.departure-pending-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--late);
+  animation: departure-pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes departure-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
 .rest-delay-time {
   color: var(--late);
   font-weight: 700;
