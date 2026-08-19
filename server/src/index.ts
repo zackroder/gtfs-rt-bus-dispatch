@@ -21,7 +21,7 @@ import {
   getServiceDayStart,
   getStaticLoadedAt,
 } from './gtfs/time';
-import type { AppConfig, TerminalSnapshot } from '../../shared/types';
+import type { AppConfig, TerminalMapSnapshot, TerminalSnapshot } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';
 
 // The process owns one database, provider, engine, and refresh loop. HTTP and WS layers
@@ -152,6 +152,16 @@ function computeTerminal(terminalId: string): TerminalSnapshot | undefined {
   };
 }
 
+function computeTerminalMap(terminalId: string): TerminalMapSnapshot | undefined {
+  // The map is derived from the last cached snapshot plus the retained raw feed, so it is
+  // read-only by construction and 404s for unknown terminals like the snapshot endpoint. An
+  // empty feed still renders the geofence circles, so only missing terminals return undefined.
+  const snapshot = computeTerminal(terminalId);
+  if (!snapshot) return undefined;
+  const rt = latestRt ?? { timestamp: 0, tripUpdates: [], vehiclePositions: [] };
+  return engine.buildMapSnapshot(terminalId, snapshot, rt);
+}
+
 function subscribe(terminalId: string): void {
   const count = (subscriptions.get(terminalId) ?? 0) + 1;
   subscriptions.set(terminalId, count);
@@ -258,6 +268,7 @@ app.use(
       return config;
     },
     computeTerminal,
+    computeTerminalMap,
     interventions,
     getVpDiagnostics: () => ({
       generatedAt: Math.floor(Date.now() / 1000),

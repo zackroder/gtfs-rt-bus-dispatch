@@ -53,6 +53,8 @@ export interface VehiclePositionInfo {
   currentStopSequence?: number;
   lat?: number;
   lon?: number;
+  /** Compass bearing reported by the vehicle (degrees clockwise from north), when the feed supplies it. */
+  bearing?: number;
   timestamp: number;
 }
 
@@ -175,6 +177,57 @@ export interface TerminalSnapshot {
   generatedAt: number;        // unix seconds
   serviceDayStartSeconds: number;
   routes: RouteState[];
+}
+
+/**
+ * Read-only debug map view of one terminal. Statuses are derived from the existing snapshot:
+ * RouteState.incoming = inbound, a LayoverBus with arrivalPending = arriving, a LayoverBus with
+ * neither pending flag = laying over, a LayoverBus with departurePending = departing, and
+ * RouteState.departed = departed.
+ */
+export type VehicleMapStatus = 'inbound' | 'arriving' | 'laying_over' | 'departing' | 'departed';
+
+/** A geofence circle the engine arms around a terminal stop, mirroring engine/recordFacts. */
+export interface TerminalMapBuffer {
+  stopId: string;
+  lat: number;
+  lon: number;
+  radiusMeters: number;
+  kind: 'arrival' | 'movement' | 'departure';
+}
+
+/** A terminal stop projected onto the debug map. */
+export interface TerminalMapStop {
+  stopId: string;
+  name: string;
+  lat: number;
+  lon: number;
+}
+
+/** A color-coded, labeled arrow for one live vehicle on the debug map. */
+export interface VehicleMapMarker {
+  vehicleId?: string;
+  tripId: string;
+  routeShortName: string;
+  routeColor?: string;
+  status: VehicleMapStatus;
+  lat: number;
+  lon: number;
+  /** Clockwise degrees from north; points toward the terminal for inbound/arriving/laying-over. */
+  headingDegrees?: number;
+  label: string;
+  etaSeconds?: number;
+}
+
+/** Point-in-time debug map payload for one terminal. */
+export interface TerminalMapSnapshot {
+  terminalId: string;
+  terminalName: string;
+  generatedAt: number;        // unix seconds
+  center: { lat: number; lon: number };
+  buffers: TerminalMapBuffer[];
+  stops: TerminalMapStop[];
+  vehicles: VehicleMapMarker[];
 }
 
 /** Runtime configuration shared by the settings page and configuration API. */
@@ -348,6 +401,45 @@ export const terminalSnapshotSchema = z.object({
   generatedAt: z.number(),
   serviceDayStartSeconds: z.number(),
   routes: z.array(routeStateSchema),
+});
+
+const terminalMapBufferSchema = z.object({
+  stopId: z.string(),
+  lat: z.number(),
+  lon: z.number(),
+  radiusMeters: z.number(),
+  kind: z.enum(['arrival', 'movement', 'departure']),
+});
+
+const terminalMapStopSchema = z.object({
+  stopId: z.string(),
+  name: z.string(),
+  lat: z.number(),
+  lon: z.number(),
+});
+
+const vehicleMapMarkerSchema = z.object({
+  vehicleId: z.string().optional(),
+  tripId: z.string(),
+  routeShortName: z.string(),
+  routeColor: z.string().optional(),
+  status: z.enum(['inbound', 'arriving', 'laying_over', 'departing', 'departed']),
+  lat: z.number(),
+  lon: z.number(),
+  headingDegrees: z.number().optional(),
+  label: z.string(),
+  etaSeconds: z.number().optional(),
+});
+
+/** Validates the read-only debug map payload served by GET /api/terminals/:id/map. */
+export const terminalMapSnapshotSchema = z.object({
+  terminalId: z.string(),
+  terminalName: z.string(),
+  generatedAt: z.number(),
+  center: z.object({ lat: z.number(), lon: z.number() }),
+  buffers: z.array(terminalMapBufferSchema),
+  stops: z.array(terminalMapStopSchema),
+  vehicles: z.array(vehicleMapMarkerSchema),
 });
 
 /** The websocket envelope; the array allows one broadcast to serve many terminals. */

@@ -89,6 +89,7 @@ export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number
     // that omits them simply leaves the geometry fields unset.
     const lat = vp.position ? toSeconds(vp.position.latitude) : undefined;
     const lon = vp.position ? toSeconds(vp.position.longitude) : undefined;
+    const bearing = vp.position ? toSeconds(vp.position.bearing) : undefined;
     positions.push({
       vehicleId,
       tripId: tripId || undefined,
@@ -96,6 +97,7 @@ export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number
       currentStopSequence: stopSequence !== undefined && stopSequence > 0 ? stopSequence : undefined,
       lat: Number.isFinite(lat) ? lat : undefined,
       lon: Number.isFinite(lon) ? lon : undefined,
+      bearing: Number.isFinite(bearing) ? bearing : undefined,
       timestamp: toSeconds(vp.timestamp) ?? timestamp,
     });
   }

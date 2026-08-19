@@ -6,7 +6,12 @@ import type {
   LayoverBus,
   RouteState,
   Terminal,
+  TerminalMapBuffer,
+  TerminalMapSnapshot,
+  TerminalMapStop,
   TerminalSnapshot,
+  VehicleMapMarker,
+  VehicleMapStatus,
   VehiclePositionInfo,
 } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
@@ -28,7 +33,7 @@ import {
 } from './headway';
 import { decideTriplets } from './dispatch';
 import { outboundRoutesAtTerminal, routeStyle } from './terminal';
-import { distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
+import { bearingDegrees, distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
 
 // Engine owns the cross-refresh ledger: realtime snapshots are transient, while observed
 // VP facts and approved interventions must survive feed gaps and process restarts.
@@ -936,6 +941,116 @@ export class Engine {
       });
     }
     return states;
+  }
+
+  // Build the read-only terminal map debug view from a cached snapshot plus the raw realtime feed.
+  // Vehicle coordinates exist only on rt.vehiclePositions (snapshot DTOs never carry lat/lon), so
+  // each bus is joined back to the feed by vehicleId; buses without a fresh coordinate are skipped.
+  buildMapSnapshot(terminalId: string, snapshot: TerminalSnapshot, rt: RealtimeSnapshot): TerminalMapSnapshot {
+    const config = this.getConfig();
+    const terminal = config.terminals.find((t) => t.id === terminalId);
+    if (!terminal) throw new Error(`unknown terminal ${terminalId}`);
+    const coords = this.stopCoords();
+    const names = this.stopNames();
+
+    // Buffer radii mirror the geofence arms in recordFacts: the arrival circle is the terminal
+    // arrival geofence (per-terminal override wins), the movement/hysteresis circle extends it by
+    // the terminal movement allowance, and the departure circle is the outbound departure trigger.
+    const arrivalRadius = terminal.radiusMeters ?? config.arrivalRadiusMeters ?? 150;
+    const movementMeters = config.terminalMovementMeters ?? 75;
+    const departureRadius = config.departureTriggerMeters ?? 75;
+    const buffers: TerminalMapBuffer[] = [];
+    const stops: TerminalMapStop[] = [];
+    let latSum = 0;
+    let lonSum = 0;
+    let centerCount = 0;
+    for (const stopId of terminal.stopIds) {
+      const coord = coords.get(stopId);
+      if (!coord) continue;
+      const name = names.get(stopId) ?? stopId;
+      stops.push({ stopId, name, lat: coord.lat, lon: coord.lon });
+      buffers.push(
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius, kind: 'arrival' },
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius + movementMeters, kind: 'movement' },
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: departureRadius, kind: 'departure' },
+      );
+      latSum += coord.lat;
+      lonSum += coord.lon;
+      centerCount++;
+    }
+    // A terminal with no resolvable coordinates still gets a map, just without an anchor circle.
+    const center = centerCount > 0
+      ? { lat: latSum / centerCount, lon: lonSum / centerCount }
+      : { lat: 0, lon: 0 };
+
+    const vpByVehicle = new Map(rt.vehiclePositions.map((vp) => [vp.vehicleId, vp]));
+    const vehicles: VehicleMapMarker[] = [];
+    for (const route of snapshot.routes) {
+      for (const bus of route.incoming) {
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'inbound', bus.etaSeconds, vpByVehicle, center);
+        if (marker) vehicles.push(marker);
+      }
+      for (const bus of route.layovers) {
+        // Layover pending flags classify the arrow: arrivalPending is the arrival arm before
+        // dwell confirmation, departurePending is the departure arm after the trigger is crossed.
+        const status: VehicleMapStatus = bus.arrivalPending === true
+          ? 'arriving'
+          : bus.departurePending === true
+            ? 'departing'
+            : 'laying_over';
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, status, undefined, vpByVehicle, center);
+        if (marker) vehicles.push(marker);
+      }
+      for (const bus of route.departed) {
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'departed', undefined, vpByVehicle, center);
+        if (marker) vehicles.push(marker);
+      }
+    }
+
+    return {
+      terminalId,
+      terminalName: terminal.name,
+      generatedAt: snapshot.generatedAt,
+      center,
+      buffers,
+      stops,
+      vehicles,
+    };
+  }
+
+  // Normalize one bus into an arrow marker, joining its identity to the raw VP feed. The heading
+  // prefers the vehicle's own compass bearing from the feed; when absent it falls back to the
+  // implied direction of travel (toward the terminal while approaching/dwelling, away once it
+  // departs), which keeps arrows pointing sensibly for feeds without a bearing field.
+  private toMapMarker(
+    vehicleId: string | undefined,
+    tripId: string,
+    route: RouteState,
+    status: VehicleMapStatus,
+    etaSeconds: number | undefined,
+    vpByVehicle: ReadonlyMap<string, VehiclePositionInfo>,
+    center: GeoPoint,
+  ): VehicleMapMarker | undefined {
+    if (!vehicleId) return undefined;
+    const vp = vpByVehicle.get(vehicleId);
+    if (vp === undefined || vp.lat === undefined || vp.lon === undefined) return undefined;
+    const point = { lat: vp.lat, lon: vp.lon };
+    const towardTerminal = bearingDegrees(point, center);
+    const computed =
+      (towardTerminal + (status === 'departing' || status === 'departed' ? 180 : 0)) % 360;
+    const headingDegrees = vp.bearing !== undefined ? vp.bearing : computed;
+    return {
+      vehicleId,
+      tripId,
+      routeShortName: route.routeShortName,
+      routeColor: route.color,
+      status,
+      lat: vp.lat,
+      lon: vp.lon,
+      headingDegrees,
+      label: vehicleId,
+      etaSeconds,
+    };
   }
 
 }

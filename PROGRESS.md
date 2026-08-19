@@ -372,6 +372,22 @@ I/O) so it can be reviewed and unit-tested in isolation.
   hysteresis and is not added to the departure trigger. The first moving sample
   starts `departurePending` (red UI indicator); `departPings` fresh moving samples
   confirm the departure. Trip flips never confirm departure.
+- **2026-08-19 — Read-only debug terminal map**: added
+  `GET /api/terminals/:id/map` returning a Zod-validated `TerminalMapSnapshot`
+  (geofence circles + color-coded vehicle arrows) built by a new
+  `Engine.buildMapSnapshot` from the cached terminal snapshot plus the retained
+  raw VP feed (snapshot DTOs never carry lat/lon; vehicle coordinates come only
+  from `providers/types.ts`). Buffer radii mirror `recordFacts`: arrival =
+  per-terminal `radiusMeters` ?? `arrivalRadiusMeters` (150), movement/hysteresis
+  = arrival + `terminalMovementMeters` (75), departure = `departureTriggerMeters`
+  (75). Statuses derive from the snapshot: `RouteState.incoming` = inbound,
+  `LayoverBus.arrivalPending` = arriving, plain layover = laying over,
+  `LayoverBus.departurePending` = departing, `RouteState.departed` = departed.
+  Arrow heading prefers the feed's `position.bearing` (now carried through
+  `VehiclePositionInfo.bearing`) and otherwise falls back to a computed
+  toward/away-from-center bearing. New web route `/terminal/:id/map` renders raw
+  Leaflet (OSM tiles, `L.circle` buffers, rotated-SVG `L.divIcon` arrows) with a
+  `MapLegend`, linked from `TerminalView`, polling every 10 s.
 
 ## Build notes
 

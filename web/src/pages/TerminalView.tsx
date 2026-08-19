@@ -40,6 +40,9 @@ export default function TerminalView() {
         <span className="updated">updated {updatedAt}</span>
       </header>
       <h1>{terminal?.name ?? id}</h1>
+      <Link className="map-link" to={`/terminal/${id ?? ''}/map`}>
+        View debug map
+      </Link>
       {terminalError && <div className="error">{terminalError}</div>}
       {!terminalError && terminals && !terminal && <div className="error">Unknown terminal.</div>}
       {error && <div className="error">{error}</div>}

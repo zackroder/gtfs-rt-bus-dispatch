@@ -6,7 +6,7 @@ import { createDatabase } from '../db/schema';
 import { createApi, type ApiDeps } from './routes';
 import { InterventionStore } from '../db/interventions';
 import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
-import type { AppConfig, TerminalSnapshot } from '../../../shared/types';
+import type { AppConfig, TerminalMapSnapshot, TerminalSnapshot } from '../../../shared/types';
 
 // API tests use an in-memory database and real HTTP requests to cover validation, redaction,
 // service-date scoping, and intervention lifecycle responses without external feeds.
@@ -51,6 +51,18 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
             serviceDayStartSeconds: 0,
             routes: [{ routeId: '1', routeShortName: 'R1', incoming: [], layovers: [], departed: [], interventions: [] }],
           } satisfies TerminalSnapshot)
+        : undefined,
+    computeTerminalMap: (id) =>
+      id === 'T1'
+        ? ({
+            terminalId: 'T1',
+            terminalName: 'Terminal 1',
+            generatedAt: 1700000000,
+            center: { lat: 41.8, lon: -87.6 },
+            buffers: [],
+            stops: [],
+            vehicles: [],
+          } satisfies TerminalMapSnapshot)
         : undefined,
     getHealth: () => ({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 }),
     getVpDiagnostics: () => ({ observations: [], recentFacts: [] }),
@@ -124,6 +136,24 @@ describe('api routes', () => {
     const filtered = await fetch(`${base}/terminals/T1?route=2`);
     const filteredBody = (await filtered.json()) as TerminalSnapshot;
     expect(filteredBody.routes).toEqual([]);
+  });
+
+  it('serves the read-only terminal map and validates it with the shared zod schema', async () => {
+    const base = await startServer(makeDeps());
+    const res = await fetch(`${base}/terminals/T1/map`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { terminalId: string; terminalName: string; buffers: unknown[]; stops: unknown[]; vehicles: unknown[] };
+    expect(body.terminalId).toBe('T1');
+    expect(body.terminalName).toBe('Terminal 1');
+    expect(Array.isArray(body.buffers)).toBe(true);
+    expect(Array.isArray(body.stops)).toBe(true);
+    expect(Array.isArray(body.vehicles)).toBe(true);
+  });
+
+  it('returns 404 for an unknown terminal map', async () => {
+    const base = await startServer(makeDeps());
+    const res = await fetch(`${base}/terminals/NOPE/map`);
+    expect(res.status).toBe(404);
   });
 
   it('returns 404 for an unknown terminal', async () => {

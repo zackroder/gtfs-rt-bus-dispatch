@@ -25,6 +25,18 @@ export interface NearestStop {
   meters: number;
 }
 
+// Initial bearing (degrees clockwise from north) from one point to another, used to orient
+// map arrows along the implied direction of travel. The equirectangular simplification is
+// consistent with distanceMeters at terminal scale.
+export function bearingDegrees(from: GeoPoint, to: GeoPoint): number {
+  const lat1 = (from.lat * Math.PI) / 180;
+  const lat2 = (to.lat * Math.PI) / 180;
+  const dLon = ((to.lon - from.lon) * Math.PI) / 180;
+  const x = Math.sin(dLon) * Math.cos(lat2);
+  const y = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return ((Math.atan2(x, y) * 180) / Math.PI + 360) % 360;
+}
+
 // Distance from a point to the closest of a set of stop IDs, treating missing
 // stop coordinates as absent so a misconfigured terminal cannot arbitrate facts.
 export function nearestStopMeters(
