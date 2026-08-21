@@ -320,7 +320,7 @@ I/O) so it can be reviewed and unit-tested in isolation.
   gains `color`/`text_color` columns (migration adds them to existing DBs).
   `GET /api/terminals` now sorts routes numeric-aware by short name.
 - **2026-08-16 — Geometry-based run facts (arrival/layover/departure)**: live CTA
-  feed analysis (see `FEED_ANALYSIS.md`) showed the existing transition paths
+  feed analysis (see `.agents/FEED_ANALYSIS.md`) showed the existing transition paths
   cannot fire on CTA: VP carries `stop_id` only ~8% of the time and never
   `current_stop_sequence`; TU carries no timing fields at all (0/6115 entities);
   `current_status` is always `IN_TRANSIT_TO`. The engine's stop-matched

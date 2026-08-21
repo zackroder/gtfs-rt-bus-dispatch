@@ -1,7 +1,7 @@
 # Implementation Specification
 
 Detailed build spec for the bus dispatch pilot. A coding agent should treat
-this as the source of truth; `README.md` is the human-facing summary,
+this as the source of truth; `../README.md` is the human-facing summary,
 `PROGRESS.md` tracks status, `AGENTS.md` has the commands/conventions.
 
 ## 1. Scope

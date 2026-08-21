@@ -63,7 +63,7 @@ DB_PATH=./data/dispatch.db
 STATIC_GTFS_PATH=./data/gtfs.zip   # cached download
 ```
 
-See README.md for the full list of config values (most are editable at runtime
+See ../README.md for the full list of config values (most are editable at runtime
 via `PUT /api/config` and persisted in SQLite).
 
 ## Architecture
@@ -158,7 +158,7 @@ Diagnostics:
 
 ## Context files
 
-- `README.md` — product overview, architecture, configuration, deployment.
+- `../README.md` — product overview, architecture, configuration, deployment.
 - `IMPLEMENTATION.md` — detailed build spec (types, schema, engine algorithm,
   API/WS contract, testing, definition of done). Source of truth for builders.
 - `PROGRESS.md` — implementation plan, task status, decisions log. Update it
