@@ -112,9 +112,8 @@ polling GTFS-Realtime.
 - VehiclePositions: <https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb>
 - TripUpdates: <https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb>
 
-The GTFS-Realtime endpoints require a free API key from
-<https://www.transitchicago.com/developers/>. Put it in `.env` as
-`CTA_API_KEY`; the server appends it as `?key=`.
+The GTFS-Realtime endpoints (at this time) require a free API key from
+<https://www.transitchicago.com/developers/>.
 
 ## Configuration
 
