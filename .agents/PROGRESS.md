@@ -320,7 +320,7 @@ I/O) so it can be reviewed and unit-tested in isolation.
   gains `color`/`text_color` columns (migration adds them to existing DBs).
   `GET /api/terminals` now sorts routes numeric-aware by short name.
 - **2026-08-16 — Geometry-based run facts (arrival/layover/departure)**: live CTA
-  feed analysis (see `FEED_ANALYSIS.md`) showed the existing transition paths
+  feed analysis (see `.agents/FEED_ANALYSIS.md`) showed the existing transition paths
   cannot fire on CTA: VP carries `stop_id` only ~8% of the time and never
   `current_stop_sequence`; TU carries no timing fields at all (0/6115 entities);
   `current_status` is always `IN_TRANSIT_TO`. The engine's stop-matched
@@ -372,6 +372,22 @@ I/O) so it can be reviewed and unit-tested in isolation.
   hysteresis and is not added to the departure trigger. The first moving sample
   starts `departurePending` (red UI indicator); `departPings` fresh moving samples
   confirm the departure. Trip flips never confirm departure.
+- **2026-08-19 — Read-only debug terminal map**: added
+  `GET /api/terminals/:id/map` returning a Zod-validated `TerminalMapSnapshot`
+  (geofence circles + color-coded vehicle arrows) built by a new
+  `Engine.buildMapSnapshot` from the cached terminal snapshot plus the retained
+  raw VP feed (snapshot DTOs never carry lat/lon; vehicle coordinates come only
+  from `providers/types.ts`). Buffer radii mirror `recordFacts`: arrival =
+  per-terminal `radiusMeters` ?? `arrivalRadiusMeters` (150), movement/hysteresis
+  = arrival + `terminalMovementMeters` (75), departure = `departureTriggerMeters`
+  (75). Statuses derive from the snapshot: `RouteState.incoming` = inbound,
+  `LayoverBus.arrivalPending` = arriving, plain layover = laying over,
+  `LayoverBus.departurePending` = departing, `RouteState.departed` = departed.
+  Arrow heading prefers the feed's `position.bearing` (now carried through
+  `VehiclePositionInfo.bearing`) and otherwise falls back to a computed
+  toward/away-from-center bearing. New web route `/terminal/:id/map` renders raw
+  Leaflet (OSM tiles, `L.circle` buffers, rotated-SVG `L.divIcon` arrows) with a
+  `MapLegend`, linked from `TerminalView`, polling every 10 s.
 
 ## Build notes
 

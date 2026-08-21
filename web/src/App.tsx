@@ -2,6 +2,7 @@
 import { Link, Route, Routes } from 'react-router-dom';
 import Terminals from './pages/Terminals';
 import TerminalView from './pages/TerminalView';
+import TerminalMap from './pages/TerminalMap';
 import ConfigPage from './pages/ConfigPage';
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Terminals />} />
           <Route path="/terminal/:id" element={<TerminalView />} />
+          <Route path="/terminal/:id/map" element={<TerminalMap />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="*" element={<p className="empty">Page not found.</p>} />
         </Routes>

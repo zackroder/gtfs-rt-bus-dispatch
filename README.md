@@ -1,285 +1,201 @@
 # Bus Dispatch Pilot
 
-A mobile-friendly web app for bus terminal dispatching. It joins GTFS static
-schedule data with GTFS-Realtime (VehiclePositions + TripUpdates) to detect
-off-schedule buses, then recommends simple "hold" interventions so a terminal
-manager can tell an operator to hold their bus and smooth headways.
+A web app for bus dispatching at transit terminals. It combines GTFS static
+schedule data with GTFS-Realtime vehicle positions and trip updates to detect
+buses running off-schedule, then recommends simple "hold" interventions so a
+dispatcher can even out headways between consecutive departures.
 
-## Problem
+## What the app does
 
-At a bus terminal, consecutive outbound departures on a route should be evenly
-spaced (regular headways). In practice, inbound trips arrive unevenly, so a
-bus's *expected* departure drifts from its schedule.
+- Shows each terminal's bus activity in three groups: inbound, laying over, and
+  recently departed.
+- Recommends when to hold the middle bus of a set of consecutive departures so
+  headways stay more even.
+- Lets a dispatcher view, apply, decline, or cancel each recommendation, and
+  records every action.
+- Includes a debug map view showing a terminal's geofence circles and live
+  vehicle positions.
 
-If every bus departs strictly on schedule (or as soon as its rest is up), a late
-bus leaves a large gap behind it and the buses behind it bunch up. We smooth
-this by holding the **middle** bus of each triplet for half the difference
-between its two adjacent headways — spreading the delay across multiple gaps
-rather than letting it pile into one.
+## How hold decisions work
 
-## Features
+When several outbound buses leave a terminal in sequence, the app groups them
+into triplets — leader, center, follower — and considers the two gaps between
+them:
 
-- **Terminal selector** — pick a terminal, grouped/sorted by route number, with
-  each route shown as a GTFS-colored badge and name.
-- **Inbound view** — buses inbound to the terminal showing scheduled vs
-  estimated arrival (red when late) and the next trip's destination/departure.
-- **Layover view** — buses resting at the terminal showing recorded vs
-  scheduled arrival (red when late), expected vs scheduled departure, a live
-  **min:sec countdown**, and a hold badge when held.
-- **Recently departed** — buses that just left, with actual vs scheduled
-  departure time (purple when a hold was applied), their destination, and the
-  stop they're currently at (from VehiclePositions).
-- **Intervention queue** — persistent recommended holds ("hold vehicle X until
-  hh:mm") with a human-readable reason. Managers can view, apply, decline, or
-  cancel them; every interaction is audited.
-- **Live refresh** — regular GTFS-RT polling, pushed to the UI over WebSocket.
-- **Configurable rules** — minimum rest, maximum hold, lead time, lookahead,
-  feed URLs/keys.
+- the forward headway, from the leader's departure to the center's, and
+- the backward headway, from the center's departure to the follower's.
 
-## How dispatch decisions work
+If the gap behind the center is larger than the gap ahead, it recommends holding
+the center for half the difference:
 
-We reason in terms of **triplets** of consecutive outbound departures at a
-terminal, and make the decision for the **middle** bus from its two adjacent
-headways.
+```
+hold = min(max((backward − forward) / 2, 0), maxHoldMinutes)
+```
 
-### Expected departure time (EDT)
+This spreads a late bus's delay onto a following bus instead of letting it pile
+into one gap. Holds are capped at the configured maximum, rounded to 30-second
+increments, and recommendations under a minute are not shown.
 
-Every bus has an **expected departure time** — the earliest moment it should
-leave the terminal:
+Each bus has an expected departure time (EDT):
 
 ```
 EDT = max(scheduledDeparture, terminalArrival + minRestMinutes)
 ```
 
-- `terminalArrival` is the bus's *observed* arrival at the terminal from
-  VehiclePositions. While inbound, TripUpdates provide an estimate instead.
-- If arrival + mandatory rest leaves room before the scheduled departure, the
-  bus waits and departs on schedule. Otherwise it departs late: `EDT >
-  scheduled`, and the bus is **rest-delayed**.
+A bus is never expected to leave before the scheduled time or before its rest is
+complete. When the rest requirement pushes the departure past the scheduled
+time, the bus is shown as rest-delayed.
 
-### Triplets and headways
+Every hold starts as a pending recommendation. Until it is applied it does not
+affect the dispatch math; once applied it stays locked until the bus departs.
+Declined, canceled, and expired recommendations never affect dispatch.
 
-For three consecutive buses — **leader** (earliest), **center**, and
-**follower** (latest) — measure two headways:
+## Features
 
-```
-H_f = center − leader     # forward headway (gap ahead, toward the leader)
-H_b = follower − center   # backward headway (gap behind, toward the follower)
-```
-
-```
-        H_f (ahead)             H_b (behind)
-   ┌────────────┐   ┌────────────┐   ┌────────────┐
-   │   leader   │   │   center   │   │  follower  │
-   └────────────┘   └────────────┘   └────────────┘
-        L                  C                  F
-        └─ center − leader ─┘└─ follower − center ─┘
-```
-
-The leader's time is its *actual* recorded departure once it has left (else its
-EDT); the center's and follower's are their EDTs.
-
-### The hold
-
-About `leadTimeMinutes` before the center's *expected* departure, evaluate the
-triplet and hold the center by:
-
-```
-hold = min( max((H_b − H_f) / 2, 0), maxHoldMinutes )
-```
-
-- The inner `max(…, 0)` only delays — it never dispatches a bus early.
-- The outer `min(…, maxHoldMinutes)` caps any hold at the configured ceiling.
-
-Holding the center delays it, shrinking the gap to its follower while widening
-the gap to its leader — exactly what evens the two headways when `H_b > H_f`.
-Once generated, a recommendation is **pending** and does not affect dispatch
-math. After the manager applies it, the hold is locked until the bus departs;
-the applied departure feeds forward as the *leader* reference for the next
-triplet. Declined, canceled, and expired recommendations never affect dispatch.
-
-Holds are rounded to 30-second increments, and recommendations under one minute
-are suppressed. This deliberately minimizes *excess* wait: equalizing adjacent headways spreads
-a given lump of delay across more passengers instead of letting it pile into a
-single gap.
-
-### Example
-
-Scheduled departures `1:00, 1:10, 1:20, 1:30`; inbound trips finish late, so
-the initial EDTs are `1:05, 1:12, 1:23, 1:30` (buses 1–4):
-
-1. **Bus 2** (center, EDT `1:12`): leader bus 1 departed `1:05`; follower bus 3
-   EDT `1:23`. So `H_f = 1:12 − 1:05 = 7` and `H_b = 1:23 − 1:12 = 11`.
-   Hold `(11 − 7)/2 = 2` minutes → bus 2 departs `1:14` (headways now `9`/`9`).
-2. **Bus 3** (center, EDT `1:23`): leader bus 2 now departs `1:14`; follower
-   bus 4 EDT `1:30`. So `H_f = 1:23 − 1:14 = 9` and `H_b = 1:30 − 1:23 = 7`.
-   Hold `max((7 − 9)/2, 0) = 0` → bus 3 departs on time `1:23`.
-
-Bus 1 (first) and bus 4 (last) have no neighbor on one side, so they are never
-held by this rule.
-
-## Countdown timer
-
-Every bus laying over at a terminal shows a live **min:sec countdown** to its
-*effective* departure time (held `until` if held, else EDT), color-coded green
-(on track), amber (within lead time), red (overdue). Cards show scheduled and
-actual times side by side: the layover's recorded terminal arrival against its
-scheduled arrival (red when late), its expected departure against the
-scheduled one, and a held bus shows the hold as an explicit badge — e.g.
-`held +2:30 → departs 14:32`. Inbound buses show scheduled vs estimated arrival
-(no countdown) and recently-departed buses show actual vs scheduled departure,
-with the departure in purple when it left under a hold.
+- **Terminal list** — terminals grouped by route, sorted by route number, with
+  GTFS route colors.
+- **Inbound buses** — scheduled vs estimated arrival, plus the next trip's
+  destination and departure.
+- **Laying over** — recorded vs scheduled arrival, expected vs scheduled
+  departure, a live countdown, and a badge when a hold is applied.
+- **Recently departed** — actual vs scheduled departure, destination, and the
+  vehicle's current stop.
+- **Intervention queue** — persistent hold recommendations with a reason, and
+  audited apply/decline/cancel actions.
+- **Debug map** — geofence circles around a terminal's stops plus color-coded
+  arrows for live vehicles (inbound, arriving, laying over, departing,
+  departed). Linked from each terminal view.
+- **Live updates** — GTFS-Realtime polling pushed to the UI over WebSocket, with
+  a polling fallback.
+- **Configurable rules** — rest, hold, and lookahead parameters plus feed URLs,
+  editable at runtime.
 
 ## Architecture
 
-Single Node/TypeScript process: Express API + WebSocket server + a polling
-scheduler. It serves the built React/Vite frontend as static files and holds
-everything in SQLite (GTFS static tables + runtime config). The computed
-snapshot lives in memory and is rebroadcast on every refresh tick.
+A single Node/TypeScript process serves the React/Vite frontend and the API. It
+polls GTFS-Realtime, joins it against GTFS static data in SQLite, and
+broadcasts a normalized snapshot over WebSocket.
 
 ```
-[GTFS static .zip] --load--> [SQLite static tables]
-[GTFS-RT protobuf] --poll--> [RealtimeProvider] --normalize-->
-    [Engine: join realtime + static -> terminal snapshots + interventions]
-       --> [REST + WebSocket] --> [React web app]
-                 ^
-       [SQLite intervention queue + audit events]
+[GTFS static zip] -> [SQLite static tables]
+[GTFS-RT feeds] -> [RealtimeProvider] -> [Engine]
+     -> [terminal snapshots + hold interventions]
+     -> [REST + WebSocket] -> [React app]
 ```
 
-Key flows:
+Flow:
 
-1. **Load static** — download/unzip GTFS, parse `stops`, `routes`, `trips`,
-   `stop_times`, `calendar`, `calendar_dates` into SQLite. Derive
-   `block_trips` (trip chains per `block_id`).
-2. **Poll realtime** — fetch TripUpdates + VehiclePositions every
-   `refresh_interval_seconds`, decode protobuf into normalized DTOs.
-3. **Join** — match vehicles to trips to blocks. For each terminal/route,
-    determine which buses are inbound vs laying over, compute predicted
-    departures, and create pending hold suggestions. Only applied suggestions
-    enter the dispatch ledger.
-4. **Serve** — REST for initial state + config, WebSocket for live snapshots.
+1. Load GTFS static into SQLite (stops, routes, trips, stop_times, calendar).
+2. Poll TripUpdates and VehiclePositions on a configurable interval.
+3. Match vehicles to trips, determine each bus's state at each terminal, and
+   generate pending hold recommendations.
+4. Serve snapshots over WebSocket (and REST for initial load and config).
 
-### Data source abstraction
-
-To allow pivoting to a proprietary database later, all realtime/static access
-goes through narrow interfaces (`RealtimeProvider`, `StaticProvider` in
-`server/src/providers/types.ts`). The GTFS-RT adapter is the default
-implementation. A proprietary adapter would implement the same interface and be
-selected via config, with no changes to the engine or UI.
+All realtime/static access goes through narrow provider interfaces
+(`server/src/providers/types.ts`) so the GTFS-RT adapter can be replaced with
+another data source without changing the engine or UI.
 
 ## Getting started
 
 ```bash
 npm install
-cp .env.example .env   # add your CTA_API_KEY (required for GTFS-RT)
+cp .env.example .env   # set CTA_API_KEY (required for GTFS-Realtime)
 npm run dev            # server on :8080, web on :5173 (proxied)
 ```
 
-The server auto-downloads and loads CTA GTFS static on first run, then starts
-polling GTFS-RT.
+On first run the server downloads and loads CTA GTFS static, then starts
+polling GTFS-Realtime.
 
 ### CTA data
 
-- Static (schedule): https://www.transitchicago.com/downloads/sch_data/google_transit.zip
-- Realtime VehiclePositions: https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb
-- Realtime TripUpdates: https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb
+- Static schedule: <https://www.transitchicago.com/downloads/sch_data/google_transit.zip>
+- VehiclePositions: <https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb>
+- TripUpdates: <https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb>
 
-The GTFS-RT endpoints require an API key (free from
-https://www.transitchicago.com/developers/). Put it in `.env` as
-`CTA_API_KEY` — the server appends `?key=` — and never commit it.
+The GTFS-Realtime endpoints require a free API key from
+<https://www.transitchicago.com/developers/>. Put it in `.env` as
+`CTA_API_KEY`; the server appends it as `?key=`.
 
 ## Configuration
 
-Most values are editable at runtime via `PUT /api/config` and persisted in
-SQLite. Env vars only seed the initial defaults.
+Values are editable at runtime via `PUT /api/config` and persisted in SQLite.
+Environment variables only seed first-run defaults.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `CTA_STATIC_URL` | CTA zip URL | GTFS static source |
 | `CTA_VP_URL` | CTA vehicles.pb | VehiclePositions feed (keyed) |
 | `CTA_TU_URL` | CTA tripupdates.pb | TripUpdates feed (keyed) |
-| `CTA_API_KEY` | — | Required; GTFS-RT API key (appended as `?key=`) |
+| `CTA_API_KEY` | — | GTFS-Realtime API key (appended as `?key=`) |
 | `refreshIntervalSeconds` | 10 | Realtime poll interval |
 | `staticRefreshHours` | 24 | Re-load static GTFS |
-| `minRestMinutes` | 5 | Mandatory operator rest (used in EDT) |
-| `maxHoldMinutes` | 10 | Absolute ceiling on any hold |
+| `minRestMinutes` | 5 | Minimum required rest (used in EDT) |
+| `maxHoldMinutes` | 10 | Ceiling on any hold |
 | `leadTimeMinutes` | 5 | Evaluate a hold this far before expected departure |
 | `lookaheadMinutes` | 90 | Horizon of departures to consider |
-| `arrivalRadiusMeters` | 150 | Soft arm buffer around a terminal stop |
+| `arrivalRadiusMeters` | 150 | Arrival geofence around a terminal stop |
 | `terminalMovementMeters` | 75 | Extra tolerance so a bus can inch within the terminal |
 | `stationaryDisplacementMeters` | 20 | Displacement/poll that counts as parked |
-| `confirmPings` | 2 | Parked pings before an arrival arm commits |
-| `departPings` | 2 | Motion pings before a layover departs |
-| `scheduleArmGraceSeconds` | 120 | Grace after scheduled arrival for the fallback |
-| `vehiclePositionMaxAgeSeconds` | 300 | Maximum VP sample age allowed to create a new transition fact |
+| `confirmPings` | 2 | Parked pings before an arrival is confirmed |
+| `departPings` | 2 | Motion pings before a departure is confirmed |
+| `scheduleArmGraceSeconds` | 120 | Grace after scheduled arrival for the schedule fallback |
+| `vehiclePositionMaxAgeSeconds` | 300 | Max VP sample age allowed to create a new fact |
 | `departureTriggerMeters` | 75 | Distance beyond the outbound first stop that starts departure confirmation |
 | `terminals` | auto-discovered | `[{ id, name, stopIds[], routeIds[]?, radiusMeters? }]` |
 
-Terminals are auto-discovered from GTFS (stops that are a route's first/last
-stop) and can be curated via config or the UI. A terminal may map to multiple
-`stop_id`s and routes (co-located terminals); `radiusMeters` overrides the
-global `arrivalRadiusMeters` for that terminal.
+Terminals are auto-discovered from GTFS as the first/last stops of routes and
+can be overridden in config. A terminal can map to multiple `stop_id`s and
+routes (co-located terminals); `radiusMeters` overrides the global
+`arrivalRadiusMeters` for that terminal.
 
 ## API
 
-- `GET /api/health` — liveness + last refresh.
+- `GET /api/health` — liveness and last-refresh info.
 - `GET /api/terminals` — terminal list grouped by route.
-- `GET /api/terminals/:id?route=R` — `{ incoming[], layovers[], interventions[], generated_at }`.
-- `GET /api/interventions?terminalId=T` — persistent intervention queue for the active service day.
+- `GET /api/terminals/:id?route=R` — snapshot with `incoming[]`, `layovers[]`,
+  `departed[]`, `interventions[]`.
+- `GET /api/terminals/:id/map` — geofence circles and live vehicle positions
+  for the debug map.
+- `GET /api/interventions?terminalId=T` — intervention queue for the active
+  service day.
 - `GET /api/interventions/:id` — one intervention and its current status.
-- `POST /api/interventions/:id/view|apply|decline|cancel` — record an interaction or transition its status.
-- `GET /api/diagnostics/vp` — read-only latest Vehicle Position observations,
-  transition candidates, recorded fact events, and feed freshness/errors.
-- `GET /api/run-events` — append-only history of recorded arrivals/departures with
-  terminal/route context and dispatch state; filter by `serviceDate`/`terminalId`/`type`.
+- `POST /api/interventions/:id/view|apply|decline|cancel` — record an
+  interaction or transition its status.
+- `GET /api/diagnostics/vp` — read-only VP observations, transition candidates,
+  recorded fact events, and feed freshness.
+- `GET /api/run-events` — append-only history of recorded arrivals/departures;
+  filter by `serviceDate`, `terminalId`, `type`.
 - `GET /api/config`, `PUT /api/config` — read/update runtime config.
-- `WS /api/ws` — pushes terminal snapshots on each refresh tick.
+- `WS /api/ws` — pushes terminal snapshots on each refresh.
 
 ## Deployment
 
-Designed to run as a single process, easily deployable to simple hosting
-platforms (Render, Fly.io, Railway):
+Designed to run as a single process on a simple hosting platform (Render,
+Fly.io, Railway):
 
-- Provide a persistent disk (for `DB_PATH`) so the static GTFS load isn't
-  redone every boot (or enable remote/object-storage static path later).
+- Use a persistent disk for `DB_PATH` so the static GTFS load is not repeated on
+  every boot.
 - Set `CTA_API_KEY` and feed URLs via environment.
-- `npm run build && npm start` runs the server which also serves the built web
-  bundle.
+- Build once, then run the server, which also serves the built frontend:
 
-Local testing: `npm run dev`.
+```bash
+npm run build && npm start
+```
 
-## Known limitations / future work
+Local development: `npm run dev`.
 
-- Hold suggestions are decided in a single left-to-right pass. They remain
-  pending until explicitly applied; an applied hold is not re-solved even if
-  conditions change before departure.
-- Observed arrival/departure facts are persisted in SQLite by service date;
-  applied intervention state and its audit history are persisted alongside
-  them.
-- Actual arrival/departure facts are recorded only from fresh VehiclePositions.
-  Coordinates are measured against the static inbound last stop; entering the
-  radius creates an "arriving" candidate, and distinct low-displacement samples
-  confirm the layover. A tripId flip confirms outbound assignment and uses the
-  earliest candidate timestamp when one exists; it is not a departure signal.
-  TripUpdates remain predictions and are
-  labeled as estimated when used for EDT inputs.
-- Departure confirmation uses a separate tighter trigger: a laid-over bus more
-  than `departureTriggerMeters` beyond the outbound first-stop coordinate and
-  moving for `departPings` fresh observations becomes recently departed. The
-  default is 75 m, independent of the 150 m arrival radius. During confirmation
-  the layover card shows a flashing red `departing` indicator and no new hold is
-  suggested.
-- VP `stop_id` and `current_status` are not required for terminal mechanics.
-  The production feed omits `stop_id`; VP coordinates plus static GTFS endpoint
-  identity are the transition inputs.
-- Cached, duplicate, out-of-order, and over-age VP observations may preserve
-  display posture but cannot create new arrival/departure facts.
-- The first and last departures in a route have no neighbor on one side and are
-  never held by the triplet rule.
-- ETA when TripUpdates lack a terminal prediction is a simple delay-based
-  estimate.
-- Multiple-route co-located terminal view is a future UI feature (data model
-  already supports it).
-- Service-day start is auto-detected from GTFS stop_times (see `gtfs/time.ts`);
-  after-midnight (`24:00:00+`) trips are normalized to that clock.
-- Auth/roles for managers is out of scope for the pilot.
+## Known limitations
+
+- Holds are decided in a single pass and are not re-solved after being applied.
+- The first and last departures in a sequence have only one neighbor and are
+  never held.
+- Arrival/departure facts come only from fresh VehiclePosition coordinates;
+  cached, duplicate, out-of-order, or stale samples cannot trigger transitions.
+- TripUpdates supply estimates (arrival, ETA) but are never treated as observed
+  facts.
+- Co-located multi-route terminal views and manager roles are not in scope.
+
+## Other documentation
+
+Detailed implementation notes and the build log live under `.agents/`
+(`IMPLEMENTATION.md`, `PROGRESS.md`, `FEED_ANALYSIS.md`).

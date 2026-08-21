@@ -521,3 +521,68 @@ textarea {
   border-radius: 8px;
   padding: 8px;
 }
+
+/* Debug terminal map: the full-bleed canvas and the status color key. */
+.map-link {
+  display: inline-block;
+  margin: 4px 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.map-container {
+  height: calc(100vh - 240px);
+  min-height: 360px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.map-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.map-arrow {
+  background: transparent;
+  border: none;
+}
+
+.map-arrow-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, 150%);
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}

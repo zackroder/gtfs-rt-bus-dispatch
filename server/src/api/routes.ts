@@ -3,8 +3,10 @@ import type { Database } from 'better-sqlite3';
 import {
   appConfigSchema,
   interventionActionSchema,
+  terminalMapSnapshotSchema,
   type AppConfig,
   type InterventionStatus,
+  type TerminalMapSnapshot,
   type TerminalSnapshot,
 } from '../../../shared/types';
 import { recordConfigEvent, redactConfig } from '../config';
@@ -27,6 +29,7 @@ export interface ApiDeps {
   getConfig(): AppConfig;
   applyConfig(next: AppConfig): AppConfig;
   computeTerminal(terminalId: string): TerminalSnapshot | undefined;
+  computeTerminalMap(terminalId: string): TerminalMapSnapshot | undefined;
   getHealth(): {
     ok: boolean;
     lastRefreshAt: number | null;
@@ -232,6 +235,17 @@ export function createApi(deps: ApiDeps): Router {
       return;
     }
     sendJson(res, 200, snapshot);
+  });
+
+  router.get('/terminals/:id/map', (req, res) => {
+    // Read-only debug projection of the terminal's geofences and live vehicle arrows. The payload
+    // is re-validated at the boundary so a server-side regression surfaces as a 500, not bad data.
+    const map = deps.computeTerminalMap(req.params.id);
+    if (!map) {
+      sendJson(res, 404, { error: `unknown terminal ${req.params.id}` });
+      return;
+    }
+    sendJson(res, 200, terminalMapSnapshotSchema.parse(map));
   });
 
   router.get('/config', (_req, res) => {

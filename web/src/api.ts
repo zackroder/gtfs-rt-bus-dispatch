@@ -9,11 +9,13 @@ import {
   healthSchema,
   interventionSchema,
   staticReloadSchema,
+  terminalMapSnapshotSchema,
   terminalSnapshotSchema,
   terminalsResponseSchema,
   type AppConfig,
   type Intervention,
   type Terminal,
+  type TerminalMapSnapshot,
   type TerminalSnapshot,
 } from '../../shared/types';
 
@@ -79,6 +81,11 @@ export function getTerminals(): Promise<TerminalsResponse> {
 export function getTerminal(id: string, route?: string): Promise<TerminalSnapshot> {
   const query = route ? `?route=${encodeURIComponent(route)}` : '';
   return request(`/api/terminals/${encodeURIComponent(id)}${query}`, terminalSnapshotSchema);
+}
+
+/** Loads the read-only debug map for one terminal (geofences + live vehicle arrows). */
+export function getTerminalMap(id: string): Promise<TerminalMapSnapshot> {
+  return request(`/api/terminals/${encodeURIComponent(id)}/map`, terminalMapSnapshotSchema);
 }
 
 /** Reads the complete editable runtime configuration. */
