@@ -28,8 +28,10 @@ export interface ApiDeps {
   db: Database;
   getConfig(): AppConfig;
   applyConfig(next: AppConfig): AppConfig;
-  computeTerminal(terminalId: string): TerminalSnapshot | undefined;
-  computeTerminalMap(terminalId: string): TerminalMapSnapshot | undefined;
+  // Resolves on demand (compute-on-miss) so REST reads work without a WS subscriber; a known
+  // terminal always resolves once a realtime snapshot exists, and rejects on engine failure.
+  computeTerminal(terminalId: string): Promise<TerminalSnapshot | undefined>;
+  computeTerminalMap(terminalId: string): Promise<TerminalMapSnapshot | undefined>;
   getHealth(): {
     ok: boolean;
     lastRefreshAt: number | null;
@@ -220,8 +222,16 @@ export function createApi(deps: ApiDeps): Router {
     sendJson(res, 200, { terminals: config.terminals, routes: entries });
   });
 
-  router.get('/terminals/:id', (req, res) => {
-    const snapshot = deps.computeTerminal(req.params.id);
+  router.get('/terminals/:id', async (req, res) => {
+    // Compute-on-miss is awaited inside the handler; Express 4 does not catch async
+    // rejections, so engine failures surface as an explicit 500 rather than a hung request.
+    let snapshot: TerminalSnapshot | undefined;
+    try {
+      snapshot = await deps.computeTerminal(req.params.id);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     if (!snapshot) {
       sendJson(res, 404, { error: `unknown terminal ${req.params.id}` });
       return;
@@ -237,10 +247,16 @@ export function createApi(deps: ApiDeps): Router {
     sendJson(res, 200, snapshot);
   });
 
-  router.get('/terminals/:id/map', (req, res) => {
+  router.get('/terminals/:id/map', async (req, res) => {
     // Read-only debug projection of the terminal's geofences and live vehicle arrows. The payload
     // is re-validated at the boundary so a server-side regression surfaces as a 500, not bad data.
-    const map = deps.computeTerminalMap(req.params.id);
+    let map: TerminalMapSnapshot | undefined;
+    try {
+      map = await deps.computeTerminalMap(req.params.id);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     if (!map) {
       sendJson(res, 404, { error: `unknown terminal ${req.params.id}` });
       return;

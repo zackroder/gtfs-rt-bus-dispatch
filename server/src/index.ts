@@ -138,12 +138,34 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
   discoverTerminals();
 }
 
-function computeTerminal(terminalId: string): TerminalSnapshot | undefined {
-  // HTTP reads can serve the latest cached snapshot, while an unknown configured terminal
-  // still returns undefined so the API can distinguish it from an empty snapshot.
+async function ensureTerminal(terminalId: string): Promise<TerminalSnapshot | undefined> {
+  // REST reads must not depend on a WS subscriber existing first: serve the cache, then
+  // compute on demand for a known terminal before falling back to the empty shell.
   const cached = snapshots.get(terminalId);
   if (cached) return cached;
   if (!config.terminals.some((terminal) => terminal.id === terminalId)) return undefined;
+  if (latestRt) {
+    // Compute from the retained feed snapshot. engine.refresh is fully synchronous, so this
+    // cannot interleave with the scheduled refresh loop mid-cycle, and the fact pass is
+    // idempotent (monotonic VP gating) when several misses run back-to-back.
+    try {
+      const [fresh] = engine.refresh(latestRt, new Date(), new Set([terminalId]));
+      if (fresh) snapshots.set(terminalId, fresh);
+    } catch (err) {
+      console.error(`terminal ${terminalId} compute failed:`, errorMessage(err));
+      throw err;
+    }
+    return snapshots.get(terminalId);
+  }
+  // No realtime data retained yet (first fetch never completed): run one refresh cycle,
+  // which waits for any in-flight static load, then serve whatever it produced.
+  try {
+    await refreshOnce();
+  } catch {
+    // Refresh errors are already logged and reflected in health; serve the shell below.
+  }
+  const afterRefresh = snapshots.get(terminalId);
+  if (afterRefresh) return afterRefresh;
   return {
     terminalId,
     generatedAt: 0,
@@ -152,11 +174,11 @@ function computeTerminal(terminalId: string): TerminalSnapshot | undefined {
   };
 }
 
-function computeTerminalMap(terminalId: string): TerminalMapSnapshot | undefined {
-  // The map is derived from the last cached snapshot plus the retained raw feed, so it is
+async function computeTerminalMap(terminalId: string): Promise<TerminalMapSnapshot | undefined> {
+  // The map is derived from the computed snapshot plus the retained raw feed, so it is
   // read-only by construction and 404s for unknown terminals like the snapshot endpoint. An
   // empty feed still renders the geofence circles, so only missing terminals return undefined.
-  const snapshot = computeTerminal(terminalId);
+  const snapshot = await ensureTerminal(terminalId);
   if (!snapshot) return undefined;
   const rt = latestRt ?? { timestamp: 0, tripUpdates: [], vehiclePositions: [] };
   return engine.buildMapSnapshot(terminalId, snapshot, rt);
@@ -267,7 +289,7 @@ app.use(
       config = applyConfig(db, config, next);
       return config;
     },
-    computeTerminal,
+    computeTerminal: ensureTerminal,
     computeTerminalMap,
     interventions,
     getVpDiagnostics: () => ({
