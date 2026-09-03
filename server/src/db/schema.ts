@@ -114,7 +114,7 @@ export function createDatabase(dbPath: string): Database.Database {
     CREATE TABLE IF NOT EXISTS intervention_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       intervention_id TEXT NOT NULL REFERENCES interventions(id),
-      action TEXT NOT NULL CHECK (action IN ('created', 'viewed', 'applied', 'declined', 'canceled', 'expired', 'completed')),
+      action TEXT NOT NULL CHECK (action IN ('created', 'viewed', 'applied', 'declined', 'canceled', 'expired', 'completed', 'updated')),
       occurred_at INTEGER NOT NULL,
       actor_id TEXT NOT NULL,
       request_id TEXT,
@@ -178,6 +178,7 @@ export function createDatabase(dbPath: string): Database.Database {
   ensureColumn(db, 'routes', 'text_color', 'TEXT');
   ensureColumn(db, 'block_trips', 'service_id', 'TEXT');
   ensureColumn(db, 'run_events', 'evidence', 'TEXT');
+  ensureInterventionEventActions(db);
   db.exec(`
     UPDATE block_trips
     SET service_id = (SELECT service_id FROM trips WHERE trips.trip_id = block_trips.trip_id)
@@ -192,4 +193,39 @@ function ensureColumn(db: Database.Database, table: string, column: string, type
   if (!columns.some((c) => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+}
+
+// Older databases carry a CHECK constraint on intervention_events.action that predates the
+// 'updated' audit action, so inserts would fail even though the code knows the value. CHECK
+// definitions cannot be altered in place; rebuild the (append-only, small) table once when
+// its DDL predates the new action, preserving every existing audit row.
+function ensureInterventionEventActions(db: Database.Database): void {
+  const ddl = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'intervention_events'`)
+    .get() as { sql: string } | undefined;
+  if (!ddl || ddl.sql.includes("'updated'")) return;
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE intervention_events_migrated (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        intervention_id TEXT NOT NULL REFERENCES interventions(id),
+        action TEXT NOT NULL CHECK (action IN ('created', 'viewed', 'applied', 'declined', 'canceled', 'expired', 'completed', 'updated')),
+        occurred_at INTEGER NOT NULL,
+        actor_id TEXT NOT NULL,
+        request_id TEXT,
+        metadata_json TEXT
+      );
+      INSERT INTO intervention_events_migrated
+        SELECT id, intervention_id, action, occurred_at, actor_id, request_id, metadata_json
+        FROM intervention_events;
+      DROP TABLE intervention_events;
+      ALTER TABLE intervention_events_migrated RENAME TO intervention_events;
+      CREATE INDEX IF NOT EXISTS idx_intervention_events_intervention
+        ON intervention_events(intervention_id, occurred_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_intervention_events_request
+        ON intervention_events(intervention_id, action, request_id)
+        WHERE request_id IS NOT NULL;
+    `);
+  });
+  rebuild();
 }

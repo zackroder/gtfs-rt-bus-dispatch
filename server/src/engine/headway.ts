@@ -4,6 +4,7 @@ import type { RealtimeSnapshot } from '../providers/types';
 import { unixToServiceSeconds } from '../gtfs/time';
 import { effectiveDeparture, expectedDepartureTime } from './dispatch';
 import { outboundTrips } from './terminal';
+import { prepared } from '../db/prepare';
 
 // Headway construction combines static departure order, realtime predictions, and persisted
 // VP/ TU run facts into the records consumed by the dispatch decision function.
@@ -65,6 +66,7 @@ export interface OutboundDeparture {
   hasArrivalInfo: boolean;
   arrivalPending: boolean;
   departurePending: boolean;
+  overdueSeconds?: number;
 }
 
 export interface BuildDeparturesOptions {
@@ -74,6 +76,8 @@ export interface BuildDeparturesOptions {
   lookaheadSeconds: number;
   serviceDayStartSeconds: number;
   minRestSeconds: number;
+  /** IANA timezone the GTFS agency schedules against; used for every realtime clock conversion. */
+  agencyTimezone: string;
   activeServiceIds: Set<string>;
   rt: RealtimeSnapshot;
   ledger: Map<string, RunRecord>;
@@ -178,6 +182,7 @@ export function arrivalFact(
   stopSequence: number,
   scheduled: number,
   serviceDayStartSeconds: number,
+  timeZone: string,
 ): { predicted: number; known: boolean } {
   // Prefer an absolute predicted arrival, then stop delay, then trip delay. A missing value
   // remains unknown rather than pretending the schedule is an observed arrival.
@@ -187,7 +192,7 @@ export function arrivalFact(
   const update = matching[0];
   if (update?.arrivalTime !== undefined) {
     return {
-      predicted: unixToServiceSeconds(update.arrivalTime, serviceDayStartSeconds),
+      predicted: unixToServiceSeconds(update.arrivalTime, serviceDayStartSeconds, timeZone),
       known: true,
     };
   }
@@ -216,14 +221,16 @@ export function arrivalAtTerminal(
   tripId: string,
   _stopIds: string[],
   serviceDayStartSeconds: number,
-  tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
+  tripUpdatesById: ReadonlyMap<string, TripUpdateInfo> | undefined,
+  timeZone: string,
 ): ArrivalAtStop {
-  const stops = db
-    .prepare(
-      `SELECT stop_id, arrival_time, departure_time, stop_sequence
-       FROM stop_times WHERE trip_id = ?
-       ORDER BY stop_sequence ASC`,
-    )
+  // Runs once per predecessor trip per refresh, so the statement is memoized rather than re-prepared.
+  const stops = prepared(
+    db,
+    `SELECT stop_id, arrival_time, departure_time, stop_sequence
+        FROM stop_times WHERE trip_id = ?
+        ORDER BY stop_sequence ASC`,
+  )
     .all(tripId) as Array<{
     stop_id: string;
     arrival_time: number;
@@ -255,7 +262,7 @@ export function arrivalAtTerminal(
     const offset = scheduled - carriedScheduled;
     return {
       scheduled,
-      predicted: unixToServiceSeconds(carried.arrivalTime!, serviceDayStartSeconds) + offset,
+      predicted: unixToServiceSeconds(carried.arrivalTime!, serviceDayStartSeconds, timeZone) + offset,
       known: true,
     };
   }
@@ -267,6 +274,7 @@ export function arrivalAtTerminal(
     last.stop_sequence,
     scheduled,
     serviceDayStartSeconds,
+    timeZone,
   );
   return { scheduled, predicted: fact.predicted, known: fact.known };
 }
@@ -325,6 +333,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
         opts.terminal.stopIds,
         opts.serviceDayStartSeconds,
         opts.tripUpdatesById,
+        opts.agencyTimezone,
       );
       opts.arrivalCache?.set(cacheKey, arrival);
       scheduledArrival = arrival.scheduled;
@@ -405,6 +414,12 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     else if (vehicleId !== undefined) state = 'incoming';
     else state = 'departed';
 
+    // Overdue is measured against EDT, which already includes the minimum-rest allowance, so a
+    // rest-delayed bus is only flagged once it passes its genuinely expected departure. Only a
+    // bus still laying over can be overdue: an inbound bus is "late" (delaySeconds) and a
+    // departed one has an actual time. Omitted entirely when not overdue to keep the DTO lean.
+    const overdueSeconds = state === 'layover' ? Math.max(0, opts.nowSvc - edt) : 0;
+
     departures.push({
       tripId: ob.tripId,
       routeId: opts.routeId,
@@ -426,6 +441,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       hasArrivalInfo,
       arrivalPending,
       departurePending,
+      overdueSeconds: overdueSeconds > 0 ? overdueSeconds : undefined,
     });
   }
 

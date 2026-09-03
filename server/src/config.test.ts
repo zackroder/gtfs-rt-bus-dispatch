@@ -13,6 +13,7 @@ const minimalConfig: AppConfig = {
     apiKey: 'sekrit',
   },
   staticGtfsUrl: 'http://localhost/gtfs.zip',
+  agencyTimezone: 'UTC',
   refreshIntervalSeconds: 10,
   staticRefreshHours: 24,
   minRestMinutes: 5,

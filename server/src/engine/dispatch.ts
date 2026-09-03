@@ -38,6 +38,16 @@ export function holdSeconds(
   return Math.min(Math.round(raw / 30) * 30, maxHoldSeconds);
 }
 
+// Queue expiry for one recommendation, in epoch seconds. `until` and `nowSvc` share the
+// service-day continuum (raw GTFS times may exceed 86400 on overnight trips) and the
+// lookahead horizon keeps their true delta well under a day, so the remaining window is
+// the plain difference. A degenerate decision whose `until` has already passed expires
+// immediately: the previous `(... + 86400) % 86400` form wrapped that negative delta into
+// a ~24-hour expiry, leaving impossible recommendations actionable for a day.
+export function suggestionExpiresAt(until: number, nowSvc: number, generatedAt: number): number {
+  return generatedAt + Math.max(0, until - nowSvc);
+}
+
 // Return the departure timestamp that should participate in a headway calculation.
 export function effectiveDeparture(departure: DispatchDeparture): number {
   // Decisions use actual departure for departed buses, then an approved hold, then EDT.
@@ -93,9 +103,13 @@ export function decideTriplets(
     const leader = working[i - 1]!;
     const follower = working[i + 1]!;
     const forwardHeadway = center.edt - effectiveDeparture(leader);
-    const backwardHeadway = follower.edt - center.edt;
-    // Headways are measured around the center departure; the working copy lets an earlier
-    // decision affect the next triplet without mutating the caller's input.
+    // Both gaps measure around the center with the same rule: an already-departed neighbor
+    // contributes its actual departure, not its EDT. Measuring the backward gap from raw EDT
+    // let a follower that left early/late produce a fictional gap and recommend holding the
+    // center past a follower that is already gone. Because the hold is half the difference,
+    // the recommended `until` always stays strictly before the follower's real departure.
+    const backwardHeadway = effectiveDeparture(follower) - center.edt;
+    // The working copy lets an earlier decision affect the next triplet without mutating the caller's input.
     const seconds = holdSeconds(backwardHeadway, forwardHeadway, opts.maxHoldSeconds);
     if (seconds > 0) {
       const until = center.edt + seconds;

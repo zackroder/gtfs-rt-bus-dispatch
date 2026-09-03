@@ -1,5 +1,6 @@
 import type { Database } from 'better-sqlite3';
 import type { Terminal } from '../../../shared/types';
+import { prepared } from '../db/prepare';
 
 // Terminal queries separate the first stop of outbound service from the last stop of
 // inbound service. This lets one configured terminal represent both arriving and departing buses.
@@ -22,6 +23,8 @@ function placeholders(count: number): string {
 }
 
 // Return scheduled outbound trips serving the terminal during the requested service window.
+// The service-list prefix of these queries changes per service date, but that is rare
+// relative to the per-refresh call rate; the placeholder count keeps one statement per shape.
 export function outboundTrips(
   db: Database,
   routeId: string,
@@ -33,9 +36,9 @@ export function outboundTrips(
   const serviceList = Array.from(activeServiceIds);
   // No active service means no schedule should leak into the current terminal view.
   if (serviceList.length === 0) return [];
-  const rows = db
-    .prepare(
-      `
+  const rows = prepared(
+    db,
+    `
       SELECT st.trip_id, st.stop_id, st.departure_time, t.headsign
       FROM stop_times st
       JOIN trips t ON t.trip_id = st.trip_id AND t.route_id = ? AND t.service_id IN (${placeholders(serviceList.length)})
@@ -44,7 +47,7 @@ export function outboundTrips(
         AND st.departure_time >= ? AND st.departure_time <= ?
         AND st.stop_sequence = (SELECT MIN(stop_sequence) FROM stop_times s2 WHERE s2.trip_id = st.trip_id)
       `,
-    )
+  )
     .all(routeId, ...serviceList, ...stopIds, fromSvc, toSvc) as Array<{
     trip_id: string;
     stop_id: string;
@@ -70,9 +73,9 @@ export function inboundTrips(
 ): InboundTripRow[] {
   const serviceList = Array.from(activeServiceIds);
   if (serviceList.length === 0) return [];
-  const rows = db
-    .prepare(
-      `
+  const rows = prepared(
+    db,
+    `
       SELECT st.trip_id, st.stop_id, st.arrival_time
       FROM stop_times st
       JOIN trips t ON t.trip_id = st.trip_id AND t.route_id = ? AND t.service_id IN (${placeholders(serviceList.length)})
@@ -81,7 +84,7 @@ export function inboundTrips(
         AND st.arrival_time >= ? AND st.arrival_time <= ?
         AND st.stop_sequence = (SELECT MAX(stop_sequence) FROM stop_times s2 WHERE s2.trip_id = st.trip_id)
       `,
-    )
+  )
     .all(routeId, ...serviceList, ...stopIds, fromSvc, toSvc) as Array<{
     trip_id: string;
     stop_id: string;
@@ -100,9 +103,9 @@ export function outboundRoutesAtTerminal(
 ): string[] {
   const serviceList = Array.from(activeServiceIds);
   if (serviceList.length === 0) return [];
-  const rows = db
-    .prepare(
-      `
+  const rows = prepared(
+    db,
+    `
       SELECT DISTINCT t.route_id
       FROM stop_times st
       JOIN trips t ON t.trip_id = st.trip_id AND t.service_id IN (${placeholders(serviceList.length)})
@@ -111,7 +114,7 @@ export function outboundRoutesAtTerminal(
         AND st.departure_time >= ? AND st.departure_time <= ?
         AND st.stop_sequence = (SELECT MIN(stop_sequence) FROM stop_times s2 WHERE s2.trip_id = st.trip_id)
       `,
-    )
+  )
     .all(...serviceList, ...stopIds, fromSvc, toSvc) as Array<{ route_id: string }>;
   return rows.map((r) => r.route_id).sort();
 }
@@ -126,8 +129,7 @@ export interface RouteStyle {
 // Read the display metadata for a route, falling back to its identifier when static data is absent.
 export function routeStyle(db: Database, routeId: string): RouteStyle {
   // GTFS colors are passed through unchanged; the UI owns presentation of the six-digit values.
-  const row = db
-    .prepare(`SELECT short_name, long_name, color, text_color FROM routes WHERE route_id = ?`)
+  const row = prepared(db, `SELECT short_name, long_name, color, text_color FROM routes WHERE route_id = ?`)
     .get(routeId) as
     | { short_name: string; long_name: string; color: string | null; text_color: string | null }
     | undefined;

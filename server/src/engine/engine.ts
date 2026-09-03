@@ -16,6 +16,7 @@ import type {
 } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
 import { InterventionStore } from '../db/interventions';
+import { prepared } from '../db/prepare';
 import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeconds, unixToServiceSeconds } from '../gtfs/time';
 import {
   buildBlockChains,
@@ -31,8 +32,8 @@ import {
   type VehicleTerminalState,
   vehicleTerminalKey,
 } from './headway';
-import { decideTriplets } from './dispatch';
-import { outboundRoutesAtTerminal, routeStyle } from './terminal';
+import { decideTriplets, suggestionExpiresAt } from './dispatch';
+import { outboundRoutesAtTerminal, routeStyle, type RouteStyle } from './terminal';
 import { bearingDegrees, distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
 
 // Engine owns the cross-refresh ledger: realtime snapshots are transient, while observed
@@ -123,6 +124,8 @@ export class Engine {
   private stopNamesCache?: Map<string, string>;
   private stopCoordsCache?: Map<string, GeoPoint>;
   private vehicleStopCache = new Map<string, string | undefined>();
+  // Route display metadata is static per feed load; the refresh loop reads it per route.
+  private routeStylesCache = new Map<string, RouteStyle>();
   private currentServiceDate?: string;
   private interventions: InterventionStore;
   private vpDiagnostics: VehiclePositionDiagnostic[] = [];
@@ -146,6 +149,7 @@ export class Engine {
     this.stopNamesCache = undefined;
     this.stopCoordsCache = undefined;
     this.vehicleStopCache.clear();
+    this.routeStylesCache.clear();
     this.ledger.clear();
     this.vehicleTracks.clear();
     this.currentServiceDate = undefined;
@@ -182,6 +186,15 @@ export class Engine {
     return this.stopCoordsCache;
   }
 
+  private routeStyleFor(routeId: string): RouteStyle {
+    let style = this.routeStylesCache.get(routeId);
+    if (!style) {
+      style = routeStyle(this.db, routeId);
+      this.routeStylesCache.set(routeId, style);
+    }
+    return style;
+  }
+
   // Resolve the proximity radius for a terminal stop, preferring a per-terminal override.
   private terminalRadiusMeters(stopId: string | undefined): number {
     const config = this.getConfig();
@@ -198,9 +211,10 @@ export class Engine {
       // Some feeds provide only a sequence; resolve it through static stop_times and cache the name.
       const cacheKey = `${vp.tripId}:${vp.currentStopSequence}`;
       if (this.vehicleStopCache.has(cacheKey)) return this.vehicleStopCache.get(cacheKey);
-      const row = this.db
-        .prepare('SELECT stop_id FROM stop_times WHERE trip_id = ? AND stop_sequence = ?')
-        .get(vp.tripId, vp.currentStopSequence) as { stop_id?: string } | undefined;
+      const row = prepared(
+        this.db,
+        'SELECT stop_id FROM stop_times WHERE trip_id = ? AND stop_sequence = ?',
+      ).get(vp.tripId, vp.currentStopSequence) as { stop_id?: string } | undefined;
       stopId = row?.stop_id;
       const name = stopId ? this.stopNames().get(stopId) : undefined;
       this.vehicleStopCache.set(cacheKey, name);
@@ -222,9 +236,12 @@ export class Engine {
   // Convert one realtime poll into snapshots for the requested terminals.
   refresh(rt: RealtimeSnapshot, now: Date = new Date(), terminalIds?: Set<string>): TerminalSnapshot[] {
     const config = this.getConfig();
+    // All schedule/realtime clock conversions happen in the agency's timezone, never the
+    // server's local zone, so the math is identical on a Chicago workstation or a UTC host.
+    const timeZone = config.agencyTimezone;
     const serviceDayStartSeconds = getServiceDayStart(this.db);
-    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds);
-    const activeDate = activeServiceDate(now, serviceDayStartSeconds);
+    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds, timeZone);
+    const activeDate = activeServiceDate(now, serviceDayStartSeconds, timeZone);
     if (this.currentServiceDate !== activeDate) {
       // A service-day boundary starts a fresh in-memory ledger, then restores only facts persisted
       // for the new date so overnight operation cannot mix runs from adjacent dates.
@@ -380,12 +397,14 @@ export class Engine {
     ctx: RefreshContext,
   ): void {
     const record = this.ledger.get(departure.tripId);
-    const insert = this.db.prepare(
+    // Called per departure per refresh; the statement is memoized rather than re-prepared.
+    const insert = prepared(
+      this.db,
       `INSERT OR IGNORE INTO run_events
-         (service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
-           evidence, value_seconds, generated_at, classification, edt_seconds,
-           scheduled_departure, scheduled_arrival, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (service_date, event_type, trip_id, vehicle_id, terminal_id, route_id, source,
+            evidence, value_seconds, generated_at, classification, edt_seconds,
+            scheduled_departure, scheduled_arrival, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const createdAt = Math.floor(Date.now() / 1000);
     if (departure.terminalArrival !== undefined && record?.arrivalSource !== undefined) {
@@ -486,6 +505,7 @@ export class Engine {
     vpTerminalState: Map<string, VehicleTerminalState>,
   ): void {
     const config = this.getConfig();
+    const timeZone = config.agencyTimezone;
     const ends = this.tripEnds();
     this.vpDiagnostics = [];
     const stationaryMeters = config.stationaryDisplacementMeters ?? 20;
@@ -501,7 +521,7 @@ export class Engine {
     for (const vp of rt.vehiclePositions) {
       const vpSeconds = vp.timestamp > generatedAt
         ? nowSvc
-        : unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds);
+        : unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds, timeZone);
       // Future-dated provider timestamps cannot describe an event after the current refresh.
       const track = this.vehicleTracks.get(vp.vehicleId) ?? {
         parkedStreak: 0,
@@ -830,6 +850,7 @@ export class Engine {
         arrivalCache: ctx.arrivalCache,
         vpTerminalState: ctx.vpTerminalState,
         scheduleArmGraceSeconds: config.scheduleArmGraceSeconds,
+        agencyTimezone: config.agencyTimezone,
       });
 
       const decisions = decideTriplets(departures, {
@@ -838,10 +859,11 @@ export class Engine {
         maxHoldSeconds: config.maxHoldMinutes * 60,
         requireObservedArrival: true,
       });
-      // Suggestions are persisted before the route response; repeated refreshes therefore remain
-      // idempotent and approval is the only path that applies a hold to the ledger.
+      // Suggestions are persisted before the route response and reconciled on every refresh,
+      // so a pending recommendation tracks the latest EDT while approval remains the only path
+      // that applies a hold to the ledger.
       for (const decision of decisions) {
-        this.interventions.createSuggestion({
+        this.interventions.refreshSuggestion({
           id: `hold:${ctx.serviceDate}:${terminal.id}:${routeId}:${decision.tripId}`,
           serviceDate: ctx.serviceDate,
           terminalId: terminal.id,
@@ -855,12 +877,12 @@ export class Engine {
           until: decision.until,
           reason: decision.reason,
           generatedAt: ctx.generatedAt,
-          expiresAt: ctx.generatedAt + ((decision.until - ctx.nowSvc + 86400) % 86400),
+          expiresAt: suggestionExpiresAt(decision.until, ctx.nowSvc, ctx.generatedAt),
         });
       }
       const interventions = this.interventions.listForRoute(ctx.serviceDate, terminal.id, routeId);
 
-      const style = routeStyle(this.db, routeId);
+      const style = this.routeStyleFor(routeId);
       const shortName = style.shortName;
       const incoming: IncomingBus[] = [];
       const layovers: LayoverBus[] = [];
@@ -901,6 +923,7 @@ export class Engine {
             expectedDeparture: departure.edt,
             predictedDeparture,
             countdownSeconds: predictedDeparture - ctx.nowSvc,
+            overdueSeconds: departure.overdueSeconds,
             hold: departure.hold,
             restDelayed: departure.edt > departure.scheduledDeparture,
           });

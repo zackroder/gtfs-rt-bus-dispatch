@@ -126,6 +126,7 @@ Environment variables only seed first-run defaults.
 | `CTA_VP_URL` | CTA vehicles.pb | VehiclePositions feed (keyed) |
 | `CTA_TU_URL` | CTA tripupdates.pb | TripUpdates feed (keyed) |
 | `CTA_API_KEY` | — | GTFS-Realtime API key (appended as `?key=`) |
+| `agencyTimezone` | `America/Chicago` | IANA zone the GTFS schedule is expressed in; all service-day math is evaluated here, independent of the server's local timezone |
 | `refreshIntervalSeconds` | 10 | Realtime poll interval |
 | `staticRefreshHours` | 24 | Re-load static GTFS |
 | `minRestMinutes` | 5 | Minimum required rest (used in EDT) |
@@ -175,6 +176,10 @@ Fly.io, Railway):
 - Use a persistent disk for `DB_PATH` so the static GTFS load is not repeated on
   every boot.
 - Set `CTA_API_KEY` and feed URLs via environment.
+- The server's own timezone no longer matters: schedule math runs in the
+  configured `agencyTimezone` (default `America/Chicago`). Changing that value
+  mid-service-day shifts how recorded times compare against the schedule, so
+  set it once at deployment.
 - Build once, then run the server, which also serves the built frontend:
 
 ```bash

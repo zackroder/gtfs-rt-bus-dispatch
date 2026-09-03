@@ -111,6 +111,8 @@ export interface LayoverBus {
   expectedDeparture: number;
   predictedDeparture: number;
   countdownSeconds: number;
+  /** Seconds past the expected departure while still laying over; omitted until actually overdue. */
+  overdueSeconds?: number;
   hold?: HoldOverride;
   restDelayed?: boolean;
 }
@@ -135,7 +137,9 @@ export type InterventionAction =
   | 'declined'
   | 'canceled'
   | 'expired'
-  | 'completed';
+  | 'completed'
+  /** System action: a later refresh revised the hold values while the suggestion was pending. */
+  | 'updated';
 
 /** A durable recommendation and its operational/audit lifecycle fields. */
 export interface Intervention {
@@ -238,6 +242,9 @@ export interface AppConfig {
     apiKey?: string;
   };
   staticGtfsUrl: string;
+  /** IANA timezone the GTFS agency schedules against; all service-day math is evaluated here
+   *  instead of the server's local zone so a UTC cloud host cannot shift the whole schedule. */
+  agencyTimezone: string;
   refreshIntervalSeconds: number;
   staticRefreshHours: number;
   minRestMinutes: number;
@@ -287,6 +294,7 @@ export const appConfigSchema = z.object({
     apiKey: z.string().optional(),
   }),
   staticGtfsUrl: z.string().url(),
+  agencyTimezone: z.string().min(1).max(50).default('America/Chicago'),
   refreshIntervalSeconds: z.number().int().min(5).max(3600),
   staticRefreshHours: z.number().int().min(0).max(720),
   minRestMinutes: z.number().int().min(0).max(600),
@@ -344,6 +352,7 @@ const layoverBusSchema = z.object({
   expectedDeparture: z.number(),
   predictedDeparture: z.number(),
   countdownSeconds: z.number(),
+  overdueSeconds: z.number().optional(),
   hold: holdOverrideSchema.optional(),
   restDelayed: z.boolean().optional(),
 });

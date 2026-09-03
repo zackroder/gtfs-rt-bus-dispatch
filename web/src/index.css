@@ -225,6 +225,12 @@ h3 {
   color: var(--late);
 }
 
+/* Amber distinguishes "still here past its expected departure" from a red late arrival. */
+.badge.overdue {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .arrival-pending {
   display: inline-flex;
   align-items: center;

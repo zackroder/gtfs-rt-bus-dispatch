@@ -16,6 +16,7 @@ const baseConfig: AppConfig = {
     apiKey: 'sekrit-key',
   },
   staticGtfsUrl: 'http://localhost/gtfs.zip',
+  agencyTimezone: 'UTC',
   refreshIntervalSeconds: 10,
   staticRefreshHours: 24,
   minRestMinutes: 5,
@@ -43,7 +44,7 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
       config = { ...next, realtime: { ...next.realtime, apiKey: next.realtime.apiKey ?? config.realtime.apiKey } };
       return config;
     },
-    computeTerminal: (id) =>
+    computeTerminal: async (id) =>
       id === 'T1'
         ? ({
             terminalId: 'T1',
@@ -52,7 +53,7 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
             routes: [{ routeId: '1', routeShortName: 'R1', incoming: [], layovers: [], departed: [], interventions: [] }],
           } satisfies TerminalSnapshot)
         : undefined,
-    computeTerminalMap: (id) =>
+    computeTerminalMap: async (id) =>
       id === 'T1'
         ? ({
             terminalId: 'T1',
@@ -138,6 +139,38 @@ describe('api routes', () => {
     expect(filteredBody.routes).toEqual([]);
   });
 
+  it('awaits compute-on-miss snapshots so REST works without a WS subscriber', async () => {
+    // Simulates the production path: a known terminal with no cached snapshot is computed
+    // asynchronously before the response is written.
+    const base = await startServer(makeDeps({
+      computeTerminal: async (id) => {
+        if (id !== 'T1') return undefined;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          terminalId: 'T1',
+          generatedAt: 1700000000,
+          serviceDayStartSeconds: 0,
+          routes: [{ routeId: '1', routeShortName: 'R1', incoming: [], layovers: [], departed: [], interventions: [] }],
+        } satisfies TerminalSnapshot;
+      },
+    }));
+    const res = await fetch(`${base}/terminals/T1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as TerminalSnapshot;
+    expect(body.routes).toHaveLength(1);
+  });
+
+  it('returns 500 when compute-on-miss fails instead of hanging the request', async () => {
+    const base = await startServer(makeDeps({
+      computeTerminal: async () => {
+        throw new Error('engine exploded');
+      },
+    }));
+    const res = await fetch(`${base}/terminals/T1`);
+    expect(res.status).toBe(500);
+    expect((await res.json() as { error: string }).error).toBe('engine exploded');
+  });
+
   it('serves the read-only terminal map and validates it with the shared zod schema', async () => {
     const base = await startServer(makeDeps());
     const res = await fetch(`${base}/terminals/T1/map`);
@@ -196,7 +229,7 @@ describe('api routes', () => {
 
   it('lists and transitions persistent interventions', async () => {
     const deps = makeDeps();
-    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db));
+    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db), 'UTC');
     const now = Math.floor(Date.now() / 1000);
     const intervention = deps.interventions.createSuggestion({
       id: `hold:${serviceDate}:T1:1:D1`,
