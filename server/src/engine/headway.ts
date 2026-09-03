@@ -4,6 +4,7 @@ import type { RealtimeSnapshot } from '../providers/types';
 import { unixToServiceSeconds } from '../gtfs/time';
 import { effectiveDeparture, expectedDepartureTime } from './dispatch';
 import { outboundTrips } from './terminal';
+import { prepared } from '../db/prepare';
 
 // Headway construction combines static departure order, realtime predictions, and persisted
 // VP/ TU run facts into the records consumed by the dispatch decision function.
@@ -218,12 +219,13 @@ export function arrivalAtTerminal(
   serviceDayStartSeconds: number,
   tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
 ): ArrivalAtStop {
-  const stops = db
-    .prepare(
-      `SELECT stop_id, arrival_time, departure_time, stop_sequence
-       FROM stop_times WHERE trip_id = ?
-       ORDER BY stop_sequence ASC`,
-    )
+  // Runs once per predecessor trip per refresh, so the statement is memoized rather than re-prepared.
+  const stops = prepared(
+    db,
+    `SELECT stop_id, arrival_time, departure_time, stop_sequence
+        FROM stop_times WHERE trip_id = ?
+        ORDER BY stop_sequence ASC`,
+  )
     .all(tripId) as Array<{
     stop_id: string;
     arrival_time: number;

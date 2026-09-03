@@ -4,6 +4,7 @@ import type {
   InterventionAction,
   InterventionStatus,
 } from '../../../shared/types';
+import { prepared } from './prepare';
 
 // InterventionStore is the durable lifecycle boundary for recommendations. State changes and
 // their audit events are committed together so a UI action cannot be recorded without its outcome.
@@ -156,32 +157,34 @@ export class InterventionStore {
 
   // List all recommendations for a terminal within one service date.
   listForTerminal(serviceDate: string, terminalId: string): Intervention[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM interventions
-         WHERE service_date = ? AND terminal_id = ?
-         ORDER BY generated_at DESC, id`,
-      )
+    const rows = prepared(
+      this.db,
+      `SELECT * FROM interventions
+        WHERE service_date = ? AND terminal_id = ?
+        ORDER BY generated_at DESC, id`,
+    )
       .all(serviceDate, terminalId) as InterventionRow[];
     return rows.map(toIntervention);
   }
 
   // List the complete queue for one service date.
   listForServiceDate(serviceDate: string): Intervention[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM interventions WHERE service_date = ? ORDER BY generated_at DESC, id`)
+    const rows = prepared(
+      this.db,
+      `SELECT * FROM interventions WHERE service_date = ? ORDER BY generated_at DESC, id`,
+    )
       .all(serviceDate) as InterventionRow[];
     return rows.map(toIntervention);
   }
 
   // List a route's queue for a terminal and service date.
   listForRoute(serviceDate: string, terminalId: string, routeId: string): Intervention[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM interventions
-         WHERE service_date = ? AND terminal_id = ? AND route_id = ?
-         ORDER BY generated_at DESC, id`,
-      )
+    const rows = prepared(
+      this.db,
+      `SELECT * FROM interventions
+        WHERE service_date = ? AND terminal_id = ? AND route_id = ?
+        ORDER BY generated_at DESC, id`,
+    )
       .all(serviceDate, terminalId, routeId) as InterventionRow[];
     return rows.map(toIntervention);
   }
