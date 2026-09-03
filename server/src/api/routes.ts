@@ -89,7 +89,7 @@ export function createApi(deps: ApiDeps): Router {
     // service date, terminal, and event type, with a bounded limit to keep responses small.
     const serviceDate = typeof req.query.serviceDate === 'string'
       ? req.query.serviceDate
-      : activeServiceDate(new Date(), getServiceDayStart(deps.db));
+      : activeServiceDate(new Date(), getServiceDayStart(deps.db), deps.getConfig().agencyTimezone);
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
     const eventType = typeof req.query.type === 'string' ? req.query.type : undefined;
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 2000);
@@ -113,7 +113,11 @@ export function createApi(deps: ApiDeps): Router {
 
   router.get('/interventions', (req, res) => {
     // All queue reads are scoped to the currently active service date, including after midnight.
-    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db));
+    const serviceDate = activeServiceDate(
+      new Date(),
+      getServiceDayStart(deps.db),
+      deps.getConfig().agencyTimezone,
+    );
     const terminalId = typeof req.query.terminalId === 'string' ? req.query.terminalId : undefined;
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
     const interventions = terminalId

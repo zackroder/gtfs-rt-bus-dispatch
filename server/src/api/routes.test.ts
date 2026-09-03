@@ -16,6 +16,7 @@ const baseConfig: AppConfig = {
     apiKey: 'sekrit-key',
   },
   staticGtfsUrl: 'http://localhost/gtfs.zip',
+  agencyTimezone: 'UTC',
   refreshIntervalSeconds: 10,
   staticRefreshHours: 24,
   minRestMinutes: 5,
@@ -228,7 +229,7 @@ describe('api routes', () => {
 
   it('lists and transitions persistent interventions', async () => {
     const deps = makeDeps();
-    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db));
+    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db), 'UTC');
     const now = Math.floor(Date.now() / 1000);
     const intervention = deps.interventions.createSuggestion({
       id: `hold:${serviceDate}:T1:1:D1`,

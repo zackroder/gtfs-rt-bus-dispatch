@@ -75,6 +75,8 @@ export interface BuildDeparturesOptions {
   lookaheadSeconds: number;
   serviceDayStartSeconds: number;
   minRestSeconds: number;
+  /** IANA timezone the GTFS agency schedules against; used for every realtime clock conversion. */
+  agencyTimezone: string;
   activeServiceIds: Set<string>;
   rt: RealtimeSnapshot;
   ledger: Map<string, RunRecord>;
@@ -179,6 +181,7 @@ export function arrivalFact(
   stopSequence: number,
   scheduled: number,
   serviceDayStartSeconds: number,
+  timeZone: string,
 ): { predicted: number; known: boolean } {
   // Prefer an absolute predicted arrival, then stop delay, then trip delay. A missing value
   // remains unknown rather than pretending the schedule is an observed arrival.
@@ -188,7 +191,7 @@ export function arrivalFact(
   const update = matching[0];
   if (update?.arrivalTime !== undefined) {
     return {
-      predicted: unixToServiceSeconds(update.arrivalTime, serviceDayStartSeconds),
+      predicted: unixToServiceSeconds(update.arrivalTime, serviceDayStartSeconds, timeZone),
       known: true,
     };
   }
@@ -217,7 +220,8 @@ export function arrivalAtTerminal(
   tripId: string,
   _stopIds: string[],
   serviceDayStartSeconds: number,
-  tripUpdatesById?: ReadonlyMap<string, TripUpdateInfo>,
+  tripUpdatesById: ReadonlyMap<string, TripUpdateInfo> | undefined,
+  timeZone: string,
 ): ArrivalAtStop {
   // Runs once per predecessor trip per refresh, so the statement is memoized rather than re-prepared.
   const stops = prepared(
@@ -257,7 +261,7 @@ export function arrivalAtTerminal(
     const offset = scheduled - carriedScheduled;
     return {
       scheduled,
-      predicted: unixToServiceSeconds(carried.arrivalTime!, serviceDayStartSeconds) + offset,
+      predicted: unixToServiceSeconds(carried.arrivalTime!, serviceDayStartSeconds, timeZone) + offset,
       known: true,
     };
   }
@@ -269,6 +273,7 @@ export function arrivalAtTerminal(
     last.stop_sequence,
     scheduled,
     serviceDayStartSeconds,
+    timeZone,
   );
   return { scheduled, predicted: fact.predicted, known: fact.known };
 }
@@ -327,6 +332,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
         opts.terminal.stopIds,
         opts.serviceDayStartSeconds,
         opts.tripUpdatesById,
+        opts.agencyTimezone,
       );
       opts.arrivalCache?.set(cacheKey, arrival);
       scheduledArrival = arrival.scheduled;

@@ -236,9 +236,12 @@ export class Engine {
   // Convert one realtime poll into snapshots for the requested terminals.
   refresh(rt: RealtimeSnapshot, now: Date = new Date(), terminalIds?: Set<string>): TerminalSnapshot[] {
     const config = this.getConfig();
+    // All schedule/realtime clock conversions happen in the agency's timezone, never the
+    // server's local zone, so the math is identical on a Chicago workstation or a UTC host.
+    const timeZone = config.agencyTimezone;
     const serviceDayStartSeconds = getServiceDayStart(this.db);
-    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds);
-    const activeDate = activeServiceDate(now, serviceDayStartSeconds);
+    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds, timeZone);
+    const activeDate = activeServiceDate(now, serviceDayStartSeconds, timeZone);
     if (this.currentServiceDate !== activeDate) {
       // A service-day boundary starts a fresh in-memory ledger, then restores only facts persisted
       // for the new date so overnight operation cannot mix runs from adjacent dates.
@@ -502,6 +505,7 @@ export class Engine {
     vpTerminalState: Map<string, VehicleTerminalState>,
   ): void {
     const config = this.getConfig();
+    const timeZone = config.agencyTimezone;
     const ends = this.tripEnds();
     this.vpDiagnostics = [];
     const stationaryMeters = config.stationaryDisplacementMeters ?? 20;
@@ -517,7 +521,7 @@ export class Engine {
     for (const vp of rt.vehiclePositions) {
       const vpSeconds = vp.timestamp > generatedAt
         ? nowSvc
-        : unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds);
+        : unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds, timeZone);
       // Future-dated provider timestamps cannot describe an event after the current refresh.
       const track = this.vehicleTracks.get(vp.vehicleId) ?? {
         parkedStreak: 0,
@@ -846,6 +850,7 @@ export class Engine {
         arrivalCache: ctx.arrivalCache,
         vpTerminalState: ctx.vpTerminalState,
         scheduleArmGraceSeconds: config.scheduleArmGraceSeconds,
+        agencyTimezone: config.agencyTimezone,
       });
 
       const decisions = decideTriplets(departures, {

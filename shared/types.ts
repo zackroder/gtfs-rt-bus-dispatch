@@ -240,6 +240,9 @@ export interface AppConfig {
     apiKey?: string;
   };
   staticGtfsUrl: string;
+  /** IANA timezone the GTFS agency schedules against; all service-day math is evaluated here
+   *  instead of the server's local zone so a UTC cloud host cannot shift the whole schedule. */
+  agencyTimezone: string;
   refreshIntervalSeconds: number;
   staticRefreshHours: number;
   minRestMinutes: number;
@@ -289,6 +292,7 @@ export const appConfigSchema = z.object({
     apiKey: z.string().optional(),
   }),
   staticGtfsUrl: z.string().url(),
+  agencyTimezone: z.string().min(1).max(50).default('America/Chicago'),
   refreshIntervalSeconds: z.number().int().min(5).max(3600),
   staticRefreshHours: z.number().int().min(0).max(720),
   minRestMinutes: z.number().int().min(0).max(600),

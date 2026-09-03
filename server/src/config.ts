@@ -63,6 +63,9 @@ function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
       apiKey: env.CTA_API_KEY || undefined,
     },
     staticGtfsUrl: env.CTA_STATIC_URL ?? DEFAULT_URLS.staticGtfsUrl,
+    // Schedule clocks are agency-local; the engine evaluates them in this zone regardless of
+    // where the process runs (CTA is America/Chicago).
+    agencyTimezone: env.AGENCY_TIMEZONE || 'America/Chicago',
     refreshIntervalSeconds: 10,
     staticRefreshHours: 24,
     minRestMinutes: 5,
@@ -83,8 +86,15 @@ export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
     return config;
   }
   const parsed: unknown = JSON.parse(saved);
-  const config = appConfigSchema.parse(withGeometryDefaults(parsed as AppConfig));
   let mutated = false;
+  // Saved configs from before a setting existed are backfilled from the environment (or the
+  // default) instead of failing validation, mirroring the feed-URL backfill below.
+  const raw = parsed as AppConfig;
+  if (raw.agencyTimezone === undefined) {
+    raw.agencyTimezone = env.AGENCY_TIMEZONE || 'America/Chicago';
+    mutated = true;
+  }
+  const config = appConfigSchema.parse(withGeometryDefaults(raw));
   // Secrets and newly introduced feed settings may still be supplied by the environment
   // without overwriting the operator's other persisted choices.
   if (!config.realtime.apiKey && env.CTA_API_KEY) {

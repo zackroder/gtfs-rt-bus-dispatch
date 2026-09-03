@@ -19,12 +19,14 @@ function svc(hhmm: string): number {
 
 function nowAt(hhmm: string): Date {
   const [h, m] = hhmm.split(':').map(Number);
-  return new Date(2026, 7, 13, h!, m!, 0);
+  // UTC-based instants + the UTC agency timezone below keep the fixture wall clock equal to
+  // the GTFS schedule clock regardless of the host's local timezone.
+  return new Date(Date.UTC(2026, 7, 13, h!, m!, 0));
 }
 
 function unixAt(hhmm: string): number {
   const [h, m] = hhmm.split(':').map(Number);
-  return Math.floor(new Date(2026, 7, 13, h!, m!, 0).getTime() / 1000);
+  return Math.floor(Date.UTC(2026, 7, 13, h!, m!, 0) / 1000);
 }
 
 function arrUpdate(tripId: string, vehicleId: string): TripUpdateInfo {
@@ -137,6 +139,9 @@ function makeEngine(): Engine {
       tripUpdatesUrl: 'http://localhost/tu.pb',
     },
     staticGtfsUrl: 'http://localhost/gtfs.zip',
+    // Fixtures treat the GTFS schedule clock as UTC so service-second expectations are
+    // deterministic no matter which timezone the suite runs in.
+    agencyTimezone: 'UTC',
     refreshIntervalSeconds: 10,
     staticRefreshHours: 24,
     minRestMinutes: 5,

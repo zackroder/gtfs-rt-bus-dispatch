@@ -3,15 +3,20 @@ import {
   activeServiceDate,
   activeServiceIds,
   detectServiceDayStart,
-  localSecondsSinceMidnight,
   normalizeServiceSeconds,
   nowServiceSeconds,
   parseGtfsTime,
   unixToServiceSeconds,
+  zoneSecondsSinceMidnight,
 } from './time';
 import { createDatabase } from '../db/schema';
 
-// Time tests pin the service-day clock independently from timezone/date-sensitive engine behavior.
+// Time tests pin the service-day clock independently from timezone/date-sensitive engine
+// behavior. Every instant is built from an explicit UTC offset string and every conversion is
+// given an explicit IANA zone, so the suite passes identically on a Chicago workstation and a
+// UTC CI host.
+const CHICAGO = 'America/Chicago';
+const UTC = 'UTC';
 describe('parseGtfsTime', () => {
   it('parses normal times', () => {
     expect(parseGtfsTime('05:30:00')).toBe(5 * 3600 + 30 * 60);
@@ -76,32 +81,38 @@ describe('normalizeServiceSeconds', () => {
 
 describe('nowServiceSeconds', () => {
   it('wraps shortly after midnight to late service-day seconds', () => {
-    const now = new Date(2026, 7, 13, 1, 0, 0);
-    expect(nowServiceSeconds(now, 5 * 3600)).toBe(20 * 3600);
+    // 01:00 CDT (August, UTC-5) == 06:00Z.
+    const now = new Date('2026-08-13T06:00:00Z');
+    expect(nowServiceSeconds(now, 5 * 3600, CHICAGO)).toBe(20 * 3600);
   });
 
-  it('uses plain local seconds during the day', () => {
-    const now = new Date(2026, 7, 13, 10, 15, 0);
-    expect(nowServiceSeconds(now, 5 * 3600)).toBe(5 * 3600 + 15 * 60);
+  it('uses plain agency seconds during the day', () => {
+    const now = new Date('2026-08-13T15:15:00Z');
+    expect(nowServiceSeconds(now, 5 * 3600, CHICAGO)).toBe(5 * 3600 + 15 * 60);
   });
 });
 
 describe('unixToServiceSeconds', () => {
-  it('converts a unix timestamp to service-day seconds', () => {
-    const unix = new Date(2026, 7, 13, 10, 15, 0).getTime() / 1000;
-    expect(unixToServiceSeconds(unix, 5 * 3600)).toBe(5 * 3600 + 15 * 60);
+  it('converts a unix timestamp to service-day seconds in the agency zone', () => {
+    const unix = new Date('2026-08-13T15:15:00Z').getTime() / 1000;
+    expect(unixToServiceSeconds(unix, 5 * 3600, CHICAGO)).toBe(5 * 3600 + 15 * 60);
   });
 });
 
 describe('activeServiceDate', () => {
   it('uses the previous calendar day before the service-day start', () => {
-    const now = new Date(2026, 7, 13, 1, 0, 0);
-    expect(activeServiceDate(now, 5 * 3600)).toBe('20260812');
+    const now = new Date('2026-08-13T06:00:00Z'); // 01:00 CDT
+    expect(activeServiceDate(now, 5 * 3600, CHICAGO)).toBe('20260812');
   });
 
   it('uses today once the service day has started', () => {
-    const now = new Date(2026, 7, 13, 6, 0, 0);
-    expect(activeServiceDate(now, 5 * 3600)).toBe('20260813');
+    const now = new Date('2026-08-13T11:00:00Z'); // 06:00 CDT
+    expect(activeServiceDate(now, 5 * 3600, CHICAGO)).toBe('20260813');
+  });
+
+  it('rolls across month boundaries when stepping back a day', () => {
+    const now = new Date('2026-09-01T06:00:00Z'); // 01:00 CDT on Sep 1 -> belongs to Aug 31
+    expect(activeServiceDate(now, 5 * 3600, CHICAGO)).toBe('20260831');
   });
 });
 
@@ -133,9 +144,28 @@ describe('activeServiceIds', () => {
   });
 });
 
-describe('localSecondsSinceMidnight', () => {
-  it('computes wall-clock seconds', () => {
-    expect(localSecondsSinceMidnight(new Date(2026, 0, 1, 0, 0, 0))).toBe(0);
-    expect(localSecondsSinceMidnight(new Date(2026, 0, 1, 1, 2, 3))).toBe(3723);
+describe('zoneSecondsSinceMidnight', () => {
+  it('computes wall-clock seconds in the requested zone', () => {
+    expect(zoneSecondsSinceMidnight(new Date('2026-01-01T00:00:00Z'), UTC)).toBe(0);
+    expect(zoneSecondsSinceMidnight(new Date('2026-01-01T01:02:03Z'), UTC)).toBe(3723);
+  });
+
+  it('applies the zone offset, not the host clock', () => {
+    // 12:00Z is noon in UTC but 07:00 CDT; the host's local zone must not matter.
+    const instant = new Date('2026-08-13T12:00:00Z');
+    expect(zoneSecondsSinceMidnight(instant, UTC)).toBe(12 * 3600);
+    expect(zoneSecondsSinceMidnight(instant, CHICAGO)).toBe(7 * 3600);
+  });
+
+  it('handles the fall-back DST transition within one hour bucket', () => {
+    // 2026-11-01 07:00Z: 01:59:59 CDT is followed by 01:00 CST, so wall time jumps backward.
+    expect(zoneSecondsSinceMidnight(new Date('2026-11-01T06:59:59Z'), CHICAGO)).toBe(7199);
+    expect(zoneSecondsSinceMidnight(new Date('2026-11-01T07:00:00Z'), CHICAGO)).toBe(3600);
+  });
+
+  it('handles the spring-forward DST transition within one hour bucket', () => {
+    // 2026-03-08 08:00Z: 01:59:59 CST is followed by 03:00:00 CDT; 02:xx does not exist.
+    expect(zoneSecondsSinceMidnight(new Date('2026-03-08T07:59:59Z'), CHICAGO)).toBe(7199);
+    expect(zoneSecondsSinceMidnight(new Date('2026-03-08T08:00:00Z'), CHICAGO)).toBe(3 * 3600);
   });
 });

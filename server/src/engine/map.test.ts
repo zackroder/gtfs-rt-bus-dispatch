@@ -40,6 +40,7 @@ function makeEngine(): { engine: Engine; config: AppConfig } {
   const config: AppConfig = {
     realtime: { tripUpdatesUrl: 'http://localhost/tu.pb' },
     staticGtfsUrl: 'http://localhost/gtfs.zip',
+    agencyTimezone: 'UTC',
     refreshIntervalSeconds: 10,
     staticRefreshHours: 24,
     minRestMinutes: 5,

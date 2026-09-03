@@ -4,6 +4,7 @@ import type { Database } from 'better-sqlite3';
 // detected service-day boundary so overnight trips sort in operational order.
 export const SECONDS_PER_DAY = 86400;
 export const DEFAULT_SERVICE_DAY_START = 3 * 3600;
+export const DEFAULT_AGENCY_TIMEZONE = 'America/Chicago';
 
 // Parse a GTFS clock value without applying a service-day offset.
 export function parseGtfsTime(value: string): number | null {
@@ -83,36 +84,78 @@ export function normalizeServiceSeconds(raw: number, serviceDayStartSeconds: num
   return ((diff % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
 }
 
-// Return local wall-clock seconds; Date timezone conversion is intentionally left to the caller/runtime.
-export function localSecondsSinceMidnight(date: Date): number {
-  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
-}
+// GTFS schedule times are agency-local wall clocks. Evaluating them through the server's own
+// local Date getters silently shifts the whole schedule when the process runs in another zone
+// (a UTC cloud host vs. Chicago operations), so every "now" conversion below takes the agency
+// timezone explicitly and resolves civil time through Intl.
 
-// Convert the current local wall clock to the normalized service-day clock.
-export function nowServiceSeconds(now: Date, serviceDayStartSeconds: number): number {
-  return normalizeServiceSeconds(localSecondsSinceMidnight(now), serviceDayStartSeconds);
-}
+// Offset memoization: Intl formatting is far too slow to run per vehicle position, and DST
+// transitions land on UTC hour boundaries, so a per-(timezone, UTC hour) bucket never straddles
+// a transition and one offset serves every timestamp within that hour.
+const offsetCache = new Map<string, number>();
 
-// Convert an epoch timestamp through local time into service-day seconds.
-export function unixToServiceSeconds(unix: number, serviceDayStartSeconds: number): number {
-  return normalizeServiceSeconds(localSecondsSinceMidnight(new Date(unix * 1000)), serviceDayStartSeconds);
-}
-
-function formatDateKey(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}${m}${d}`;
-}
-
-// Format the calendar date that owns the current service-day segment.
-export function activeServiceDate(now: Date, serviceDayStartSeconds: number): string {
-  const date = new Date(now);
-  if (localSecondsSinceMidnight(now) < serviceDayStartSeconds) {
-    // After midnight but before the service boundary still belongs to yesterday's service date.
-    date.setDate(date.getDate() - 1);
+// Offset (seconds) to add to an epoch instant to obtain wall-clock time in the zone.
+export function timeZoneOffsetSeconds(date: Date, timeZone: string): number {
+  const key = `${timeZone}|${Math.floor(date.getTime() / 3_600_000)}`;
+  let offset = offsetCache.get(key);
+  if (offset === undefined) {
+    const parts = new Map(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        hourCycle: 'h23',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+        .formatToParts(date)
+        .map((part) => [part.type, part.value] as const),
+    );
+    const asUtc = Date.UTC(
+      Number(parts.get('year')),
+      Number(parts.get('month')) - 1,
+      Number(parts.get('day')),
+      Number(parts.get('hour')),
+      Number(parts.get('minute')),
+      Number(parts.get('second')),
+    ) / 1000;
+    offset = asUtc - Math.floor(date.getTime() / 1000);
+    offsetCache.set(key, offset);
   }
-  return formatDateKey(date);
+  return offset;
+}
+
+// Wall-clock seconds since midnight in the agency timezone.
+export function zoneSecondsSinceMidnight(date: Date, timeZone: string): number {
+  const shifted = Math.floor(date.getTime() / 1000) + timeZoneOffsetSeconds(date, timeZone);
+  return ((shifted % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+}
+
+// Convert the current agency wall clock to the normalized service-day clock.
+export function nowServiceSeconds(now: Date, serviceDayStartSeconds: number, timeZone: string): number {
+  return normalizeServiceSeconds(zoneSecondsSinceMidnight(now, timeZone), serviceDayStartSeconds);
+}
+
+// Convert an epoch timestamp through the agency timezone into service-day seconds.
+export function unixToServiceSeconds(unix: number, serviceDayStartSeconds: number, timeZone: string): number {
+  return nowServiceSeconds(new Date(unix * 1000), serviceDayStartSeconds, timeZone);
+}
+
+// Format the calendar date that owns the current service-day segment, in the agency timezone.
+export function activeServiceDate(now: Date, serviceDayStartSeconds: number, timeZone: string): string {
+  const zoneNow = new Date(now.getTime() + timeZoneOffsetSeconds(now, timeZone) * 1000);
+  // After midnight but before the service boundary still belongs to yesterday's service date.
+  // setUTCDate rolls across month/year boundaries the same way the previous local code did.
+  if (zoneSecondsSinceMidnight(now, timeZone) < serviceDayStartSeconds) {
+    zoneNow.setUTCDate(zoneNow.getUTCDate() - 1);
+  }
+  // Reading the offset-shifted instant through UTC getters yields the zone's civil calendar.
+  const y = zoneNow.getUTCFullYear();
+  const m = String(zoneNow.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(zoneNow.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
 }
 
 // Resolve recurring calendar service and date exceptions for one service date.

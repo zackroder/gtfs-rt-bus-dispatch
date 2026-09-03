@@ -66,7 +66,7 @@ function discoverTerminals(): void {
   if (config.terminals.length > 0) return;
   const serviceDayStart = getServiceDayStart(db);
   const now = new Date();
-  const active = activeServiceIds(db, activeServiceDate(now, serviceDayStart));
+  const active = activeServiceIds(db, activeServiceDate(now, serviceDayStart, config.agencyTimezone));
   const terminals = autoDiscoverTerminals(db, active);
   if (terminals.length > 0) {
     config = applyConfig(db, config, { ...config, terminals });
