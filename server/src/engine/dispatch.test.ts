@@ -3,6 +3,7 @@ import {
   decideTriplets,
   expectedDepartureTime,
   holdSeconds,
+  suggestionExpiresAt,
   type DispatchDeparture,
   type TripletDecision,
 } from './dispatch';
@@ -54,6 +55,18 @@ describe('holdSeconds', () => {
 
   it('caps at maxHoldMinutes', () => {
     expect(holdSeconds(4000, 0, MAX_HOLD)).toBe(600);
+  });
+});
+
+describe('suggestionExpiresAt', () => {
+  it('expires a live decision when its hold window ends', () => {
+    expect(suggestionExpiresAt(720, 600, 1000)).toBe(1120);
+  });
+
+  it('expires a degenerate decision immediately instead of wrapping into a day', () => {
+    // until already in the past: the old modulo form produced roughly generatedAt + 86400.
+    expect(suggestionExpiresAt(600, 720, 1000)).toBe(1000);
+    expect(suggestionExpiresAt(720, 720, 1000)).toBe(1000);
   });
 });
 

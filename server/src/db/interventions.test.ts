@@ -60,4 +60,16 @@ describe('InterventionStore', () => {
     store.completeTrip('20260813', 'D3', 150);
     expect(store.require(applied.id).status).toBe('completed');
   });
+
+  it('refuses to apply a suggestion whose window already passed', () => {
+    // A degenerate engine decision (until at/before creation) expires at generatedAt; the
+    // apply gate must reject it rather than let it lock an impossible hold into the ledger.
+    const db = createDatabase(':memory:');
+    const store = new InterventionStore(db);
+    const stale = store.createSuggestion({ ...suggestion(), expiresAt: 100 });
+    expect(() => store.apply(stale.id, { actorId: 'manager-1' }, 100)).toThrow(
+      InterventionConflictError,
+    );
+    expect(store.require(stale.id).status).toBe('expired');
+  });
 });

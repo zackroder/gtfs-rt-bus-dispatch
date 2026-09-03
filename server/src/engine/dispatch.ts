@@ -38,6 +38,16 @@ export function holdSeconds(
   return Math.min(Math.round(raw / 30) * 30, maxHoldSeconds);
 }
 
+// Queue expiry for one recommendation, in epoch seconds. `until` and `nowSvc` share the
+// service-day continuum (raw GTFS times may exceed 86400 on overnight trips) and the
+// lookahead horizon keeps their true delta well under a day, so the remaining window is
+// the plain difference. A degenerate decision whose `until` has already passed expires
+// immediately: the previous `(... + 86400) % 86400` form wrapped that negative delta into
+// a ~24-hour expiry, leaving impossible recommendations actionable for a day.
+export function suggestionExpiresAt(until: number, nowSvc: number, generatedAt: number): number {
+  return generatedAt + Math.max(0, until - nowSvc);
+}
+
 // Return the departure timestamp that should participate in a headway calculation.
 export function effectiveDeparture(departure: DispatchDeparture): number {
   // Decisions use actual departure for departed buses, then an approved hold, then EDT.

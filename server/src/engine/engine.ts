@@ -31,7 +31,7 @@ import {
   type VehicleTerminalState,
   vehicleTerminalKey,
 } from './headway';
-import { decideTriplets } from './dispatch';
+import { decideTriplets, suggestionExpiresAt } from './dispatch';
 import { outboundRoutesAtTerminal, routeStyle } from './terminal';
 import { bearingDegrees, distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
 
@@ -855,7 +855,7 @@ export class Engine {
           until: decision.until,
           reason: decision.reason,
           generatedAt: ctx.generatedAt,
-          expiresAt: ctx.generatedAt + ((decision.until - ctx.nowSvc + 86400) % 86400),
+          expiresAt: suggestionExpiresAt(decision.until, ctx.nowSvc, ctx.generatedAt),
         });
       }
       const interventions = this.interventions.listForRoute(ctx.serviceDate, terminal.id, routeId);
