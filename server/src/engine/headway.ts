@@ -66,6 +66,7 @@ export interface OutboundDeparture {
   hasArrivalInfo: boolean;
   arrivalPending: boolean;
   departurePending: boolean;
+  overdueSeconds?: number;
 }
 
 export interface BuildDeparturesOptions {
@@ -413,6 +414,12 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     else if (vehicleId !== undefined) state = 'incoming';
     else state = 'departed';
 
+    // Overdue is measured against EDT, which already includes the minimum-rest allowance, so a
+    // rest-delayed bus is only flagged once it passes its genuinely expected departure. Only a
+    // bus still laying over can be overdue: an inbound bus is "late" (delaySeconds) and a
+    // departed one has an actual time. Omitted entirely when not overdue to keep the DTO lean.
+    const overdueSeconds = state === 'layover' ? Math.max(0, opts.nowSvc - edt) : 0;
+
     departures.push({
       tripId: ob.tripId,
       routeId: opts.routeId,
@@ -434,6 +441,7 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       hasArrivalInfo,
       arrivalPending,
       departurePending,
+      overdueSeconds: overdueSeconds > 0 ? overdueSeconds : undefined,
     });
   }
 

@@ -28,6 +28,10 @@ export function LayoverCard({
         {bus.arrivalPending && <span className="arrival-pending"><span className="arrival-pending-dot" /> arriving</span>}
         {bus.departurePending && <span className="departure-pending"><span className="departure-pending-dot" /> departing</span>}
         {bus.restDelayed && <span className="badge rest-delayed">delayed</span>}
+        {/* Under a minute of overdue is within the same noise floor the hold rule ignores. */}
+        {bus.overdueSeconds !== undefined && bus.overdueSeconds >= 60 && (
+          <span className="badge overdue">overdue {Math.round(bus.overdueSeconds / 60)} min</span>
+        )}
       </div>
       <div className="card-side">
         <span className={`arrival ${late ? 'late' : ''}`}>

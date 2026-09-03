@@ -111,6 +111,8 @@ export interface LayoverBus {
   expectedDeparture: number;
   predictedDeparture: number;
   countdownSeconds: number;
+  /** Seconds past the expected departure while still laying over; omitted until actually overdue. */
+  overdueSeconds?: number;
   hold?: HoldOverride;
   restDelayed?: boolean;
 }
@@ -350,6 +352,7 @@ const layoverBusSchema = z.object({
   expectedDeparture: z.number(),
   predictedDeparture: z.number(),
   countdownSeconds: z.number(),
+  overdueSeconds: z.number().optional(),
   hold: holdOverrideSchema.optional(),
   restDelayed: z.boolean().optional(),
 });

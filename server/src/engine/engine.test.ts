@@ -254,6 +254,23 @@ describe('engine triplet dispatch', () => {
     expect(d3.predictedDeparture).toBe(svc('08:23'));
   });
 
+  it('flags a layover past its expected departure as overdue', () => {
+    const engine = makeEngine();
+    const rt = stdRt();
+
+    // The first refresh records the observed terminal arrival from the fresh VP sample.
+    engine.refresh(rt, nowAt('08:08'));
+    // D2's EDT is 08:12 (observed arrival 08:07 + 5 min rest); with no departure fact it is
+    // still laying over 8 minutes later, so it is overdue against its genuine EDT.
+    const snapshot = engine.refresh(rt, nowAt('08:20'))[0]!;
+    const route = route1(snapshot);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.overdueSeconds).toBe(480);
+    // D3's EDT tracks the scheduled-arm fallback (estimated arrival = now), so it is not overdue.
+    const d3 = route.layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.overdueSeconds).toBeUndefined();
+  });
+
   it('uses the leader recorded departure rather than its EDT in the triplet', () => {
     const engine = makeEngine();
     const rt: RealtimeSnapshot = {

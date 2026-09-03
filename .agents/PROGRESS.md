@@ -372,6 +372,16 @@ I/O) so it can be reviewed and unit-tested in isolation.
   hysteresis and is not added to the departure trigger. The first moving sample
   starts `departurePending` (red UI indicator); `departPings` fresh moving samples
   confirm the departure. Trip flips never confirm departure.
+- **2026-09-03 — Overdue layover flag**: after the review fixes removed the
+  accidental (broken) overdue signal from the intervention queue, overdue is
+  now surfaced deliberately: `LayoverBus.overdueSeconds` = seconds past EDT
+  while still laying over (omitted when ≤ 0, and never applied to incoming or
+  departed buses). EDT already includes the minimum-rest allowance, so a
+  rest-delayed bus is only flagged past its genuinely expected departure. The
+  layover card renders an amber `overdue N min` badge at ≥ 60 s — the same
+  noise floor the hold rule uses. Buses only tracked via the scheduled-arm
+  fallback are not flagged: their estimated arrival is "now", so their EDT
+  stays current until an observed arrival anchors it.
 - **2026-08-19 — Read-only debug terminal map**: added
   `GET /api/terminals/:id/map` returning a Zod-validated `TerminalMapSnapshot`
   (geofence circles + color-coded vehicle arrows) built by a new

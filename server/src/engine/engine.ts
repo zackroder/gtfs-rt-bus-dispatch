@@ -923,6 +923,7 @@ export class Engine {
             expectedDeparture: departure.edt,
             predictedDeparture,
             countdownSeconds: predictedDeparture - ctx.nowSvc,
+            overdueSeconds: departure.overdueSeconds,
             hold: departure.hold,
             restDelayed: departure.edt > departure.scheduledDeparture,
           });
