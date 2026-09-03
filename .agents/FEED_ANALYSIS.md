@@ -1,5 +1,17 @@
 # Live CTA VP Feed Analysis — arrival/departure recording feasibility
 
+> **Correction (2026-09-03, owner review):** the PROGRESS 2026-08-16 note and
+> one reading of this file claimed "TU carries no timing fields at all
+> (0/6115 entities)". That is wrong as a general statement: live CTA
+> TripUpdates DO carry stop-level predictions — `stopTimeUpdates` list the
+> upcoming stops with absolute `arrivalTime` (delays as fallback), excluding
+> the current stop and often the exact terminus. `arrivalAtTerminal` in
+> `server/src/engine/headway.ts` is built on exactly that behavior (it
+> extends the latest carried stop's prediction by scheduled travel time).
+> The 0/6115 measurement was most likely scoped to terminus updates only or
+> an anomalous capture. Re-measure before citing it; do not design around
+> "no TU timing".
+
 Captured 2026-08-16 (Sunday) ~18:xx Chicago time. 8 polls at ~30s intervals over
 ~3.5 minutes of the live VehiclePositions feed (with the configured `CTA_API_KEY`).
 Static reference: `data/gtfs.zip` (bus-only, 90,405 trips, 86 routes). Throwaway
