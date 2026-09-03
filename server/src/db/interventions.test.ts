@@ -72,4 +72,35 @@ describe('InterventionStore', () => {
     );
     expect(store.require(stale.id).status).toBe('expired');
   });
+
+  it('revises a pending suggestion in place and audits the update', () => {
+    const db = createDatabase(':memory:');
+    const store = new InterventionStore(db);
+    const created = store.createSuggestion(suggestion());
+
+    // Unchanged values are a no-op with no audit noise.
+    expect(store.refreshSuggestion(suggestion())).toBe('unchanged');
+    // A >= 30s move of the departure target is a material revision.
+    expect(store.refreshSuggestion({ ...suggestion(), until: 930, expiresAt: 260 })).toBe('updated');
+    const revised = store.require(created.id);
+    expect(revised.until).toBe(930);
+    expect(revised.expiresAt).toBe(260);
+    // Small jitter below the 30-second hysteresis does not revise the row.
+    expect(store.refreshSuggestion({ ...suggestion(), until: 945, expiresAt: 260 })).toBe('unchanged');
+    expect(store.require(created.id).until).toBe(930);
+
+    const events = db
+      .prepare(`SELECT action FROM intervention_events WHERE intervention_id = ? ORDER BY id`)
+      .all(created.id) as Array<{ action: string }>;
+    expect(events.map((e) => e.action)).toEqual(['created', 'updated']);
+  });
+
+  it('never revises a suggestion once it left the pending state', () => {
+    const db = createDatabase(':memory:');
+    const store = new InterventionStore(db);
+    const created = store.createSuggestion(suggestion());
+    store.apply(created.id, { actorId: 'manager-1' }, 120);
+    expect(store.refreshSuggestion({ ...suggestion(), until: 1200 })).toBe('skipped');
+    expect(store.require(created.id).until).toBe(900);
+  });
 });

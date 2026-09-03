@@ -838,10 +838,11 @@ export class Engine {
         maxHoldSeconds: config.maxHoldMinutes * 60,
         requireObservedArrival: true,
       });
-      // Suggestions are persisted before the route response; repeated refreshes therefore remain
-      // idempotent and approval is the only path that applies a hold to the ledger.
+      // Suggestions are persisted before the route response and reconciled on every refresh,
+      // so a pending recommendation tracks the latest EDT while approval remains the only path
+      // that applies a hold to the ledger.
       for (const decision of decisions) {
-        this.interventions.createSuggestion({
+        this.interventions.refreshSuggestion({
           id: `hold:${ctx.serviceDate}:${terminal.id}:${routeId}:${decision.tripId}`,
           serviceDate: ctx.serviceDate,
           terminalId: terminal.id,

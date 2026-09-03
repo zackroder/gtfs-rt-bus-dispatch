@@ -62,6 +62,63 @@ export class InterventionStore {
 
   // Insert a recommendation once and return the durable row, even when refresh repeats it.
   createSuggestion(input: InterventionSuggestionInput): Intervention {
+    this.insertSuggestion(input);
+    return this.require(input.id);
+  }
+
+  // Reconcile one pending suggestion with the latest engine decision. The first refresh
+  // inserts; later refreshes revise the persisted values in place while the row is still
+  // pending, so a recommendation tracks the current EDT/predictions instead of locking in
+  // its first impression. Applied/resolved rows are never touched. Small prediction jitter
+  // must not spam the audit log, so a revision counts as material only when the hold length
+  // changes, the departure target moves by at least the 30-second hold rounding granularity,
+  // or the vehicle assignments change.
+  refreshSuggestion(input: InterventionSuggestionInput): 'created' | 'updated' | 'unchanged' | 'skipped' {
+    const transaction = this.db.transaction((): 'created' | 'updated' | 'unchanged' | 'skipped' => {
+      const row = this.db
+        .prepare(`SELECT * FROM interventions WHERE id = ?`)
+        .get(input.id) as InterventionRow | undefined;
+      if (!row) {
+        this.insertSuggestion(input);
+        return 'created';
+      }
+      if (row.status !== 'pending') return 'skipped';
+      const untilMoved = Math.abs((row.until_seconds ?? input.until) - input.until) >= 30;
+      const changed =
+        row.hold_seconds !== input.holdSeconds ||
+        untilMoved ||
+        (row.vehicle_id ?? undefined) !== input.vehicleId ||
+        (row.leader_vehicle_id ?? undefined) !== input.leaderVehicleId ||
+        (row.follower_vehicle_id ?? undefined) !== input.followerVehicleId;
+      if (!changed) return 'unchanged';
+      this.db
+        .prepare(
+          `UPDATE interventions
+           SET vehicle_id = ?, leader_vehicle_id = ?, follower_vehicle_id = ?,
+               hold_seconds = ?, reason = ?, until_seconds = ?, generated_at = ?, expires_at = ?
+           WHERE id = ? AND status = 'pending'`,
+        )
+        .run(
+          input.vehicleId ?? null,
+          input.leaderVehicleId ?? null,
+          input.followerVehicleId ?? null,
+          input.holdSeconds,
+          input.reason,
+          input.until,
+          input.generatedAt,
+          input.expiresAt,
+          input.id,
+        );
+      // Audit the revision with the generation timestamp so the event timeline shows when the
+      // recommendation changed, not when the refresh loop happened to notice.
+      this.insertEvent(input.id, 'updated', input.generatedAt, 'system');
+      return 'updated';
+    });
+    return transaction();
+  }
+
+  // Shared insert path for both creation APIs; idempotent per service date/terminal/route/trip.
+  private insertSuggestion(input: InterventionSuggestionInput): void {
     const transaction = this.db.transaction(() => {
       // The unique schedule key makes repeated refreshes idempotent for the same recommendation.
       const result = this.db
@@ -95,7 +152,6 @@ export class InterventionStore {
       }
     });
     transaction();
-    return this.require(input.id);
   }
 
   // List all recommendations for a terminal within one service date.

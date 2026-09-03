@@ -135,7 +135,9 @@ export type InterventionAction =
   | 'declined'
   | 'canceled'
   | 'expired'
-  | 'completed';
+  | 'completed'
+  /** System action: a later refresh revised the hold values while the suggestion was pending. */
+  | 'updated';
 
 /** A durable recommendation and its operational/audit lifecycle fields. */
 export interface Intervention {
