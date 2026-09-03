@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createDatabase } from './schema';
 import { InterventionConflictError, InterventionStore } from './interventions';
 
@@ -102,5 +105,42 @@ describe('InterventionStore', () => {
     store.apply(created.id, { actorId: 'manager-1' }, 120);
     expect(store.refreshSuggestion({ ...suggestion(), until: 1200 })).toBe('skipped');
     expect(store.require(created.id).until).toBe(900);
+  });
+
+  it('migrates an intervention_events table whose CHECK predates the updated action', () => {
+    // Old databases carry a CHECK constraint without 'updated'; inserts of the new action
+    // must succeed after createDatabase rebuilds the table, with every audit row preserved.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-schema-'));
+    const dbPath = path.join(dir, 'legacy.db');
+    try {
+      const legacy = createDatabase(dbPath);
+      legacy.exec(`
+        DROP TABLE intervention_events;
+        CREATE TABLE intervention_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          intervention_id TEXT NOT NULL REFERENCES interventions(id),
+          action TEXT NOT NULL CHECK (action IN ('created', 'viewed', 'applied', 'declined', 'canceled', 'expired', 'completed')),
+          occurred_at INTEGER NOT NULL,
+          actor_id TEXT NOT NULL,
+          request_id TEXT,
+          metadata_json TEXT
+        );
+      `);
+      const store = new InterventionStore(legacy);
+      store.createSuggestion(suggestion());
+      legacy.close();
+
+      const migrated = createDatabase(dbPath);
+      const reopened = new InterventionStore(migrated);
+      const row = reopened.refreshSuggestion({ ...suggestion(), until: 930, expiresAt: 260 });
+      expect(row).toBe('updated');
+      const events = migrated
+        .prepare(`SELECT action FROM intervention_events WHERE intervention_id = ? ORDER BY id`)
+        .all(suggestion().id) as Array<{ action: string }>;
+      expect(events.map((e) => e.action)).toEqual(['created', 'updated']);
+      migrated.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

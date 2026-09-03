@@ -388,6 +388,49 @@ I/O) so it can be reviewed and unit-tested in isolation.
   toward/away-from-center bearing. New web route `/terminal/:id/map` renders raw
   Leaflet (OSM tiles, `L.circle` buffers, rotated-SVG `L.divIcon` arrows) with a
   `MapLegend`, linked from `TerminalView`, polling every 10 s.
+- **2026-09-03 — Code review fixes (branch `fix/engine-review-findings`)**:
+  six findings from a full engine review, each committed atomically.
+  1. *Backward headway symmetry*: `decideTriplets` measured the forward gap
+     from the leader's `effectiveDeparture` (actual departure when departed)
+     but the backward gap from the follower's raw EDT. A follower that
+     departed while the center was still laying over produced a fictional gap
+     and could recommend holding the center past a follower that was already
+     gone. Both gaps now use `effectiveDeparture`; because the hold is half
+     the difference, the recommended `until` is always strictly before the
+     follower's real departure.
+  2. *Stale suggestion expiry*: `expiresAt` was computed as
+     `generatedAt + ((until - nowSvc + 86400) % 86400)`. A degenerate decision
+     with `until` already in the past wrapped the negative delta into a
+     ~24-hour expiry, keeping an impossible recommendation pending for a day.
+     Replaced with `suggestionExpiresAt` (plain difference clamped at 0); the
+     existing apply-time expiry gate now rejects such rows with a conflict.
+  3. *Pending suggestions stay current*: `createSuggestion` was insert-once,
+     so the first decision locked in even as predictions moved the EDT. New
+     `InterventionStore.refreshSuggestion` reconciles pending rows every
+     refresh and appends a `new 'updated'` audit action (the
+     `intervention_events` CHECK constraint is rebuilt once for older DBs).
+     Revisions are hysteresis-gated: hold length change, >= 30 s move of
+     `until`, or vehicle reassignment — prediction jitter no longer spams the
+     audit log. Applied/resolved rows are never touched.
+  4. *REST compute-on-miss*: `GET /api/terminals/:id` served an empty shell
+     unless a WS subscriber had already triggered a refresh. The handler now
+     awaits `ensureTerminal`, which computes the snapshot on demand from the
+     retained feed (`engine.refresh` is synchronous and the fact pass is
+     idempotent) and 500s on engine failure instead of hanging.
+  5. *Refresh-path SQLite cost*: added `db/prepare.ts`, a per-connection
+     statement memoizer, applied to the hot queries (terminal trips, arrival
+     lookups, run-event inserts, intervention lists); route display styles are
+     cached per static load. Worker-thread offload remains deferred until
+     measurements justify it.
+  6. *Agency timezone*: schedule clocks were evaluated in the server's local
+     timezone, silently shifting all math on a UTC host. New
+     `agencyTimezone` config (default `America/Chicago`, env
+     `AGENCY_TIMEZONE`, backfilled for saved configs) is threaded through
+     `nowServiceSeconds`/`unixToServiceSeconds`/`activeServiceDate` and the
+     TU prediction conversions; offsets are resolved via `Intl` and memoized
+     per (zone, UTC hour) so DST transitions cannot straddle a bucket. The
+     test suite now passes with the host in any timezone (verified under
+     `TZ=America/New_York`); engine fixtures pin the agency zone to UTC.
 
 ## Build notes
 
