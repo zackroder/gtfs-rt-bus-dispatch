@@ -93,9 +93,13 @@ export function decideTriplets(
     const leader = working[i - 1]!;
     const follower = working[i + 1]!;
     const forwardHeadway = center.edt - effectiveDeparture(leader);
-    const backwardHeadway = follower.edt - center.edt;
-    // Headways are measured around the center departure; the working copy lets an earlier
-    // decision affect the next triplet without mutating the caller's input.
+    // Both gaps measure around the center with the same rule: an already-departed neighbor
+    // contributes its actual departure, not its EDT. Measuring the backward gap from raw EDT
+    // let a follower that left early/late produce a fictional gap and recommend holding the
+    // center past a follower that is already gone. Because the hold is half the difference,
+    // the recommended `until` always stays strictly before the follower's real departure.
+    const backwardHeadway = effectiveDeparture(follower) - center.edt;
+    // The working copy lets an earlier decision affect the next triplet without mutating the caller's input.
     const seconds = holdSeconds(backwardHeadway, forwardHeadway, opts.maxHoldSeconds);
     if (seconds > 0) {
       const until = center.edt + seconds;

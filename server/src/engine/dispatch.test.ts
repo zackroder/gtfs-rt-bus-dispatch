@@ -163,4 +163,40 @@ describe('decideTriplets', () => {
     });
     expect(ids(decisions)).toEqual([]);
   });
+
+  // A follower can physically depart while the center is still at the terminal. Both headways
+  // must then use actual departures; measuring the backward gap from raw EDT produced holds
+  // that recommended departing after a follower that was already gone.
+  it('ignores the EDT of a follower that departed early and suppresses the hold', () => {
+    const departures = [
+      dep({ tripId: 'D1', state: 'departed', departedSeconds: 240, edt: 240 }),
+      dep({ tripId: 'D2', state: 'layover', edt: 540 }),
+      dep({ tripId: 'D3', state: 'departed', departedSeconds: 660, edt: 1440 }),
+    ];
+    const decisions = decideTriplets(departures, {
+      nowSvc: 540,
+      leadTimeSeconds: 0,
+      maxHoldSeconds: MAX_HOLD,
+    });
+    // Raw EDT would claim a 15 min backward gap and hold D2 until 840 — past D3's actual 660.
+    expect(ids(decisions)).toEqual([]);
+  });
+
+  it('sizes the hold from a departed follower\'s actual departure and never passes it', () => {
+    const departures = [
+      dep({ tripId: 'D1', state: 'departed', departedSeconds: 540, edt: 540 }),
+      dep({ tripId: 'D2', state: 'layover', edt: 600 }),
+      dep({ tripId: 'D3', state: 'departed', departedSeconds: 900, edt: 840 }),
+    ];
+    const decisions = decideTriplets(departures, {
+      nowSvc: 600,
+      leadTimeSeconds: 0,
+      maxHoldSeconds: MAX_HOLD,
+    });
+    expect(ids(decisions)).toEqual(['D2']);
+    expect(decisions[0]!.holdSeconds).toBe(120);
+    expect(decisions[0]!.until).toBe(720);
+    // The recommendation must never hold the center beyond the follower's real departure.
+    expect(decisions[0]!.until).toBeLessThan(900);
+  });
 });
