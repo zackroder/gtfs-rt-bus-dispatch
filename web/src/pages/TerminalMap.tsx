@@ -7,7 +7,8 @@ import 'leaflet/dist/leaflet.css';
 import { getTerminalMap, getTerminals, type TerminalsResponse } from '../api';
 import { useStream } from '../hooks/useStream';
 import { MapLegend } from '../components/MapLegend';
-import type { VehicleMapMarker, VehicleMapStatus } from '../../../shared/types';
+import { arrowDivIcon } from '../components/VehicleArrow';
+import type { VehicleMapStatus } from '../../../shared/types';
 
 // Status colors are shared by the arrow markers and the legend so a status stays recognizable.
 const STATUS_COLORS: Record<VehicleMapStatus, string> = {
@@ -19,32 +20,6 @@ const STATUS_COLORS: Record<VehicleMapStatus, string> = {
 };
 
 const POLL_MS = 10_000;
-
-// A rotated-SVG arrow is closer in spirit to a map cursor than Leaflet's marker icons and keeps
-// the label rendered as an adjacent text node that never distorts with rotation.
-function arrowIcon(marker: VehicleMapMarker, color: string): L.DivIcon {
-  const heading = marker.headingDegrees ?? 0;
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="28" height="28" ` +
-    `style="transform: rotate(${heading}deg)">` +
-    `<path d="M12 2 L20 22 L12 17 L4 22 Z" fill="${color}" stroke="#ffffff" stroke-width="1.5"/>` +
-    `</svg>`;
-  return L.divIcon({
-    className: 'map-arrow',
-    html: `${svg}<div class="map-arrow-label">${escapeHtml(marker.label)}</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-  });
-}
-
-// The label is operator-generated (vehicle id), so escape it before it lands in innerHTML.
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
-}
 
 export default function TerminalMap() {
   const { id } = useParams<{ id: string }>();
@@ -153,7 +128,9 @@ export default function TerminalMap() {
     // Render vehicle arrows last so they sit above the circles.
     for (const marker of data.vehicles) {
       const color = STATUS_COLORS[marker.status];
-      L.marker([marker.lat, marker.lon], { icon: arrowIcon(marker, color) })
+      L.marker([marker.lat, marker.lon], {
+        icon: arrowDivIcon({ fill: color, headingDegrees: marker.headingDegrees ?? 0, label: marker.label }),
+      })
         .bindTooltip(`${marker.label} · ${marker.status}`)
         .addTo(layer);
       bounds.extend([marker.lat, marker.lon]);
