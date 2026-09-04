@@ -60,88 +60,33 @@ export function VehicleDetailPanel({
     };
   }, []);
 
-  // Create the mini map once and keep it alive across polls.
+  // Create the mini map lazily and redraw its layers whenever the detail changes. The container
+  // only exists once a detail has loaded, so initialization must ride on this effect rather than
+  // a mount-only effect. The map is torn down when the run loses live data so a stray map never
+  // keeps polling a detached node.
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, { attributionControl: false });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '© OpenStreetMap contributors',
-    }).addTo(map);
-    layerRef.current = L.layerGroup().addTo(map);
-    mapRef.current = map;
-    return () => {
-      map.remove();
-      mapRef.current = null;
-      layerRef.current = null;
-    };
-  }, []);
-
-  // Poll the detail endpoint while the panel is open; a 404 is the "no live data" empty state.
-  useEffect(() => {
-    if (!terminalId || !tripId) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = async () => {
-      try {
-        const data = await getVehicleDetail(terminalId, tripId);
-        if (disposed) return;
-        setDetailError(null);
-        if (data === null) {
-          setMissing(true);
-          setDetail(null);
-        } else {
-          setMissing(false);
-          setDetail(data);
-        }
-      } catch (err) {
-        if (disposed) return;
-        setDetailError(err instanceof Error ? err.message : String(err));
+    if (!detail) {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        layerRef.current = null;
       }
-    };
-    const tick = () => {
-      timer = setTimeout(() => {
-        void load();
-        tick();
-      }, POLL_MS);
-    };
-    void load();
-    tick();
-    return () => {
-      disposed = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [terminalId, tripId]);
-
-  // Fetch the strip once per selection; refetch only when the card's block changes.
-  useEffect(() => {
-    const blockId = detail?.blockId;
-    if (!blockId) {
-      setTimeline(null);
-      setTimelineBlockId(null);
       return;
     }
-    if (blockId === timelineBlockId) return;
-    let disposed = false;
-    getBlockTimeline(blockId)
-      .then((data) => {
-        if (disposed) return;
-        setTimelineBlockId(blockId);
-        setTimeline(data);
-      })
-      .catch(() => undefined);
-    return () => {
-      disposed = true;
-    };
-  }, [detail?.blockId]);
-
-  // Redraw the mini-map layers whenever the detail changes.
-  useEffect(() => {
+    if (containerRef.current && !mapRef.current) {
+      const map = L.map(containerRef.current, { attributionControl: false });
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors',
+      }).addTo(map);
+      layerRef.current = L.layerGroup().addTo(map);
+      mapRef.current = map;
+      hasFitRef.current = false;
+    }
     const map = mapRef.current;
     const layer = layerRef.current;
     if (!map || !layer) return;
     layer.clearLayers();
-    if (!detail) return;
     const bounds: L.LatLngBounds = L.latLngBounds([]);
 
     if (detail.terminalStop && detail.terminalStop.lat !== undefined && detail.terminalStop.lon !== undefined) {
@@ -213,6 +158,64 @@ export function VehicleDetailPanel({
       hasFitRef.current = true;
     }
   }, [detail, maxAgeSeconds, serviceDayStartSeconds]);
+
+  // Poll the detail endpoint while the panel is open; a 404 is the "no live data" empty state.
+  useEffect(() => {
+    if (!terminalId || !tripId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const data = await getVehicleDetail(terminalId, tripId);
+        if (disposed) return;
+        setDetailError(null);
+        if (data === null) {
+          setMissing(true);
+          setDetail(null);
+        } else {
+          setMissing(false);
+          setDetail(data);
+        }
+      } catch (err) {
+        if (disposed) return;
+        setDetailError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    const tick = () => {
+      timer = setTimeout(() => {
+        void load();
+        tick();
+      }, POLL_MS);
+    };
+    void load();
+    tick();
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [terminalId, tripId]);
+
+  // Fetch the strip once per selection; refetch only when the card's block changes.
+  useEffect(() => {
+    const blockId = detail?.blockId;
+    if (!blockId) {
+      setTimeline(null);
+      setTimelineBlockId(null);
+      return;
+    }
+    if (blockId === timelineBlockId) return;
+    let disposed = false;
+    getBlockTimeline(blockId)
+      .then((data) => {
+        if (disposed) return;
+        setTimelineBlockId(blockId);
+        setTimeline(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [detail?.blockId]);
 
   return (
     <>
