@@ -219,7 +219,9 @@ feed fetch, never `engine.refresh`).
       from `TerminalMap` and reused by the mini map.
 - [x] Card selection in `TerminalView` (BusCard uses `nextTripId`, layover/
       departed use `tripId`); detail panel polls every 10 s and fetches the
-      block strip once per selection.
+      block strip once per selection. *(Presentation follow-up 2026-09-04: the
+      panel renders as a bottom-sheet overlay with a click-to-close backdrop,
+      not inline under the route group, so the selected run stays prominent.)*
 - [x] `BlockStrip`: pure SVG with a prominent route number, direction shading,
       text contrast on the final shaded background, "now" line, and departure ticks.
 

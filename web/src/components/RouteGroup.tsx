@@ -5,24 +5,19 @@ import { LayoverCard } from './LayoverCard';
 import { DepartedCard } from './DepartedCard';
 import { InterventionCard } from './InterventionCard';
 import { RouteBadge } from './RouteBadge';
-import { VehicleDetailPanel } from './VehicleDetailPanel';
 
 export function RouteGroup({
   route,
   generatedAt,
   serviceDayStartSeconds,
-  terminalId,
   selectedTripId,
   onSelect,
-  onClose,
 }: {
   route: RouteState;
   generatedAt: number;
   serviceDayStartSeconds: number;
-  terminalId: string;
   selectedTripId: string | null;
   onSelect: (tripId: string) => void;
-  onClose: () => void;
 }) {
   // Empty is computed across all groups because an intervention is activity even
   // when no vehicle currently occupies the lookahead lists.
@@ -31,12 +26,6 @@ export function RouteGroup({
     route.layovers.length === 0 &&
     route.departed.length === 0 &&
     route.interventions.length === 0;
-  // The detail panel renders below the selected route's groups (mobile-first, no modals).
-  const selectionBelongsHere =
-    selectedTripId !== null &&
-    (route.incoming.some((bus) => bus.nextTripId === selectedTripId) ||
-      route.layovers.some((bus) => bus.tripId === selectedTripId) ||
-      route.departed.some((bus) => bus.tripId === selectedTripId));
   return (
     <section className="route-group">
       <h2>
@@ -106,15 +95,6 @@ export function RouteGroup({
         </div>
       )}
       {empty && <p className="empty">No activity in the lookahead window.</p>}
-      {selectionBelongsHere && (
-        <VehicleDetailPanel
-          key={selectedTripId}
-          terminalId={terminalId}
-          tripId={selectedTripId!}
-          serviceDayStartSeconds={serviceDayStartSeconds}
-          onClose={onClose}
-        />
-      )}
     </section>
   );
 }

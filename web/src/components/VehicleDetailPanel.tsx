@@ -215,95 +215,101 @@ export function VehicleDetailPanel({
   }, [detail, maxAgeSeconds, serviceDayStartSeconds]);
 
   return (
-    <div className="vehicle-detail-panel" role="dialog" aria-label={`Run detail ${tripId}`}>
-      {detailError && (
-        <div className="vehicle-detail-state">
-          <div className="error">{detailError}</div>
-          <button onClick={onClose}>Close</button>
-        </div>
-      )}
-      {!detailError && missing && (
-        <div className="vehicle-detail-state">
-          <p>No live data for this run.</p>
-          <button onClick={onClose}>Close</button>
-        </div>
-      )}
-      {!detailError && !missing && !detail && <div className="vehicle-detail-state loading">Loading run detail…</div>}
-      {!detailError && !missing && detail && (
-        <>
-          <div className="vehicle-detail-header">
-            <RouteBadge
-              shortName={detail.routeShortName}
-              color={detail.color}
-              textColor={detail.textColor}
-            />
-            <div className="vehicle-detail-title">
-              <strong>{detail.destination}</strong>
-              <span className={`vehicle-detail-status status-${detail.status}`}>
-                {STATUS_LABEL[detail.status]}
-              </span>
-            </div>
-            {detail.hold && <span className="hold-badge">held {formatHold(detail.hold.holdSeconds)}</span>}
-            {detail.overdueSeconds !== undefined && detail.overdueSeconds >= 60 && (
-              <span className="badge overdue">overdue {Math.round(detail.overdueSeconds / 60)} min</span>
-            )}
-            {staleMinutes !== null && <span className="stale-note">last seen {staleMinutes} min ago</span>}
-            <button className="vehicle-detail-close" onClick={onClose} aria-label="Close detail">
-              ×
-            </button>
-          </div>
-
-          <div ref={containerRef} className="vehicle-detail-map" />
-
-          <div className="vehicle-detail-stops">
-            <h4>Upcoming stops</h4>
-            {detail.upcomingStops.length === 0 ? (
-              <p className="empty">No upcoming stops in the feed window.</p>
-            ) : (
-              <ol>
-                {detail.upcomingStops.map((stop) => (
-                  <li key={`${stop.stopSequence}-${stop.stopId}`}>
-                    <span className="stop-name">
-                      {stop.source === 'predicted' && <span className="est-dot" aria-hidden="true" />}
-                      {stop.stopName}
-                    </span>
-                    <span className="stop-time">
-                      {stop.source === 'predicted' && stop.predicted !== undefined && <em>est </em>}
-                      {formatClock(
-                        stop.source === 'predicted' && stop.predicted !== undefined ? stop.predicted : stop.scheduled,
-                        serviceDayStartSeconds,
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
-
-          {detail.blockId && (
-            <div className="vehicle-detail-block">
-              <div className="block-strip-header">
-                <span className="block-strip-title">Block {detail.blockId}</span>
-                <span className="strip-legend">
-                  <span className="strip-legend-item">
-                    <span className="strip-legend-swatch strip-legend-solid" aria-hidden="true" />
-                    solid · dir 0
-                  </span>
-                  <span className="strip-legend-item">
-                    <span className="strip-legend-swatch strip-legend-tinted" aria-hidden="true" />
-                    tinted · dir 1
-                  </span>
-                </span>
-              </div>
-              {timeline ? (
-                <BlockStrip timeline={timeline} serviceDayStartSeconds={serviceDayStartSeconds} />
-              ) : (
-                <p className="empty">No block data.</p>
-              )}
+    <>
+      <div className="vehicle-detail-backdrop" onClick={onClose} aria-hidden="true" />
+      <div className="vehicle-detail-panel" role="dialog" aria-modal="true" aria-label={`Run detail ${tripId}`}>
+        <div className="vehicle-detail-grip" aria-hidden="true" />
+        <div className="vehicle-detail-body">
+          {detailError && (
+            <div className="vehicle-detail-state">
+              <div className="error">{detailError}</div>
+              <button onClick={onClose}>Close</button>
             </div>
           )}
-        </>
-      )}
-    </div>
+          {!detailError && missing && (
+            <div className="vehicle-detail-state">
+              <p>No live data for this run.</p>
+              <button onClick={onClose}>Close</button>
+            </div>
+          )}
+          {!detailError && !missing && !detail && <div className="vehicle-detail-state loading">Loading run detail…</div>}
+          {!detailError && !missing && detail && (
+            <>
+              <div className="vehicle-detail-header">
+                <RouteBadge
+                  shortName={detail.routeShortName}
+                  color={detail.color}
+                  textColor={detail.textColor}
+                />
+                <div className="vehicle-detail-title">
+                  <strong>{detail.destination}</strong>
+                  <span className={`vehicle-detail-status status-${detail.status}`}>
+                    {STATUS_LABEL[detail.status]}
+                  </span>
+                </div>
+                {detail.hold && <span className="hold-badge">held {formatHold(detail.hold.holdSeconds)}</span>}
+                {detail.overdueSeconds !== undefined && detail.overdueSeconds >= 60 && (
+                  <span className="badge overdue">overdue {Math.round(detail.overdueSeconds / 60)} min</span>
+                )}
+                {staleMinutes !== null && <span className="stale-note">last seen {staleMinutes} min ago</span>}
+                <button className="vehicle-detail-close" onClick={onClose} aria-label="Close detail">
+                  ×
+                </button>
+              </div>
+
+              <div ref={containerRef} className="vehicle-detail-map" />
+
+              <div className="vehicle-detail-stops">
+                <h4>Upcoming stops</h4>
+                {detail.upcomingStops.length === 0 ? (
+                  <p className="empty">No upcoming stops in the feed window.</p>
+                ) : (
+                  <ol>
+                    {detail.upcomingStops.map((stop) => (
+                      <li key={`${stop.stopSequence}-${stop.stopId}`}>
+                        <span className="stop-name">
+                          {stop.source === 'predicted' && <span className="est-dot" aria-hidden="true" />}
+                          {stop.stopName}
+                        </span>
+                        <span className="stop-time">
+                          {stop.source === 'predicted' && stop.predicted !== undefined && <em>est </em>}
+                          {formatClock(
+                            stop.source === 'predicted' && stop.predicted !== undefined ? stop.predicted : stop.scheduled,
+                            serviceDayStartSeconds,
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+
+              {detail.blockId && (
+                <div className="vehicle-detail-block">
+                  <div className="block-strip-header">
+                    <span className="block-strip-title">Block {detail.blockId}</span>
+                    <span className="strip-legend">
+                      <span className="strip-legend-item">
+                        <span className="strip-legend-swatch strip-legend-solid" aria-hidden="true" />
+                        solid · dir 0
+                      </span>
+                      <span className="strip-legend-item">
+                        <span className="strip-legend-swatch strip-legend-tinted" aria-hidden="true" />
+                        tinted · dir 1
+                      </span>
+                    </span>
+                  </div>
+                  {timeline ? (
+                    <BlockStrip timeline={timeline} serviceDayStartSeconds={serviceDayStartSeconds} />
+                  ) : (
+                    <p className="empty">No block data.</p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
