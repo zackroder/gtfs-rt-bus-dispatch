@@ -7,10 +7,14 @@ export function LayoverCard({
   bus,
   generatedAt,
   serviceDayStartSeconds,
+  onSelect,
+  selected = false,
 }: {
   bus: LayoverBus;
   generatedAt: number;
   serviceDayStartSeconds: number;
+  onSelect?: (tripId: string) => void;
+  selected?: boolean;
 }) {
   // Arrival can be observed or estimated; absent arrival data is deliberately shown
   // as unknown rather than inferred from the scheduled departure.
@@ -21,7 +25,12 @@ export function LayoverCard({
   const scheduledArrival =
     bus.scheduledArrival > 0 ? formatClock(bus.scheduledArrival, serviceDayStartSeconds) : '—';
   return (
-    <div className="card layover-card">
+    <div
+      className={`card layover-card ${selected ? 'selected' : ''}`}
+      role="button"
+      aria-pressed={selected}
+      onClick={() => onSelect?.(bus.tripId)}
+    >
       <div className="card-main">
         <span className="vehicle-id">{bus.vehicleId ? `#${bus.vehicleId}` : bus.tripId}</span>
         <span className="run">{bus.tripId}</span>

@@ -592,3 +592,199 @@ textarea {
   border-radius: 4px;
   padding: 1px 5px;
 }
+
+/* Vehicle cards are selectable; the chosen card gets a visible outline. */
+.card[role='button'] {
+  cursor: pointer;
+}
+
+.card.selected {
+  outline: 3px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Vehicle detail panel: header, mini map, upcoming stops, and the block strip. */
+.vehicle-detail-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.vehicle-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vehicle-detail-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.vehicle-detail-status {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.vehicle-detail-status.status-layover {
+  color: var(--ok);
+}
+
+.vehicle-detail-status.status-departed {
+  color: var(--muted);
+}
+
+.stale-note {
+  font-size: 11px;
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.vehicle-detail-close {
+  margin-left: auto;
+  margin-top: 0;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.vehicle-detail-map {
+  height: 220px;
+  min-height: 220px;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.vehicle-detail-stops {
+  margin-top: 10px;
+}
+
+.vehicle-detail-stops h4 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.vehicle-detail-stops ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vehicle-detail-stops li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.vehicle-detail-stops li:last-child {
+  border-bottom: none;
+}
+
+.stop-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.est-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+}
+
+.stop-time em {
+  font-style: normal;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.vehicle-detail-block {
+  margin-top: 10px;
+}
+
+.block-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.block-strip-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.strip-legend {
+  display: inline-flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.strip-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.strip-legend-swatch {
+  width: 14px;
+  height: 8px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.strip-legend-solid {
+  background: #c8102e;
+}
+
+.strip-legend-tinted {
+  background: #de7082;
+}
+
+/* The block strip scrolls horizontally when the block is longer than the viewport. */
+.block-strip-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 4px;
+  background: #fff;
+}
+
+.block-strip {
+  display: block;
+}
+
+.vehicle-detail-state {
+  padding: 8px 0;
+}
+
+.vehicle-detail-state p {
+  color: var(--muted);
+  margin: 0 0 8px;
+}
