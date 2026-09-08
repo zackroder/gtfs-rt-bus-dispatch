@@ -211,6 +211,35 @@ export interface ArrivalAtStop {
   known: boolean;
 }
 
+// Build the tripId -> vehicleId assignment consumed by both departure construction and the
+// vehicle detail card. TU is the primary assignment; VP tripId inversion is the fallback so a
+// feed that omits vehicle identity from TU still resolves the vehicle.
+export function buildTripToVehicle(rt: RealtimeSnapshot): Map<string, string> {
+  const tripToVehicle = new Map<string, string>();
+  for (const update of rt.tripUpdates) {
+    if (update.tripId && update.vehicleId) tripToVehicle.set(update.tripId, update.vehicleId);
+  }
+  for (const vp of rt.vehiclePositions) {
+    if (vp.vehicleId && vp.tripId && !tripToVehicle.has(vp.tripId)) {
+      tripToVehicle.set(vp.tripId, vp.vehicleId);
+    }
+  }
+  return tripToVehicle;
+}
+
+// Resolve the vehicle operating (or forming) a trip: its own TU/VP assignment, else the block
+// predecessor's assignment (the bus holds the inbound trip identity through the realtime flip).
+export function resolveVehicleForTrip(
+  rt: RealtimeSnapshot,
+  blockChains: BlockChains | undefined,
+  tripId: string,
+  vehicleAssignments?: ReadonlyMap<string, string>,
+): string | undefined {
+  const tripToVehicle = vehicleAssignments ?? buildTripToVehicle(rt);
+  const prev = blockChains?.prevTrip.get(tripId);
+  return tripToVehicle.get(tripId) ?? (prev ? tripToVehicle.get(prev) : undefined);
+}
+
 // Look up a trip's scheduled terminal arrival and apply its realtime prediction when available.
 // The terminal is the trip's own last stop (max stop_sequence), not a terminal's configured stops,
 // because the arrival bay often differs from the departure bay and counting only configured stops
@@ -291,27 +320,23 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
   );
   if (outbound.length === 0) return [];
 
-  const { prevTrip } = opts.blockChains ?? buildBlockChains(db);
+  const chains = opts.blockChains ?? buildBlockChains(db);
+  const { prevTrip } = chains;
 
-  const tripToVehicle = new Map<string, string>();
-  for (const update of opts.rt.tripUpdates) {
-    if (update.tripId && update.vehicleId) tripToVehicle.set(update.tripId, update.vehicleId);
-  }
+  const tripToVehicle = buildTripToVehicle(opts.rt);
   const vpTripByVehicle = new Map<string, string>();
   for (const vp of opts.rt.vehiclePositions) {
     // VP is the stronger assignment signal when TU and VP disagree; TU remains a fallback
     // for feeds that omit a trip from the vehicle-position entity.
     if (vp.vehicleId && vp.tripId) {
       vpTripByVehicle.set(vp.vehicleId, vp.tripId);
-      if (!tripToVehicle.has(vp.tripId)) tripToVehicle.set(vp.tripId, vp.vehicleId);
     }
   }
 
   const departures: OutboundDeparture[] = [];
   for (const ob of outbound) {
     const prevTripId = prevTrip.get(ob.tripId);
-    const vehicleId =
-      tripToVehicle.get(ob.tripId) ?? (prevTripId ? tripToVehicle.get(prevTripId) : undefined);
+    const vehicleId = resolveVehicleForTrip(opts.rt, chains, ob.tripId, tripToVehicle);
     // The trip a vehicle is currently operating comes from VehiclePositions alone (single tripId
     // per vehicle, authoritative). We deliberately do NOT fall back to the map-inverted TU
     // assignment: CTA can carry a vehicle on both the inbound and upcoming outbound TU entity, so

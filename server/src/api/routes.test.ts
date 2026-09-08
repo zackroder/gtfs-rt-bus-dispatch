@@ -6,7 +6,7 @@ import { createDatabase } from '../db/schema';
 import { createApi, type ApiDeps } from './routes';
 import { InterventionStore } from '../db/interventions';
 import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
-import type { AppConfig, TerminalMapSnapshot, TerminalSnapshot } from '../../../shared/types';
+import type { AppConfig, BlockTimeline, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../../shared/types';
 
 // API tests use an in-memory database and real HTTP requests to cover validation, redaction,
 // service-date scoping, and intervention lifecycle responses without external feeds.
@@ -65,6 +65,8 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
             vehicles: [],
           } satisfies TerminalMapSnapshot)
         : undefined,
+    computeVehicleDetail: async () => undefined,
+    computeBlockTimeline: async () => undefined,
     getHealth: () => ({ ok: true, lastRefreshAt: 123, staticLoadedAt: 456 }),
     getVpDiagnostics: () => ({ observations: [], recentFacts: [] }),
     reloadStatic: () => Promise.resolve(),
@@ -282,5 +284,80 @@ describe('api routes', () => {
 
     const filtered = await fetch(`${base}/run-events?serviceDate=20260813&terminalId=T1&type=departure`);
     expect((await filtered.json() as { rows: unknown[] }).rows).toEqual([]);
+  });
+
+  it('serves a validated vehicle detail for a trip present at the terminal', async () => {
+    const detail: VehicleDetail = {
+      terminalId: 'T1',
+      tripId: 'D1',
+      blockId: 'B1',
+      vehicleId: 'V1',
+      routeId: '1',
+      routeShortName: '10',
+      color: 'FFB81C',
+      textColor: '000000',
+      destination: 'Far Stop',
+      directionId: 1,
+      status: 'layover',
+      upcomingStops: [],
+      passedCount: 0,
+    };
+    const base = await startServer(makeDeps({
+      computeVehicleDetail: async (id, tripId) =>
+        id === 'T1' && tripId === 'D1' ? detail : undefined,
+    }));
+    const res = await fetch(`${base}/terminals/T1/vehicles/D1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as VehicleDetail;
+    expect(body.tripId).toBe('D1');
+    expect(body.routeShortName).toBe('10');
+    expect(body.status).toBe('layover');
+    expect(Array.isArray(body.upcomingStops)).toBe(true);
+  });
+
+  it('404s a vehicle detail for an unknown terminal, trip, or no presence', async () => {
+    const base = await startServer(makeDeps());
+    const unknownTerminal = await fetch(`${base}/terminals/NOPE/vehicles/D1`);
+    expect(unknownTerminal.status).toBe(404);
+    const unknownTrip = await fetch(`${base}/terminals/T1/vehicles/NOPE`);
+    expect(unknownTrip.status).toBe(404);
+  });
+
+  it('serves a validated block timeline for a known block', async () => {
+    const timeline: BlockTimeline = {
+      blockId: 'B1',
+      serviceDate: '20260813',
+      nowSvc: 30000,
+      trips: [
+        {
+          tripId: 'D1',
+          routeId: '1',
+          routeShortName: '10',
+          color: 'FFB81C',
+          directionId: 1,
+          destination: 'Far Stop',
+          start: 28800,
+          end: 32400,
+          state: 'current',
+          departedSeconds: 29000,
+          held: true,
+        },
+      ],
+    };
+    const base = await startServer(makeDeps({
+      computeBlockTimeline: async (blockId) => (blockId === 'B1' ? timeline : undefined),
+    }));
+    const res = await fetch(`${base}/blocks/B1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BlockTimeline;
+    expect(body.blockId).toBe('B1');
+    expect(body.trips).toHaveLength(1);
+    expect(body.trips[0]!.held).toBe(true);
+  });
+
+  it('404s an unknown block timeline', async () => {
+    const base = await startServer(makeDeps());
+    const res = await fetch(`${base}/blocks/NOPE`);
+    expect(res.status).toBe(404);
   });
 });

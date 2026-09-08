@@ -487,3 +487,167 @@ export const terminalsResponseSchema = z.object({
 
 /** Minimal acknowledgement returned after requesting a static GTFS reload. */
 export const staticReloadSchema = z.object({ ok: z.boolean() });
+
+// --- Vehicle detail card + block strip (read-only projections of data the server already holds) ---
+
+/** A scheduled or realtime-augmented stop the selected vehicle will serve next. The TU
+ * prediction window is the source of upcoming stops, with scheduled times filling gaps only
+ * (see FEATURE_VEHICLE_CARD.md). */
+export interface UpcomingStop {
+  stopId: string;
+  stopName: string;
+  stopSequence: number;
+  scheduled: number;        // service-day seconds
+  predicted?: number;       // present only when the feed supplied timing
+  source: 'scheduled' | 'predicted';
+  /** Map-only coordinates; the vehicle card mini map plots upcoming stops as filled dots. */
+  lat?: number;
+  lon?: number;
+}
+
+/** A stop already behind the vehicle, rendered as a hollow dot on the mini map. */
+export interface PassedStop {
+  stopId: string;
+  stopName: string;
+  stopSequence: number;
+  lat?: number;
+  lon?: number;
+}
+
+/** Point-in-time read-only detail for one selected vehicle card at a terminal. Built from
+ * latestRt plus the cached snapshot; it never triggers a feed fetch or engine refresh. */
+export interface VehicleDetail {
+  terminalId: string;
+  tripId: string;            // the run the card represents
+  blockId?: string;
+  vehicleId?: string;
+  routeId: string;
+  routeShortName: string;
+  color?: string;            // GTFS route colors, passed through
+  textColor?: string;
+  destination: string;       // trip's last stop name; primary label
+  directionId?: number;      // UI renders a glyph, never "0"/"1" as text
+  /** Live position: present only when the feed has coordinates for the vehicle. */
+  position?: {
+    lat: number;
+    lon: number;
+    headingDegrees?: number; // prefer feed bearing, else implied toward/away
+    observedAt: number;      // epoch seconds of the VP sample
+    ageSeconds: number;      // > vehiclePositionMaxAgeSeconds => UI greys the marker
+  };
+  status: 'incoming' | 'layover' | 'departed';
+  hold?: { holdSeconds: number; effectiveDeparture: number; reason: string };
+  overdueSeconds?: number;
+  arrivalSource?: 'observed' | 'estimated';
+  nextTripId?: string;       // block successor (97% accurate pre-flip)
+  nextTripDestination?: string;
+  /** Stops of the trip the vehicle currently operates: for an incoming card that is the inbound
+   *  leg the bus is riding (mid-inbound), for layover/departed cards the run itself. */
+  upcomingStops: UpcomingStop[];
+  passedCount: number;       // stops of the current trip already behind the bus
+  /** Map-only: stops behind the bus, rendered hollow on the mini map. */
+  passedStops?: PassedStop[];
+  terminalStop?: { stopId: string; stopName: string; lat?: number; lon?: number };
+}
+
+/** One block-chain trip rendered as a segment on the block strip. */
+export interface BlockTrip {
+  tripId: string;            // internal; UI must not display it as the label
+  routeId: string;
+  routeShortName: string;
+  color?: string;
+  textColor?: string;
+  directionId?: number;
+  destination: string;       // last stop name; primary label
+  start: number;             // service-day seconds (first departure)
+  end: number;               // service-day seconds (last arrival)
+  state: 'past' | 'current' | 'future';   // versus the request's nowSvc
+  departedSeconds?: number;  // observed departure fact when recorded (ledger)
+  held?: boolean;            // departure happened under an applied hold
+}
+
+/** The horizontal timeline of one block for the active service date. */
+export interface BlockTimeline {
+  blockId: string;
+  serviceDate: string;
+  nowSvc: number;
+  trips: BlockTrip[];        // ordered by block seq
+}
+
+const upcomingStopSchema = z.object({
+  stopId: z.string(),
+  stopName: z.string(),
+  stopSequence: z.number(),
+  scheduled: z.number(),
+  predicted: z.number().optional(),
+  source: z.enum(['scheduled', 'predicted']),
+  lat: z.number().optional(),
+  lon: z.number().optional(),
+});
+
+const passedStopSchema = z.object({
+  stopId: z.string(),
+  stopName: z.string(),
+  stopSequence: z.number(),
+  lat: z.number().optional(),
+  lon: z.number().optional(),
+});
+
+/** Validates the read-only vehicle detail payload served by GET /api/terminals/:id/vehicles/:tripId. */
+export const vehicleDetailSchema = z.object({
+  terminalId: z.string(),
+  tripId: z.string(),
+  blockId: z.string().optional(),
+  vehicleId: z.string().optional(),
+  routeId: z.string(),
+  routeShortName: z.string(),
+  color: z.string().optional(),
+  textColor: z.string().optional(),
+  destination: z.string(),
+  directionId: z.number().optional(),
+  position: z.object({
+    lat: z.number(),
+    lon: z.number(),
+    headingDegrees: z.number().optional(),
+    observedAt: z.number(),
+    ageSeconds: z.number(),
+  }).optional(),
+  status: z.enum(['incoming', 'layover', 'departed']),
+  hold: holdOverrideSchema.optional(),
+  overdueSeconds: z.number().optional(),
+  arrivalSource: z.enum(['observed', 'estimated']).optional(),
+  nextTripId: z.string().optional(),
+  nextTripDestination: z.string().optional(),
+  upcomingStops: z.array(upcomingStopSchema),
+  passedCount: z.number(),
+  passedStops: z.array(passedStopSchema).optional(),
+  terminalStop: z.object({
+    stopId: z.string(),
+    stopName: z.string(),
+    lat: z.number().optional(),
+    lon: z.number().optional(),
+  }).optional(),
+});
+
+const blockTripSchema = z.object({
+  tripId: z.string(),
+  routeId: z.string(),
+  routeShortName: z.string(),
+  color: z.string().optional(),
+  textColor: z.string().optional(),
+  directionId: z.number().optional(),
+  destination: z.string(),
+  start: z.number(),
+  end: z.number(),
+  state: z.enum(['past', 'current', 'future']),
+  departedSeconds: z.number().optional(),
+  held: z.boolean().optional(),
+});
+
+/** Validates the block timeline payload served by GET /api/blocks/:blockId. */
+export const blockTimelineSchema = z.object({
+  blockId: z.string(),
+  serviceDate: z.string(),
+  nowSvc: z.number(),
+  trips: z.array(blockTripSchema),
+});

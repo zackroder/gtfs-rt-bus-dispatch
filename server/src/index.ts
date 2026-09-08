@@ -21,7 +21,7 @@ import {
   getServiceDayStart,
   getStaticLoadedAt,
 } from './gtfs/time';
-import type { AppConfig, TerminalMapSnapshot, TerminalSnapshot } from '../../shared/types';
+import type { AppConfig, BlockTimeline, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';
 
 // The process owns one database, provider, engine, and refresh loop. HTTP and WS layers
@@ -184,6 +184,20 @@ async function computeTerminalMap(terminalId: string): Promise<TerminalMapSnapsh
   return engine.buildMapSnapshot(terminalId, snapshot, rt);
 }
 
+async function computeVehicleDetail(terminalId: string, tripId: string): Promise<VehicleDetail | undefined> {
+  // The vehicle card is a read-only projection of the retained feed plus the cached snapshot;
+  // it must never trigger a feed fetch or a refresh cycle.
+  const snapshot = await ensureTerminal(terminalId);
+  if (!snapshot) return undefined;
+  const rt = latestRt ?? { timestamp: 0, tripUpdates: [], vehiclePositions: [] };
+  return engine.vehicleDetail(terminalId, tripId, snapshot, rt);
+}
+
+async function computeBlockTimeline(blockId: string): Promise<BlockTimeline | undefined> {
+  // The block strip is schedule + ledger only, scoped to the active service date.
+  return engine.blockTimeline(blockId);
+}
+
 function subscribe(terminalId: string): void {
   const count = (subscriptions.get(terminalId) ?? 0) + 1;
   subscriptions.set(terminalId, count);
@@ -291,6 +305,8 @@ app.use(
     },
     computeTerminal: ensureTerminal,
     computeTerminalMap,
+    computeVehicleDetail,
+    computeBlockTimeline,
     interventions,
     getVpDiagnostics: () => ({
       generatedAt: Math.floor(Date.now() / 1000),

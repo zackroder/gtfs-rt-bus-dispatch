@@ -2,12 +2,16 @@ import { Router, type Request, type Response } from 'express';
 import type { Database } from 'better-sqlite3';
 import {
   appConfigSchema,
+  blockTimelineSchema,
   interventionActionSchema,
   terminalMapSnapshotSchema,
+  vehicleDetailSchema,
   type AppConfig,
+  type BlockTimeline,
   type InterventionStatus,
   type TerminalMapSnapshot,
   type TerminalSnapshot,
+  type VehicleDetail,
 } from '../../../shared/types';
 import { recordConfigEvent, redactConfig } from '../config';
 import { routeStyle } from '../engine/terminal';
@@ -32,6 +36,8 @@ export interface ApiDeps {
   // terminal always resolves once a realtime snapshot exists, and rejects on engine failure.
   computeTerminal(terminalId: string): Promise<TerminalSnapshot | undefined>;
   computeTerminalMap(terminalId: string): Promise<TerminalMapSnapshot | undefined>;
+  computeVehicleDetail(terminalId: string, tripId: string): Promise<VehicleDetail | undefined>;
+  computeBlockTimeline(blockId: string): Promise<BlockTimeline | undefined>;
   getHealth(): {
     ok: boolean;
     lastRefreshAt: number | null;
@@ -266,6 +272,39 @@ export function createApi(deps: ApiDeps): Router {
       return;
     }
     sendJson(res, 200, terminalMapSnapshotSchema.parse(map));
+  });
+
+  router.get('/terminals/:id/vehicles/:tripId', async (req, res) => {
+    // Read-only vehicle card projection over latestRt + the cached snapshot. A 404 covers an
+    // unknown terminal, a trip absent from static, or a trip with no presence at the terminal.
+    let detail: VehicleDetail | undefined;
+    try {
+      detail = await deps.computeVehicleDetail(req.params.id, req.params.tripId);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    if (!detail) {
+      sendJson(res, 404, { error: `no live data for trip ${req.params.tripId} at terminal ${req.params.id}` });
+      return;
+    }
+    sendJson(res, 200, vehicleDetailSchema.parse(detail));
+  });
+
+  router.get('/blocks/:blockId', async (req, res) => {
+    // Read-only block timeline for the active service date; unknown blocks 404.
+    let timeline: BlockTimeline | undefined;
+    try {
+      timeline = await deps.computeBlockTimeline(req.params.blockId);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    if (!timeline) {
+      sendJson(res, 404, { error: `unknown block ${req.params.blockId}` });
+      return;
+    }
+    sendJson(res, 200, blockTimelineSchema.parse(timeline));
   });
 
   router.get('/config', (_req, res) => {

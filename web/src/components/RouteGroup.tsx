@@ -10,10 +10,14 @@ export function RouteGroup({
   route,
   generatedAt,
   serviceDayStartSeconds,
+  selectedTripId,
+  onSelect,
 }: {
   route: RouteState;
   generatedAt: number;
   serviceDayStartSeconds: number;
+  selectedTripId: string | null;
+  onSelect: (tripId: string) => void;
 }) {
   // Empty is computed across all groups because an intervention is activity even
   // when no vehicle currently occupies the lookahead lists.
@@ -42,6 +46,8 @@ export function RouteGroup({
               bus={bus}
               generatedAt={generatedAt}
               serviceDayStartSeconds={serviceDayStartSeconds}
+              onSelect={onSelect}
+              selected={bus.tripId === selectedTripId}
             />
           ))}
         </div>
@@ -68,6 +74,8 @@ export function RouteGroup({
               routeColor={route.color}
               routeTextColor={route.textColor}
               serviceDayStartSeconds={serviceDayStartSeconds}
+              onSelect={onSelect}
+              selected={bus.nextTripId === selectedTripId}
             />
           ))}
         </div>
@@ -80,6 +88,8 @@ export function RouteGroup({
               key={`${bus.tripId}-${bus.vehicleId ?? ''}`}
               bus={bus}
               serviceDayStartSeconds={serviceDayStartSeconds}
+              onSelect={onSelect}
+              selected={bus.tripId === selectedTripId}
             />
           ))}
         </div>

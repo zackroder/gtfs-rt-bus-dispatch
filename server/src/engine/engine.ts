@@ -1,6 +1,7 @@
 import type { Database } from 'better-sqlite3';
 import type {
   AppConfig,
+  BlockTimeline,
   DepartedBus,
   IncomingBus,
   LayoverBus,
@@ -10,6 +11,7 @@ import type {
   TerminalMapSnapshot,
   TerminalMapStop,
   TerminalSnapshot,
+  VehicleDetail,
   VehicleMapMarker,
   VehicleMapStatus,
   VehiclePositionInfo,
@@ -35,6 +37,7 @@ import {
 import { decideTriplets, suggestionExpiresAt } from './dispatch';
 import { outboundRoutesAtTerminal, routeStyle, type RouteStyle } from './terminal';
 import { bearingDegrees, distanceMeters, distanceToStopMeters, nearestStopMeters, stopCoordinates, type GeoPoint } from './geometry';
+import { buildVehicleDetail, buildBlockTimeline, type RunInfo } from './vehicleDetail';
 
 // Engine owns the cross-refresh ledger: realtime snapshots are transient, while observed
 // VP facts and approved interventions must survive feed gaps and process restarts.
@@ -1039,6 +1042,122 @@ export class Engine {
       stops,
       vehicles,
     };
+  }
+
+  // Lift the read-only classification/card values for the selected trip out of a cached
+  // snapshot. The refresh already computed the authoritative status/arrival-source/overdue
+  // values; the card projection forwards them rather than re-deriving dispatch state.
+  private runInfoFor(snapshot: TerminalSnapshot, tripId: string): RunInfo | undefined {
+    for (const route of snapshot.routes) {
+      for (const bus of route.incoming) {
+        // An inbound card represents the outbound run it is forming, not the leg it rides on;
+        // currentTripId keeps the detail's stops on the leg the bus is actually operating.
+        if (bus.nextTripId !== tripId) continue;
+        return { status: 'incoming', currentTripId: bus.tripId, arrivalSource: 'estimated' };
+      }
+      for (const bus of route.layovers) {
+        if (bus.tripId !== tripId) continue;
+        return {
+          status: 'layover',
+          arrivalSource: bus.terminalArrivalSource,
+          overdueSeconds: bus.overdueSeconds,
+        };
+      }
+      for (const bus of route.departed) {
+        if (bus.tripId !== tripId) continue;
+        return { status: 'departed' };
+      }
+    }
+    return undefined;
+  }
+
+  // Read-only vehicle-card projection from a cached snapshot plus the retained raw feed. It
+  // mirrors buildMapSnapshot's cache discipline: no feed fetch and no engine mutation. Returns
+  // undefined (HTTP 404) for an unknown terminal, a trip absent from static, or a trip with no
+  // card presence at the terminal.
+  vehicleDetail(terminalId: string, tripId: string, snapshot: TerminalSnapshot, rt: RealtimeSnapshot, now: Date = new Date()): VehicleDetail | undefined {
+    const config = this.getConfig();
+    const terminal = config.terminals.find((t) => t.id === terminalId);
+    if (!terminal) return undefined;
+    const ends = this.tripEnds();
+    const tripEnd = ends.get(tripId);
+    if (!tripEnd) return undefined;
+    const run = this.runInfoFor(snapshot, tripId);
+    if (!run) return undefined;
+    const trip = this.db
+      .prepare('SELECT route_id, block_id, direction_id FROM trips WHERE trip_id = ?')
+      .get(tripId) as { route_id: string; block_id: string | null; direction_id: number | null } | undefined;
+    if (!trip) return undefined;
+
+    const serviceDayStartSeconds = snapshot.serviceDayStartSeconds;
+    const timeZone = config.agencyTimezone;
+    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds, timeZone);
+    const activeIds = activeServiceIds(this.db, activeServiceDate(now, serviceDayStartSeconds, timeZone));
+    const style = this.routeStyleFor(trip.route_id);
+    const coords = this.stopCoords();
+
+    // Arrow headings point toward the terminal center, averaged over its configured stops as
+    // buildMapSnapshot does so a missing coordinate cannot cluster the view.
+    let latSum = 0;
+    let lonSum = 0;
+    let count = 0;
+    for (const stopId of terminal.stopIds) {
+      const coord = coords.get(stopId);
+      if (!coord) continue;
+      latSum += coord.lat;
+      lonSum += coord.lon;
+      count++;
+    }
+    const center: GeoPoint = count > 0 ? { lat: latSum / count, lon: lonSum / count } : { lat: 0, lon: 0 };
+
+    return buildVehicleDetail({
+      db: this.db,
+      terminal,
+      tripId,
+      routeId: trip.route_id,
+      blockId: trip.block_id ?? undefined,
+      directionId: trip.direction_id ?? undefined,
+      destination: tripEnd.lastStopName,
+      rt,
+      generatedAt: snapshot.generatedAt,
+      nowSvc,
+      serviceDayStartSeconds,
+      timeZone,
+      tripEnds: ends,
+      blockChains: this.blockChains(activeIds),
+      stopNames: this.stopNames(),
+      stopCoords: coords,
+      routeShortName: style.shortName,
+      color: style.color,
+      textColor: style.textColor,
+      run,
+      // The applied/locked hold survives on the ledger past completion, so a departed bus
+      // that left under a hold still reports it here.
+      hold: this.ledger.get(tripId)?.hold,
+      center,
+    });
+  }
+
+  // Read-only block strip scoped to the active service date, like the queue reads and the
+  // block chains. An unknown block, or a block with no trip on an active service, returns
+  // undefined (HTTP 404) rather than an empty timeline.
+  blockTimeline(blockId: string, now: Date = new Date()): BlockTimeline | undefined {
+    const config = this.getConfig();
+    const serviceDayStartSeconds = getServiceDayStart(this.db);
+    const timeZone = config.agencyTimezone;
+    const serviceDate = activeServiceDate(now, serviceDayStartSeconds, timeZone);
+    const nowSvc = nowServiceSeconds(now, serviceDayStartSeconds, timeZone);
+    const activeIds = activeServiceIds(this.db, serviceDate);
+    return buildBlockTimeline({
+      db: this.db,
+      blockId,
+      serviceDate,
+      nowSvc,
+      activeServiceIds: activeIds,
+      tripEnds: this.tripEnds(),
+      routeStyleFor: (routeId) => this.routeStyleFor(routeId),
+      ledger: this.ledger,
+    });
   }
 
   // Normalize one bus into an arrow marker, joining its identity to the raw VP feed. The heading

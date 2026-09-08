@@ -5,13 +5,22 @@ import { formatClock } from '../format';
 export function DepartedCard({
   bus,
   serviceDayStartSeconds,
+  onSelect,
+  selected = false,
 }: {
   bus: DepartedBus;
   serviceDayStartSeconds: number;
+  onSelect?: (tripId: string) => void;
+  selected?: boolean;
 }) {
   // A held departure is marked in the same compact line as its actual departure time.
   return (
-    <div className="card departed-card">
+    <div
+      className={`card departed-card ${selected ? 'selected' : ''}`}
+      role="button"
+      aria-pressed={selected}
+      onClick={() => onSelect?.(bus.tripId)}
+    >
       <div className="card-main">
         <span className="vehicle-id">{bus.vehicleId ? `#${bus.vehicleId}` : bus.tripId}</span>
         <span className="run">{bus.tripId}</span>

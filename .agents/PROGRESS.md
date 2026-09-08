@@ -14,6 +14,7 @@ this file (and the decisions log) after finishing any milestone.
 - [x] Phase 6 — Config UI + deployment polish
 - [x] Phase 7 — Triplet dispatch refactor
 - [x] Phase 8 — Persistent intervention queue and fact integrity
+- [x] Phase 9 — Vehicle detail card + block strip
 
 ---
 
@@ -184,6 +185,57 @@ I/O) so it can be reviewed and unit-tested in isolation.
 - [x] Persist observed run facts by service date and restore them on restart.
 - [x] Add realtime request timeouts, stale snapshot cleanup, response schemas,
       and shared countdown timing.
+
+---
+
+## Phase 9 — Vehicle detail card + block strip (complete)
+
+Selecting any bus card in a terminal view opens a read-only panel: a mini map
+with the vehicle's live arrow and its upcoming stop dots, the upcoming-stops
+list, and the run's block strip. Implemented per `.agents/FEATURE_VEHICLE_CARD.md`;
+both projections are read-only over `latestRt` + the snapshot caches (never a
+feed fetch, never `engine.refresh`).
+
+### 9.1 Server
+- [x] Shared DTOs + zod schemas: `VehicleDetail`, `UpcomingStop`, `PassedStop`,
+      `BlockTimeline`, `BlockTrip` (`shared/types.ts`).
+- [x] Extract `buildTripToVehicle`/`resolveVehicleForTrip` in `headway.ts` so
+      `buildDepartures` and the card resolve the vehicle identically (TU
+      assignment, else block predecessor, else VP tripId inversion).
+- [x] New `server/src/engine/vehicleDetail.ts`: pure `buildVehicleDetail` +
+      `buildBlockTimeline` (TU prediction window authority for upcoming stops,
+      schedule-clock fallback with 120 s grace, 8-stop cap, passed dots,
+      deterministic direction shading data, service-date-scoped block chains).
+- [x] Thin `Engine.vehicleDetail` / `Engine.blockTimeline` wrappers using the
+      existing caches (`tripEnds`, `blockChains`, `stopNames`, `stopCoords`,
+      `routeStyles`, ledger) with the same discipline as `buildMapSnapshot`.
+- [x] Endpoints `GET /api/terminals/:id/vehicles/:tripId` and
+      `GET /api/blocks/:blockId` with zod boundary validation and 404s.
+
+### 9.2 Web
+- [x] `web/src/routeColor.ts` (`normalizeGtfsColor`, `relativeLuma`,
+      `readableOn`, `shadeForDirection`); `RouteBadge` refactored to use it.
+- [x] Shared rotated-SVG arrow (`web/src/components/VehicleArrow.ts`) extracted
+      from `TerminalMap` and reused by the mini map.
+- [x] Card selection in `TerminalView` (BusCard uses `nextTripId`, layover/
+      departed use `tripId`); detail panel polls every 10 s and fetches the
+      block strip once per selection. *(Presentation follow-up 2026-09-04: the
+      panel renders as a bottom-sheet overlay with a click-to-close backdrop,
+      not inline under the route group, so the selected run stays prominent.)*
+- [x] `BlockStrip`: pure SVG with a prominent route number, direction shading,
+      text contrast on the final shaded background, "now" line, and departure ticks.
+
+### 9.3 Verify
+- [x] Engine unit tests (TU window with absolute times, mixed sources, current
+      stop excluded, schedule fallback, 8-stop cap, unmatched/no-vehicle trips).
+- [x] Block strip builder tests (ordering, state windows, departure fact + held
+      propagation, unknown block).
+- [x] API contract tests in `routes.test.ts` (200 + zod-valid bodies, 404s).
+- [x] Color util unit tests (`shadeForDirection`, `readableOn`, `#`-less input).
+- [x] `npm run typecheck`, `npm run lint`, `npm test` green, including a full
+      suite run under `TZ=America/New_York`.
+
+---
 
 ## Decisions log
 
@@ -441,6 +493,22 @@ I/O) so it can be reviewed and unit-tested in isolation.
      per (zone, UTC hour) so DST transitions cannot straddle a bucket. The
      test suite now passes with the host in any timezone (verified under
      `TZ=America/New_York`); engine fixtures pin the agency zone to UTC.
+- **2026-09-04 — Vehicle detail card + block strip**: selecting a bus card opens
+  a read-only panel over `latestRt` + the snapshot caches — never a feed fetch
+  and never `engine.refresh`. The TU prediction window is the authority for
+  upcoming stops (its first entry is the next stop; the current stop is excluded
+  even if the feed includes it; the exact terminus is usually missing anyway).
+  Schedule-clock windowing (120 s grace) is only the no-TU fallback. Vehicle
+  resolution reuses `buildDepartures`' chain via new shared helpers
+  (`buildTripToVehicle`/`resolveVehicleForTrip`). The block strip is
+  service-date scoped like the queue reads, and the block is looked up from
+  `VehicleDetail.blockId` so the strip can be cached/refetched separately. The
+  strip layers three identifiers because GTFS colors repeat: a prominent bold
+  route number, a deterministic direction shade of the route color
+  (`shadeForDirection`: ~40% toward white, or ~25% toward black above luma
+  200), and text contrast recomputed on the final shaded background. The GTFS
+  `trip_id` is never shown to operators — route number + destination label each
+  segment.
 
 ## Build notes
 

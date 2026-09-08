@@ -15,6 +15,7 @@ export interface TripSpec {
   tripId: string;
   routeId?: string;
   blockId?: string;
+  directionId?: number;
   stopTimes: StopTimeSpec[];
 }
 
@@ -74,7 +75,7 @@ export function syntheticGtfs(opts: {
     routeId: t.routeId ?? '1',
     serviceId: 'SVC1',
     blockId: t.blockId ?? undefined,
-    directionId: undefined,
+    directionId: t.directionId ?? undefined,
     headsign: 'Test',
   }));
   const stopTimes = opts.trips.flatMap((t) =>

@@ -65,6 +65,11 @@ Declined, canceled, and expired recommendations never affect dispatch.
 - **Debug map** — geofence circles around a terminal's stops plus color-coded
   arrows for live vehicles (inbound, arriving, laying over, departing,
   departed). Linked from each terminal view.
+- **Vehicle card detail** — selecting any bus card opens a panel with a mini
+  map (live arrow, upcoming stop dots), the upcoming stops list (schedule
+  times with "est" when the TripUpdates feed predicts them), and the run's
+  block strip: one colored segment per trip labeled by route number,
+  destination, and direction (deterministic shading of the route color).
 - **Live updates** — GTFS-Realtime polling pushed to the UI over WebSocket, with
   a polling fallback.
 - **Configurable rules** — rest, hold, and lookahead parameters plus feed URLs,
@@ -156,6 +161,14 @@ routes (co-located terminals); `radiusMeters` overrides the global
   `departed[]`, `interventions[]`.
 - `GET /api/terminals/:id/map` — geofence circles and live vehicle positions
   for the debug map.
+- `GET /api/terminals/:id/vehicles/:tripId` — read-only detail for one vehicle
+  card: live position + heading, upcoming stops (schedule times, `est` when a
+  realtime prediction exists), block identity, hold state, and the block
+  successor. 404 for an unknown terminal, a trip absent from static, or a trip
+  with no live presence at the terminal.
+- `GET /api/blocks/:blockId` — the block strip for the active service date:
+  one segment per trip (past/current/future, observed departure ticks). 404 for
+  an unknown block.
 - `GET /api/interventions?terminalId=T` — intervention queue for the active
   service day.
 - `GET /api/interventions/:id` — one intervention and its current status.
