@@ -109,6 +109,8 @@ export default function TerminalMap() {
     const bounds: L.LatLngBounds = L.latLngBounds([]);
 
     // Draw the geofence circles in a fixed order so the arrival ring (smallest) stays on top.
+    // Stop-status is the primary arrival/departure signal, so these buffers are the geometry-only
+    // fallback geofence: drawn de-emphasized (dashed, lighter fill) and labeled "fallback".
     const kindOrder = ['departure', 'movement', 'arrival'] as const;
     const kindColor = { arrival: '#f59e0b', movement: '#3b82f6', departure: '#ea580c' } as const;
     for (const kind of kindOrder) {
@@ -117,21 +119,26 @@ export default function TerminalMap() {
           radius: buffer.radiusMeters,
           color: kindColor[kind],
           weight: 1,
-          fillOpacity: kind === 'arrival' ? 0.15 : 0.05,
+          dashArray: buffer.fallback === true ? '4 4' : undefined,
+          fillOpacity: kind === 'arrival' ? 0.1 : 0.04,
         })
-          .bindTooltip(`${kind} · ${buffer.radiusMeters}m · ${buffer.stopId}`)
+          .bindTooltip(`${buffer.fallback === true ? 'fallback ' : ''}${kind} · ${buffer.radiusMeters}m · ${buffer.stopId}`)
           .addTo(layer);
         bounds.extend([buffer.lat, buffer.lon]);
       }
     }
 
-    // Render vehicle arrows last so they sit above the circles.
+    // Render vehicle arrows last so they sit above the circles. The tooltip now shows the feed's
+    // own reported stop + status alongside the derived classification.
     for (const marker of data.vehicles) {
       const color = STATUS_COLORS[marker.status];
+      const reported = marker.currentStatus
+        ? ` · ${marker.currentStatus}${marker.currentStopName ? ` @ ${marker.currentStopName}` : ''}`
+        : '';
       L.marker([marker.lat, marker.lon], {
         icon: arrowDivIcon({ fill: color, headingDegrees: marker.headingDegrees ?? 0, label: marker.label }),
       })
-        .bindTooltip(`${marker.label} · ${marker.status}`)
+        .bindTooltip(`${marker.label} · ${marker.status}${reported}`)
         .addTo(layer);
       bounds.extend([marker.lat, marker.lon]);
     }
@@ -161,6 +168,10 @@ export default function TerminalMap() {
       </header>
       <h1>{terminal?.name ?? id} · map</h1>
       <MapLegend />
+      <div className="map-note">
+        Circles are the <strong>fallback</strong> geofence (used only when the feed omits
+        stop-status); vehicle markers show the feed's reported stop + status in their tooltips.
+      </div>
       {terminalError && <div className="error">{terminalError}</div>}
       {mapError && <div className="error">{mapError}</div>}
       <div ref={containerRef} className="map-container" />

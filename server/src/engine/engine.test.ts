@@ -166,6 +166,33 @@ function testData(engine: Engine) {
   return engineData.get(engine)!;
 }
 
+// Build an engine over a custom synthetic fixture (different stop layout / terminal membership)
+// with the same deterministic config as makeEngine, for flip-boundary scenarios.
+function makeEngineWithFixture(gtfs: ReturnType<typeof syntheticGtfs>, stopIds: string[]): Engine {
+  const db = createDatabase(':memory:');
+  loadStatic(db, gtfs);
+  const cfg: AppConfig = {
+    realtime: { tripUpdatesUrl: 'http://localhost/tu.pb' },
+    staticGtfsUrl: 'http://localhost/gtfs.zip',
+    agencyTimezone: 'UTC',
+    refreshIntervalSeconds: 10,
+    staticRefreshHours: 24,
+    minRestMinutes: 5,
+    maxHoldMinutes: 10,
+    leadTimeMinutes: 5,
+    lookaheadMinutes: 90,
+    terminals: [{ id: 'T', name: 'Terminal', stopIds, routeIds: ['1'] }],
+    arrivalRadiusMeters: 150,
+    stationaryDisplacementMeters: 20,
+    confirmPings: 1,
+    departPings: 1,
+  };
+  const interventions = new InterventionStore(db);
+  const engine = new Engine(db, () => cfg, interventions);
+  engineData.set(engine, { store: interventions, db, config: cfg });
+  return engine;
+}
+
 function stdRt(): RealtimeSnapshot {
   // The standard snapshot has one departed leader, one assigned layover, and two incoming buses.
   return {
@@ -194,12 +221,14 @@ function vpAtStop(
   stopId: string,
   hhmm: string,
   currentStopSequence?: number,
+  currentStatus?: VehiclePositionInfo['currentStatus'],
 ): VehiclePositionInfo {
   return {
     vehicleId,
     tripId,
     stopId,
     currentStopSequence,
+    currentStatus,
     // Position the vehicle at the fixture's stop coordinates so the geometric fact pass has
     // lat/lon to measure proximity against terminal stops.
     lat: stopCoord(stopId).lat,
@@ -1095,5 +1124,259 @@ describe('engine triplet dispatch', () => {
     const after = route1(engine.refresh(gap, nowAt('08:11'))[0]!);
     expect(after.layovers.some((l) => l.tripId === 'D2')).toBe(true);
     expect(after.incoming.some((i) => i.tripId === 'P2')).toBe(false);
+  });
+
+  // --- Stop-status (primary signal) ---
+
+  it('records a stop-status arrival immediately from STOPPED_AT at a terminal stop', () => {
+    const engine = makeEngine();
+    // The two-ping production defaults do not delay a STOPPED_AT fact: it commits on the first
+    // observation without needing geometric dwell confirmation.
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+    expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('stopped_at');
+  });
+
+  it('INCOMING_AT at a terminal stop arms the arrival and STOPPED_AT commits the stopped time', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    const incoming: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'INCOMING_AT')],
+    };
+    const first = route1(engine.refresh(incoming, nowAt('08:08'))[0]!);
+    const d2First = first.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2First.arrivalPending).toBe(true);
+    expect(d2First.terminalArrival).toBeUndefined();
+
+    const stopped: RealtimeSnapshot = {
+      timestamp: unixAt('08:09'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:09', 1, 'STOPPED_AT')],
+    };
+    const second = route1(engine.refresh(stopped, nowAt('08:09'))[0]!);
+    const d2 = second.layovers.find((l) => l.tripId === 'D2')!;
+    // The committed time is the STOPPED_AT instant (the physical stop), not the earlier
+    // INCOMING_AT sample, so the operator-rest clock starts when the bus actually stops.
+    expect(d2.terminalArrival).toBe(svc('08:09'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+    expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('stopped_at');
+  });
+
+  it('records a stop-status departure from an outbound entity reporting a non-terminal stop', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    testData(engine).config.departPings = 2;
+    // Establish the layover first: V2 arrives on P2 (STOPPED_AT at the terminal).
+    engine.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    }, nowAt('08:08'));
+    // The outbound entity now reports a non-terminal stop: the bus has pulled out.
+    const enRoute: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'MID', '08:12', undefined, 'IN_TRANSIT_TO')],
+    };
+    const snapshot = route1(engine.refresh(enRoute, nowAt('08:12'))[0]!);
+    const d2 = snapshot.departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+    expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('in_transit_to');
+  });
+
+  it('keeps the observed stop-status arrival over the TU prediction', () => {
+    const engine = makeEngine();
+    // TU predicts D2's departure window; VP STOPPED_AT at the terminal records the observed
+    // arrival, and that recorded fact (not the TU estimate) drives the layover card.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [
+        {
+          tripId: 'D2',
+          vehicleId: 'V2',
+          stopTimeUpdates: [{ stopId: 'T', stopSequence: 0, departureTime: unixAt('08:07') }],
+          timestamp: unixAt('08:07'),
+        },
+      ],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'T', '08:08', 0, 'STOPPED_AT')],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+  });
+
+  it('records a co-located flip-boundary arrival from the inbound entity at the shared terminal stop', () => {
+    const engine = makeEngine();
+    // P2's last stop and D2's first stop are the SAME terminal stop T. The vehicle still carries
+    // the inbound trip; the flip-aware target resolves the arrival to the outbound run D2.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+  });
+
+  it('records a split-bay flip-boundary arrival across two terminal stops', () => {
+    // The arrival bay (T_arr) and departure bay (T_dep) are distinct stops, both members of the
+    // terminal. The inbound entity STOPPED_AT at the arrival bay must resolve the arrival to the
+    // outbound trip that starts at the departure bay.
+    const gtfs = syntheticGtfs({
+      stops: [
+        { stopId: 'T_arr', name: 'Arrival Bay', lat: 41.8, lon: -87.6 },
+        { stopId: 'T_dep', name: 'Departure Bay', lat: 41.799, lon: -87.599 },
+        { stopId: 'B', name: 'Far Stop', lat: 41.7, lon: -87.7 },
+      ],
+      trips: [
+        {
+          tripId: 'P1',
+          blockId: 'A',
+          stopTimes: [
+            { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+            { stopId: 'T_arr', arr: '08:05:00', dep: '08:05:00', dropOff: 0 },
+          ],
+        },
+        {
+          tripId: 'D1',
+          blockId: 'A',
+          stopTimes: [
+            { stopId: 'T_dep', arr: '08:10:00', dep: '08:10:00', pickup: 0 },
+            { stopId: 'B', arr: '08:40:00', dep: '08:40:00', dropOff: 0 },
+          ],
+        },
+      ],
+    });
+    const engine = makeEngineWithFixture(gtfs, ['T_arr', 'T_dep']);
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:05'),
+      tripUpdates: [],
+      vehiclePositions: [{
+        vehicleId: 'V2',
+        tripId: 'P1',
+        stopId: 'T_arr',
+        currentStatus: 'STOPPED_AT',
+        lat: 41.8,
+        lon: -87.6,
+        timestamp: unixAt('08:05'),
+      }],
+    };
+    const snapshot = engine.refresh(rt, nowAt('08:05'))[0]!;
+    const route = snapshot.routes.find((r) => r.routeId === '1')!;
+    const d1 = route.layovers.find((l) => l.tripId === 'D1')!;
+    expect(d1.terminalArrival).toBe(svc('08:05'));
+    expect(d1.terminalArrivalSource).toBe('observed');
+  });
+
+  it('falls back to geometry when the feed omits stop status and stop_id', () => {
+    const engine = makeEngine();
+    // No currentStatus, no stopId: only coordinates. The geometric dwell (confirmPings=1 fixture
+    // default) must still record the observed arrival with its geometric evidence.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [{
+        vehicleId: 'V2',
+        tripId: 'P2',
+        lat: 41.800001,
+        lon: -87.600001,
+        timestamp: unixAt('08:08'),
+      }],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+    expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('geofence_dwell');
+  });
+
+  it('records a geometric motion-exit departure when status/stop_id are absent', () => {
+    const engine = makeEngine();
+    engine.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [{ vehicleId: 'V2', tripId: 'P2', lat: 41.800001, lon: -87.600001, timestamp: unixAt('08:08') }],
+    }, nowAt('08:08'));
+    // No status/stop_id on the outbound entity either: the layover departure is recovered by
+    // motion/geometry once the bus leaves the terminal area.
+    const left: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [{ vehicleId: 'V2', tripId: 'D2', lat: 41.72, lon: -87.69, timestamp: unixAt('08:12') }],
+    };
+    const snapshot = route1(engine.refresh(left, nowAt('08:12'))[0]!);
+    const d2 = snapshot.departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+  });
+
+  it('deduplicates multi-entity VP, preferring the terminal-stop entity on timestamp ties', () => {
+    const engine = makeEngine();
+    // During a flip V2 appears under two tripIds at the same instant: the inbound at a
+    // non-terminal stop and the outbound STOPPED_AT at the terminal. Dedup must keep the terminal
+    // entity so the stop-status arrival is recorded, and must not double-process the vehicle.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [
+        {
+          vehicleId: 'V2', tripId: 'P2', stopId: 'B', currentStatus: 'IN_TRANSIT_TO',
+          lat: 41.7, lon: -87.7, timestamp: unixAt('08:08'),
+        },
+        {
+          vehicleId: 'V2', tripId: 'D2', stopId: 'T', currentStatus: 'STOPPED_AT',
+          lat: 41.8, lon: -87.6, timestamp: unixAt('08:08'),
+        },
+      ],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(engine.getFactEventDiagnostics().some((e) => e.evidence === 'stopped_at')).toBe(true);
+    expect(engine.getVehiclePositionDiagnostics().filter((d) => d.vehicleId === 'V2')).toHaveLength(1);
+  });
+
+  it('deduplicates multi-entity VP, keeping the entity with the latest timestamp', () => {
+    const engine = makeEngine();
+    // Establish the layover, then emit a stale terminal remnant and a newer en-route entity in the
+    // same poll. The newer outbound observation must win so the departure is not masked by the
+    // older STOPPED_AT duplicate.
+    engine.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    }, nowAt('08:08'));
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [
+        {
+          vehicleId: 'V2', tripId: 'D2', stopId: 'T', currentStatus: 'STOPPED_AT',
+          lat: 41.8, lon: -87.6, timestamp: unixAt('08:11'),
+        },
+        {
+          vehicleId: 'V2', tripId: 'D2', stopId: 'MID', currentStatus: 'IN_TRANSIT_TO',
+          lat: 41.75, lon: -87.65, timestamp: unixAt('08:12'),
+        },
+      ],
+    };
+    const snapshot = route1(engine.refresh(rt, nowAt('08:12'))[0]!);
+    const d2 = snapshot.departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+    expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('in_transit_to');
   });
 });

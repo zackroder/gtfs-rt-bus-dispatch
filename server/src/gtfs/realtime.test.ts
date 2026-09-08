@@ -111,9 +111,30 @@ describe('realtime decode', () => {
       tripId: undefined,
       stopId: undefined,
       currentStopSequence: undefined,
+      currentStatus: undefined,
       lat: undefined,
       lon: undefined,
       timestamp: 1700000006,
     });
+  });
+
+  it('decodes current_status into the union and does not invent one when absent', () => {
+    const buffer = encodeFeed(
+      { gtfsRealtimeVersion: '2.0', timestamp: 1700000000 },
+      [
+        { id: 'incoming', vehicle: { vehicle: { id: 'V1' }, trip: { tripId: 'T1' }, currentStatus: 0, stopId: 'S1' } },
+        { id: 'stopped', vehicle: { vehicle: { id: 'V2' }, trip: { tripId: 'T2' }, currentStatus: 1, stopId: 'S2' } },
+        { id: 'transit', vehicle: { vehicle: { id: 'V3' }, trip: { tripId: 'T3' }, currentStatus: 2, stopId: 'S3' } },
+        // Absent on the wire: the protobuf default (IN_TRANSIT_TO=2) must NOT surface as a status.
+        { id: 'absent', vehicle: { vehicle: { id: 'V4' }, trip: { tripId: 'T4' }, stopId: 'S4' } },
+      ],
+    );
+    const positions = decodeVehiclePositions(buffer, 1700000000);
+    expect(positions.map((p) => p.currentStatus)).toEqual([
+      'INCOMING_AT',
+      'STOPPED_AT',
+      'IN_TRANSIT_TO',
+      undefined,
+    ]);
   });
 });

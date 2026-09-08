@@ -573,6 +573,12 @@ textarea {
   display: inline-block;
 }
 
+.map-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 4px 0 0;
+}
+
 .map-arrow {
   background: transparent;
   border: none;

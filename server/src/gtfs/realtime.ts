@@ -1,5 +1,5 @@
 import { transit_realtime } from 'gtfs-realtime-bindings';
-import type { StopTimePrediction, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
+import type { StopTimePrediction, TripUpdateInfo, VehiclePositionInfo, VehicleStopStatus } from '../../../shared/types';
 
 const FeedMessage = transit_realtime.FeedMessage;
 
@@ -85,6 +85,18 @@ export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number
     const tripId = vp.trip?.tripId;
     const stopId = vp.stopId ?? undefined;
     const stopSequence = toSeconds(vp.currentStopSequence);
+    // current_status is a protobuf enum whose field default is IN_TRANSIT_TO (2); the bindings
+    // expose that default even when the feed omitted the field. Guard on the field's own presence so
+    // an absent value never reads as a real status (see shared/types.ts VehicleStopStatus).
+    let currentStatus: VehicleStopStatus | undefined;
+    if (vp.currentStatus !== null && Object.prototype.hasOwnProperty.call(vp, 'currentStatus')) {
+      currentStatus =
+        vp.currentStatus === transit_realtime.VehiclePosition.VehicleStopStatus.INCOMING_AT
+          ? 'INCOMING_AT'
+          : vp.currentStatus === transit_realtime.VehiclePosition.VehicleStopStatus.STOPPED_AT
+            ? 'STOPPED_AT'
+            : 'IN_TRANSIT_TO';
+    }
     // Position coordinates are required for proximity-based terminal detection; a provider
     // that omits them simply leaves the geometry fields unset.
     const lat = vp.position ? toSeconds(vp.position.latitude) : undefined;
@@ -95,6 +107,7 @@ export function decodeVehiclePositions(buffer: Buffer, fallbackTimestamp: number
       tripId: tripId || undefined,
       stopId: stopId || undefined,
       currentStopSequence: stopSequence !== undefined && stopSequence > 0 ? stopSequence : undefined,
+      currentStatus,
       lat: Number.isFinite(lat) ? lat : undefined,
       lon: Number.isFinite(lon) ? lon : undefined,
       bearing: Number.isFinite(bearing) ? bearing : undefined,
