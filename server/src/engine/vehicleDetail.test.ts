@@ -326,6 +326,69 @@ describe('vehicleDetail', () => {
     expect(detail.upcomingStops.length).toBeGreaterThan(0);
     expect(detail.upcomingStops.every((s) => s.source === 'scheduled')).toBe(true);
   });
+
+  it('shows the inbound leg stops for an incoming card instead of the run being formed', () => {
+    const trips: TripSpec[] = [
+      {
+        tripId: 'P1',
+        blockId: 'B1',
+        routeId: '1',
+        directionId: 0,
+        stopTimes: [
+          { stopId: 'B', arr: '08:00:00', dep: '08:00:00', pickup: 0 },
+          { stopId: 'M1', arr: '08:02:00', dep: '08:02:00' },
+          { stopId: 'M2', arr: '08:04:00', dep: '08:04:00' },
+          { stopId: 'T', arr: '08:06:00', dep: '08:06:00', dropOff: 0 },
+        ],
+      },
+      {
+        tripId: 'D1',
+        blockId: 'B1',
+        routeId: '1',
+        directionId: 1,
+        stopTimes: [
+          { stopId: 'T', arr: '08:10:00', dep: '08:10:00', pickup: 0 },
+          { stopId: 'B', arr: '08:40:00', dep: '08:40:00', dropOff: 0 },
+        ],
+      },
+    ];
+    const harness = makeEngine(trips, {
+      stops: [
+        ...detailStops,
+        { stopId: 'M1', name: 'Mid 1', lat: 41.78, lon: -87.63 },
+        { stopId: 'M2', name: 'Mid 2', lat: 41.79, lon: -87.62 },
+      ],
+    });
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:03'),
+      tripUpdates: [
+        // The inbound window includes the current stop M1 (must be excluded) plus M2 and T.
+        tu('P1', 'V1', [
+          { stopId: 'M1', stopSequence: 1, arrivalTime: unixAt('08:03') },
+          { stopId: 'M2', stopSequence: 2, arrivalTime: unixAt('08:05') },
+          { stopId: 'T', stopSequence: 3, arrivalTime: unixAt('08:07') },
+        ]),
+        // The run's own window would predict T->B; it must NOT drive the card's stops.
+        tu('D1', 'V1', [
+          { stopId: 'T', stopSequence: 0, arrivalTime: unixAt('08:10') },
+          { stopId: 'B', stopSequence: 1, arrivalTime: unixAt('08:40') },
+        ]),
+      ],
+      vehiclePositions: [vpAtStop('V1', 'P1', 'M1', '08:03', 1)],
+    };
+    const [snapshot] = harness.engine.refresh(rt, nowAt('08:03'));
+    const detail = harness.engine.vehicleDetail('T', 'D1', snapshot!, rt, nowAt('08:03'))!;
+    expect(detail.status).toBe('incoming');
+    // The inbound leg's remaining stops, not the outbound run's terminal departure list.
+    expect(detail.upcomingStops.map((s) => s.stopId)).toEqual(['M2', 'T']);
+    expect(detail.upcomingStops.every((s) => s.source === 'predicted')).toBe(true);
+    expect(detail.passedCount).toBe(2);
+    expect(detail.passedStops!.map((s) => s.stopId)).toEqual(['B', 'M1']);
+    // Identity stays the run being formed, and the map anchor is the terminal it heads for.
+    expect(detail.tripId).toBe('D1');
+    expect(detail.destination).toBe('Far Stop');
+    expect(detail.terminalStop?.stopId).toBe('T');
+  });
 });
 
 describe('blockTimeline', () => {

@@ -541,8 +541,10 @@ export interface VehicleDetail {
   arrivalSource?: 'observed' | 'estimated';
   nextTripId?: string;       // block successor (97% accurate pre-flip)
   nextTripDestination?: string;
+  /** Stops of the trip the vehicle currently operates: for an incoming card that is the inbound
+   *  leg the bus is riding (mid-inbound), for layover/departed cards the run itself. */
   upcomingStops: UpcomingStop[];
-  passedCount: number;       // stops of this trip already behind the bus
+  passedCount: number;       // stops of the current trip already behind the bus
   /** Map-only: stops behind the bus, rendered hollow on the mini map. */
   passedStops?: PassedStop[];
   terminalStop?: { stopId: string; stopName: string; lat?: number; lon?: number };

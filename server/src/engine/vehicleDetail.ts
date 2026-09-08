@@ -23,6 +23,10 @@ import type { RouteStyle } from './terminal';
 /** The classification/run facts lifted from the cached terminal snapshot card for this trip. */
 export interface RunInfo {
   status: 'incoming' | 'layover' | 'departed';
+  /** The trip the vehicle is currently operating when it differs from the card's run: incoming
+   *  cards operate the inbound leg, whose upcoming stops the detail must render instead of the
+   *  outbound run being formed. Absent for layover/departed (the run is the current trip). */
+  currentTripId?: string;
   arrivalSource?: 'observed' | 'estimated';
   overdueSeconds?: number;
 }
@@ -68,14 +72,14 @@ function coordsOf(deps: BuildVehicleDetailDeps, stopId: string): { lat?: number;
   return coord ? { lat: coord.lat, lon: coord.lon } : {};
 }
 
-// Load the trip's static stops on the service-day clock, ordered by sequence.
-function loadStops(deps: BuildVehicleDetailDeps): StaticStop[] {
+// Load a trip's static stops on the service-day clock, ordered by sequence.
+function loadStops(deps: BuildVehicleDetailDeps, tripId: string): StaticStop[] {
   const rows = prepared(
     deps.db,
     `SELECT stop_sequence, stop_id, arrival_time, departure_time
      FROM stop_times WHERE trip_id = ?
      ORDER BY stop_sequence ASC`,
-  ).all(deps.tripId) as Array<{
+  ).all(tripId) as Array<{
     stop_sequence: number;
     stop_id: string;
     arrival_time: number | null;
@@ -230,19 +234,29 @@ function buildPosition(
 export function buildVehicleDetail(deps: BuildVehicleDetailDeps): VehicleDetail {
   const vehicleId = resolveVehicleForTrip(deps.rt, deps.blockChains, deps.tripId);
   const vp = vehicleId ? deps.rt.vehiclePositions.find((v) => v.vehicleId === vehicleId) : undefined;
-  const tripEnd = deps.tripEnds.get(deps.tripId);
-  const stops = loadStops(deps);
-  const tu = deps.rt.tripUpdates.find((u) => u.tripId === deps.tripId);
+  // Upcoming stops describe the trip the vehicle is currently operating. An incoming card's run
+  // is the outbound trip being formed, but the bus is mid-inbound, so its leg is the current one;
+  // for layover/departed cards the run itself is current.
+  const stopsTripId = deps.run.currentTripId ?? deps.tripId;
+  const stopsTripEnd = deps.tripEnds.get(stopsTripId);
+  const stops = loadStops(deps, stopsTripId);
+  const tu = deps.rt.tripUpdates.find((u) => u.tripId === stopsTripId);
   const timeline = buildStopWindow(deps, stops, tu, vp?.stopId, vp?.currentStopSequence);
 
   const nextTripId = deps.blockChains.nextTrip.get(deps.tripId);
   const nextTripEnd = nextTripId ? deps.tripEnds.get(nextTripId) : undefined;
-  // The map's terminal anchor is the run's outbound first stop, the bay the vehicle forms.
-  const terminalStop = tripEnd
+  // The map's terminal anchor is the stop the vehicle is heading to: the inbound leg's last stop
+  // while incoming, else the run's outbound first stop (the bay the vehicle forms).
+  const anchorStopId = stopsTripEnd
+    ? deps.run.status === 'incoming'
+      ? stopsTripEnd.lastStopId
+      : stopsTripEnd.firstStopId
+    : undefined;
+  const terminalStop = anchorStopId
     ? {
-        stopId: tripEnd.firstStopId,
-        stopName: deps.stopNames.get(tripEnd.firstStopId) ?? tripEnd.firstStopId,
-        ...coordsOf(deps, tripEnd.firstStopId),
+        stopId: anchorStopId,
+        stopName: deps.stopNames.get(anchorStopId) ?? anchorStopId,
+        ...coordsOf(deps, anchorStopId),
       }
     : undefined;
 

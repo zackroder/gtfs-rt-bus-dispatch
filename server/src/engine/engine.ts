@@ -1050,9 +1050,10 @@ export class Engine {
   private runInfoFor(snapshot: TerminalSnapshot, tripId: string): RunInfo | undefined {
     for (const route of snapshot.routes) {
       for (const bus of route.incoming) {
-        // An inbound card represents the outbound run it is forming, not the leg it rides on.
+        // An inbound card represents the outbound run it is forming, not the leg it rides on;
+        // currentTripId keeps the detail's stops on the leg the bus is actually operating.
         if (bus.nextTripId !== tripId) continue;
-        return { status: 'incoming', arrivalSource: 'estimated' };
+        return { status: 'incoming', currentTripId: bus.tripId, arrivalSource: 'estimated' };
       }
       for (const bus of route.layovers) {
         if (bus.tripId !== tripId) continue;
