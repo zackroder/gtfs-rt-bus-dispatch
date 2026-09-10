@@ -1156,6 +1156,7 @@ export class Engine {
       activeServiceIds: activeIds,
       tripEnds: this.tripEnds(),
       routeStyleFor: (routeId) => this.routeStyleFor(routeId),
+      stopCoords: this.stopCoords(),
       ledger: this.ledger,
     });
   }

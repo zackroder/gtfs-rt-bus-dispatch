@@ -13,7 +13,7 @@ import type { RealtimeSnapshot } from '../providers/types';
 import { prepared } from '../db/prepare';
 import { unixToServiceSeconds } from '../gtfs/time';
 import { type BlockChains, type RunRecord, type TripEnd, resolveVehicleForTrip } from './headway';
-import { bearingDegrees, type GeoPoint } from './geometry';
+import { bearingDegrees, compassLabel, type GeoPoint } from './geometry';
 import type { RouteStyle } from './terminal';
 
 // Read-only projection of the vehicle card and its block timeline. Both builders are pure
@@ -293,6 +293,8 @@ export interface BlockTimelineDeps {
   activeServiceIds: Set<string>;
   tripEnds: ReadonlyMap<string, TripEnd>;
   routeStyleFor: (routeId: string) => RouteStyle;
+  /** Stop coordinates, used to infer the trip's cardinal direction from its first->last bearing. */
+  stopCoords: ReadonlyMap<string, GeoPoint>;
   /** The engine's cross-refresh run ledger, keyed by tripId (departure facts + applied holds). */
   ledger: ReadonlyMap<string, RunRecord>;
 }
@@ -323,12 +325,23 @@ export function buildBlockTimeline(deps: BlockTimelineDeps): BlockTimeline | und
   const trips: BlockTrip[] = rows.map((row) => {
     const end = deps.tripEnds.get(row.trip_id);
     const style = deps.routeStyleFor(row.route_id);
-    const start = end?.firstDeparture ?? row.start_time;
-    const tripEnd = end?.lastArrival ?? start;
+    const scheduledDeparture = end?.firstDeparture ?? row.start_time;
+    const scheduledArrival = end?.lastArrival ?? scheduledDeparture;
     const record = deps.ledger.get(row.trip_id);
     // A held departure is only flagged once the bus actually left under the locked hold.
     const held = record?.departureSeconds !== undefined && record?.hold !== undefined;
-    const state = deps.nowSvc < start ? ('future' as const) : deps.nowSvc >= tripEnd ? ('past' as const) : ('current' as const);
+    const state = deps.nowSvc < scheduledDeparture
+      ? ('future' as const)
+      : deps.nowSvc >= scheduledArrival
+        ? ('past' as const)
+        : ('current' as const);
+    // Cardinal direction from the first->last stop bearing (GTFS directions.txt is optional and
+    // rarely shipped; the static geometry is always present). Absent only when an endpoint lacks
+    // coordinates.
+    const firstCoord = end ? deps.stopCoords.get(end.firstStopId) : undefined;
+    const lastCoord = end ? deps.stopCoords.get(end.lastStopId) : undefined;
+    const directionLabel =
+      end && firstCoord && lastCoord ? compassLabel(bearingDegrees(firstCoord, lastCoord)) : undefined;
     return {
       tripId: row.trip_id,
       routeId: row.route_id,
@@ -336,10 +349,15 @@ export function buildBlockTimeline(deps: BlockTimelineDeps): BlockTimeline | und
       color: style.color,
       textColor: style.textColor,
       directionId: row.direction_id ?? undefined,
+      origin: end?.firstStopName ?? style.shortName,
       destination: end?.lastStopName ?? style.shortName,
-      start,
-      end: tripEnd,
+      directionLabel,
+      scheduledDeparture,
+      scheduledArrival,
       state,
+      // Observed terminal facts from the run ledger (arrival recorded at the trip's terminal, and
+      // its departure). Legs between non-terminal endpoints have no facts and stay schedule-only.
+      arrivedSeconds: record?.arrivalSeconds,
       departedSeconds: record?.departureSeconds,
       held,
     };

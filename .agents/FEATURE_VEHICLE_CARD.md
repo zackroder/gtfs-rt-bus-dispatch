@@ -134,7 +134,13 @@ blockChains, stopNames, routeStyle) — same cache discipline as
 `buildMapSnapshot`. Use `db/prepare.ts` for any new SQL. Do not add
 mutating state to the Engine for this.
 
-## Part 2 — Block strip
+## Part 2 — Block list (revised 2026-09-08)
+
+> The original horizontal SVG "block strip" was replaced by a vertical, full-width
+> **block manifest** on branch `feat/vehicle-card-block-viewer`. The strip could not
+> convey readable times or fit a phone viewport (~1,400 px wide for a typical block,
+> hover-only tooltips, implicit time axis). See PROGRESS.md "Block manifest replaces
+> the strip". The DTO below and the web component section describe the manifest.
 
 ### API
 
@@ -158,10 +164,13 @@ interface BlockTrip {
   color?: string;
   textColor?: string;
   directionId?: number;
+  origin: string;            // first stop name
   destination: string;       // last stop name; primary label
-  start: number;             // service-day seconds (trip_ends.first_departure)
-  end: number;               // service-day seconds (trip_ends.last_arrival)
+  directionLabel?: string;   // "Westbound" etc., inferred from the first->last stop bearing
+  scheduledDeparture: number; // service-day seconds (trip_ends.first_departure)
+  scheduledArrival: number;   // service-day seconds (trip_ends.last_arrival)
   state: 'past' | 'current' | 'future';   // vs nowSvc
+  arrivedSeconds?: number;   // observed terminal arrival when recorded (ledger)
   departedSeconds?: number;  // observed departure fact when recorded (ledger)
   held?: boolean;            // departure happened under an applied hold
 }
@@ -175,45 +184,39 @@ interface BlockTrip {
   `current` window, keep `current` (the bus is between departure and the
   far end even if late).
 - The UI finds the block for a selected vehicle via
-  `VehicleDetail.blockId`; the strip request is separate so it can be
+  `VehicleDetail.blockId`; the block request is separate so it can be
   cached/refetched independently.
 
 ### Web components
 
-- `web/src/components/BlockStrip.tsx`: **pure SVG**, no Leaflet. One row;
-  x-axis = service-day seconds spanning `[firstStart, lastEnd]` padded 10
-  min; each trip = a rounded rect labeled per the color/label rules below;
-  a vertical "now" line; the trip in its `current` window gets a stronger
-  stroke; observed departure facts render a small tick. Horizontal scroll
-  when the block is long; min segment width so short trips stay clickable
-  (title tooltip carries the full label).
+- `web/src/components/BlockList.tsx`: **pure DOM, no SVG, no Leaflet**. One
+  dense row per trip in block order (hairline dividers, no card chrome). Each
+  row: `RouteBadge` (route number + color), the inferred cardinal direction
+  ("Westbound", from the first→last stop bearing — GTFS `directions.txt` is
+  optional and rarely shipped), `origin → destination`, a `current` chip on the
+  trip whose window contains `nowSvc`, the scheduled window as explicit
+  `HH:MM–HH:MM` clocks (`formatClock`), and, only when the ledger recorded them,
+  the observed terminal arrival/departure with a derived on-time/late tag
+  (`formatDelay`). Legs between non-terminal endpoints have no facts and stay
+  schedule-only.
 
-#### Color and labeling rules (block strip)
+#### Color and labeling rules (block list)
 
 Color alone cannot identify a trip — GTFS route colors repeat across the
-system — so the strip layers three identifiers:
+system — so each row layers identifiers without any segment shading:
 
-1. **Route number, prominently.** The label leads with the route number,
-   bold and large (route `shortName`); the destination is secondary and
-   smaller. When a segment is narrower than the full label, show the
-   number alone and move the destination into the tooltip. The number is
-   the primary identifier and must never be truncated away.
-2. **Direction via a deterministic shade transform on the GTFS color.**
-   `directionId 0` renders the route color as-is; `directionId 1` renders
-   the same hue mixed ~40% toward white (or ~25% toward black when the
-   base color is already very light, luma > 200 by the helper below). One
-   transform, applied identically to every segment, so same-color routes
-   still read as different trips once direction differs. Add a small
-   legend chip in the strip header ("solid / tinted" mapped to the
-   agency's meaning of 0/1) rather than trusting operators to know GTFS
-   direction ids.
-3. **Text contrast recomputed on the shaded variant.** Extract
-   `readableOn` from `web/src/components/RouteBadge.tsx` into a shared
-   `web/src/routeColor.ts` util (RouteBadge refactored to use it, no
-   behavior change) providing `readableOn(hex)`, `shadeForDirection(hex,
-   directionId)`, and GTFS `#` normalization. BlockStrip picks text color
-   with `readableOn` on the *final* shaded background; `textColor` from
-   GTFS only applies to the unshaded variant.
+1. **Route number, prominently.** The `RouteBadge` leads with the route
+   number, bold and large (route `shortName`); the endpoints follow. The
+   number is the primary identifier and is never truncated away.
+2. **Direction via a cardinal label.** `directionLabel` is inferred from
+   the static first→last stop bearing (`compassLabel` in
+   `server/src/engine/geometry.ts`), bucketed to eight compass points.
+   When an endpoint lacks coordinates the label is absent and the
+   `direction_id` chevron (`▸`/`◂`) is the fallback cue.
+3. **Text contrast on the badge.** `readableOn` picks the badge ink from
+   the GTFS `color`; `textColor` applies when supplied. The former
+   `shadeForDirection` transform (solid/tinted segments + legend) is gone
+   with the strip and now has no production consumer.
 
 The direction glyph from `directionId` stays as a non-color cue (aria
 labeled) for accessibility and monochrome reading.

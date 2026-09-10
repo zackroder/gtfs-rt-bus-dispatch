@@ -443,20 +443,20 @@ describe('blockTimeline', () => {
     expect(timeline.blockId).toBe('BLK');
     expect(timeline.serviceDate).toBe('20260813');
     expect(timeline.nowSvc).toBe(svc(STRIP_START, '08:10'));
-    expect(timeline.trips.map((t) => [t.tripId, t.state, t.destination])).toEqual([
-      ['L1', 'past', 'Terminal'],
-      ['D1', 'current', 'Far Stop'],
-      ['D2', 'future', 'Loop'],
+    expect(timeline.trips.map((t) => [t.tripId, t.state, t.origin, t.destination, t.directionLabel])).toEqual([
+      ['L1', 'past', 'Far Stop', 'Terminal', 'Northeastbound'],
+      ['D1', 'current', 'Terminal', 'Far Stop', 'Southwestbound'],
+      ['D2', 'future', 'Terminal', 'Loop', 'Southwestbound'],
     ]);
     const d1 = timeline.trips[1]!;
-    expect(d1.start).toBe(svc(STRIP_START, '07:45'));
-    expect(d1.end).toBe(svc(STRIP_START, '08:30'));
+    expect(d1.scheduledDeparture).toBe(svc(STRIP_START, '07:45'));
+    expect(d1.scheduledArrival).toBe(svc(STRIP_START, '08:30'));
     expect(d1.routeShortName).toBe('10');
     expect(d1.color).toBe('FFB81C');
     expect(d1.directionId).toBe(1);
   });
 
-  it('propagates an observed departure fact and applied hold onto the current trip', () => {
+  it('propagates observed terminal arrival and departure facts plus an applied hold', () => {
     const harness = stripHarness();
     const serviceDate = '20260813';
     const now = unixAt('08:10');
@@ -492,14 +492,17 @@ describe('blockTimeline', () => {
 
     const timeline = harness.engine.blockTimeline('BLK', nowAt('08:10'))!;
     const d1 = timeline.trips.find((t) => t.tripId === 'D1')!;
-    // The bus departed D1 under the locked hold; the departure fact + held flag both surface.
+    // The bus arrived for D1 at the terminal (07:40) and departed under the locked hold; both
+    // observed facts and the held flag surface on the manifest.
     expect(d1.state).toBe('current');
+    expect(d1.arrivedSeconds).toBe(svc(STRIP_START, '07:40'));
     expect(d1.departedSeconds).toBeDefined();
     expect(d1.held).toBe(true);
-    // A never-held past inbound leg is unflagged and has no terminal departure fact; only the
-    // outbound run's departure (recorded for D1 at the terminal) surfaces.
+    // A never-held past inbound leg is unflagged; its terminal arrival is attributed to the
+    // outbound run D1, so it stays schedule-only.
     const l1 = timeline.trips.find((t) => t.tripId === 'L1')!;
     expect(l1.held).toBe(false);
+    expect(l1.arrivedSeconds).toBeUndefined();
     expect(l1.departedSeconds).toBeUndefined();
   });
 

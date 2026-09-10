@@ -783,61 +783,113 @@ textarea {
   margin-top: 10px;
 }
 
-.block-strip-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
+.block-list-header {
   margin-bottom: 6px;
 }
 
-.block-strip-title {
+.block-list-title {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted);
 }
 
-.strip-legend {
-  display: inline-flex;
-  gap: 10px;
-  font-size: 11px;
-  color: var(--muted);
+/* The block manifest is a dense vertical list so every trip reads at mobile width with explicit
+   times; rows are separated by hairline dividers instead of card chrome. */
+.block-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
-.strip-legend-item {
+.block-trip {
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.block-trip:last-child {
+  border-bottom: none;
+}
+
+/* The trip whose window contains "now" is highlighted instead of a "now" line on a timeline. */
+.block-trip.state-current {
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+  background: #f8fafc;
+}
+
+.block-trip.state-past {
+  opacity: 0.65;
+}
+
+.block-trip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.block-trip-direction {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: capitalize;
+  flex-shrink: 0;
+}
+
+.block-trip-endpoints {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  font-size: 13px;
 }
 
-.strip-legend-swatch {
-  width: 14px;
-  height: 8px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
+.block-trip-origin {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.strip-legend-solid {
-  background: #c8102e;
+.block-trip-arrow {
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
-.strip-legend-tinted {
-  background: #de7082;
+.block-trip-destination {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* The block strip scrolls horizontally when the block is longer than the viewport. */
-.block-strip-scroll {
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 4px;
-  background: #fff;
+.block-trip-times {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
-.block-strip {
-  display: block;
+.block-trip-sched {
+  color: var(--muted);
+}
+
+.block-trip-observed {
+  color: var(--ok);
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge.current {
+  background: var(--accent);
+  color: #fff;
 }
 
 .vehicle-detail-state {

@@ -37,6 +37,23 @@ export function bearingDegrees(from: GeoPoint, to: GeoPoint): number {
   return ((Math.atan2(x, y) * 180) / Math.PI + 360) % 360;
 }
 
+// Human direction of travel for a bearing, bucketed to the eight compass points. GTFS only
+// carries a per-route direction_id (0/1) and the optional directions.txt rarely ships, so the
+// engine infers a cardinal label from the trip's first->last stop bearing instead.
+export function compassLabel(degrees: number): string {
+  const names = [
+    'Northbound',
+    'Northeastbound',
+    'Eastbound',
+    'Southeastbound',
+    'Southbound',
+    'Southwestbound',
+    'Westbound',
+    'Northwestbound',
+  ] as const;
+  return names[Math.round(((degrees % 360) + 360) % 360 / 45) % 8]!;
+}
+
 // Distance from a point to the closest of a set of stop IDs, treating missing
 // stop coordinates as absent so a misconfigured terminal cannot arbitrate facts.
 export function nearestStopMeters(

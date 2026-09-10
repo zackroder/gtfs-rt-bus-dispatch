@@ -224,6 +224,8 @@ feed fetch, never `engine.refresh`).
       not inline under the route group, so the selected run stays prominent.)*
 - [x] `BlockStrip`: pure SVG with a prominent route number, direction shading,
       text contrast on the final shaded background, "now" line, and departure ticks.
+      *(Superseded 2026-09-08 by the vertical `BlockList` manifest — see the
+      "Block manifest replaces the strip" decision entry.)*
 
 ### 9.3 Verify
 - [x] Engine unit tests (TU window with absolute times, mixed sources, current
@@ -509,6 +511,24 @@ feed fetch, never `engine.refresh`).
   200), and text contrast recomputed on the final shaded background. The GTFS
   `trip_id` is never shown to operators — route number + destination label each
   segment.
+- **2026-09-08 — Block manifest replaces the strip (branch `feat/vehicle-card-block-viewer`)**:
+  the horizontal SVG strip was unreadable on the mobile-first UI — a typical ~10-hour block
+  needs ~1,400 px of width, times are implicit in x-positions, and its hover-only `<title>`
+  tooltips do not exist on touch. The block view is now a vertical, full-width list
+  (`web/src/components/BlockList.tsx`, pure DOM): one row per trip in block order showing the
+  route badge + direction glyph + destination, the scheduled window as explicit `HH:MM – HH:MM`
+  clocks, and — when the run ledger recorded them — the observed terminal arrival and departure
+  with a derived on-time/late tag. `BlockTrip` renamed `start`/`end` to
+  `scheduledDeparture`/`scheduledArrival` and gained `arrivedSeconds` (from `record.arrivalSeconds`)
+  alongside the existing `departedSeconds`/`held`. Facts only exist at configured terminals, so
+  legs between non-terminal endpoints stay schedule-only rather than implying events. The
+  direction-shade encoding and its legend are gone with the strip; `shadeForDirection` remains
+  exported/tested but now has no production consumer. *(Follow-up on the same branch: rows now
+  show `origin → destination` (new `BlockTrip.origin` from `TripEnd.firstStopName`), a cardinal
+  `directionLabel` inferred from the first→last stop bearing via `compassLabel` in geometry.ts
+  (GTFS `directions.txt` is optional and rarely shipped; the `direction_id` chevron is the
+  fallback when an endpoint lacks coordinates), and a denser divider-based layout instead of card
+  chrome.)*
 
 ## Build notes
 

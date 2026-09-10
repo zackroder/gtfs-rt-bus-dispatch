@@ -550,7 +550,7 @@ export interface VehicleDetail {
   terminalStop?: { stopId: string; stopName: string; lat?: number; lon?: number };
 }
 
-/** One block-chain trip rendered as a segment on the block strip. */
+/** One block-chain trip rendered as a segment on the block list. */
 export interface BlockTrip {
   tripId: string;            // internal; UI must not display it as the label
   routeId: string;
@@ -558,10 +558,15 @@ export interface BlockTrip {
   color?: string;
   textColor?: string;
   directionId?: number;
+  origin: string;            // first stop name (where the trip starts)
   destination: string;       // last stop name; primary label
-  start: number;             // service-day seconds (first departure)
-  end: number;               // service-day seconds (last arrival)
+  /** Cardinal direction of travel ("Westbound" etc.), inferred from the first→last stop bearing;
+   *  absent only when either endpoint lacks coordinates. */
+  directionLabel?: string;
+  scheduledDeparture: number; // service-day seconds (first departure)
+  scheduledArrival: number;   // service-day seconds (last arrival)
   state: 'past' | 'current' | 'future';   // versus the request's nowSvc
+  arrivedSeconds?: number;   // observed terminal arrival when recorded (ledger)
   departedSeconds?: number;  // observed departure fact when recorded (ledger)
   held?: boolean;            // departure happened under an applied hold
 }
@@ -636,10 +641,13 @@ const blockTripSchema = z.object({
   color: z.string().optional(),
   textColor: z.string().optional(),
   directionId: z.number().optional(),
+  origin: z.string(),
   destination: z.string(),
-  start: z.number(),
-  end: z.number(),
+  directionLabel: z.string().optional(),
+  scheduledDeparture: z.number(),
+  scheduledArrival: z.number(),
   state: z.enum(['past', 'current', 'future']),
+  arrivedSeconds: z.number().optional(),
   departedSeconds: z.number().optional(),
   held: z.boolean().optional(),
 });

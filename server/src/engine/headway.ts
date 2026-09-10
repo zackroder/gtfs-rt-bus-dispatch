@@ -39,6 +39,7 @@ export interface TripEnd {
   firstStopId: string;
   firstStopSequence: number;
   firstDeparture: number;
+  firstStopName: string;
   lastStopId: string;
   lastStopSequence: number;
   lastArrival: number;
@@ -139,6 +140,7 @@ export function buildTripEnds(db: Database): Map<string, TripEnd> {
     .prepare(
       `SELECT e.trip_id, f.stop_id AS first_stop_id, f.stop_sequence AS first_stop_sequence,
               COALESCE(f.departure_time, f.arrival_time) AS first_departure,
+              fs.stop_name AS first_stop_name,
               l.stop_id AS last_stop_id, l.stop_sequence AS last_stop_sequence,
               COALESCE(l.arrival_time, l.departure_time) AS last_arrival,
               s.stop_name AS last_stop_name
@@ -147,6 +149,7 @@ export function buildTripEnds(db: Database): Map<string, TripEnd> {
          FROM stop_times GROUP BY trip_id
        ) e
        JOIN stop_times f ON f.trip_id = e.trip_id AND f.stop_sequence = e.min_seq
+       JOIN stops fs ON fs.stop_id = f.stop_id
        JOIN stop_times l ON l.trip_id = e.trip_id AND l.stop_sequence = e.max_seq
        JOIN stops s ON s.stop_id = l.stop_id`,
     )
@@ -155,6 +158,7 @@ export function buildTripEnds(db: Database): Map<string, TripEnd> {
     first_stop_id: string;
     first_stop_sequence: number;
     first_departure: number;
+    first_stop_name: string;
     last_stop_id: string;
     last_stop_sequence: number;
     last_arrival: number;
@@ -166,6 +170,7 @@ export function buildTripEnds(db: Database): Map<string, TripEnd> {
       firstStopId: r.first_stop_id,
       firstStopSequence: r.first_stop_sequence,
       firstDeparture: r.first_departure,
+      firstStopName: r.first_stop_name,
       lastStopId: r.last_stop_id,
       lastStopSequence: r.last_stop_sequence,
       lastArrival: r.last_arrival,

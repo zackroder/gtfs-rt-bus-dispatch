@@ -9,7 +9,7 @@ import 'leaflet/dist/leaflet.css';
 import { getBlockTimeline, getConfig, getVehicleDetail } from '../api';
 import { RouteBadge } from './RouteBadge';
 import { arrowDivIcon } from './VehicleArrow';
-import { BlockStrip } from './BlockStrip';
+import { BlockList } from './BlockList';
 import { formatClock, formatHold } from '../format';
 import type { BlockTimeline, VehicleDetail } from '../../../shared/types';
 
@@ -289,21 +289,11 @@ export function VehicleDetailPanel({
 
               {detail.blockId && (
                 <div className="vehicle-detail-block">
-                  <div className="block-strip-header">
-                    <span className="block-strip-title">Block {detail.blockId}</span>
-                    <span className="strip-legend">
-                      <span className="strip-legend-item">
-                        <span className="strip-legend-swatch strip-legend-solid" aria-hidden="true" />
-                        solid · dir 0
-                      </span>
-                      <span className="strip-legend-item">
-                        <span className="strip-legend-swatch strip-legend-tinted" aria-hidden="true" />
-                        tinted · dir 1
-                      </span>
-                    </span>
+                  <div className="block-list-header">
+                    <span className="block-list-title">Block {detail.blockId}</span>
                   </div>
                   {timeline ? (
-                    <BlockStrip timeline={timeline} serviceDayStartSeconds={serviceDayStartSeconds} />
+                    <BlockList timeline={timeline} serviceDayStartSeconds={serviceDayStartSeconds} />
                   ) : (
                     <p className="empty">No block data.</p>
                   )}
