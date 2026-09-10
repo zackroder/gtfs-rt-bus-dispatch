@@ -23,6 +23,24 @@ function vp(vehicleId: string, lat: number, lon: number, bearing?: number): Vehi
   };
 }
 
+function vpStatus(
+  vehicleId: string,
+  stopId: string,
+  currentStatus: VehiclePositionInfo['currentStatus'],
+  lat: number,
+  lon: number,
+): VehiclePositionInfo {
+  return {
+    vehicleId,
+    tripId: undefined,
+    stopId,
+    currentStatus,
+    lat,
+    lon,
+    timestamp: 1700000000,
+  };
+}
+
 function makeEngine(): { engine: Engine; config: AppConfig } {
   const gtfs = syntheticGtfs({
     stops: [
@@ -224,5 +242,147 @@ describe('buildMapSnapshot', () => {
   it('throws for an unknown terminal', () => {
     const { engine } = makeEngine();
     expect(() => engine.buildMapSnapshot('NOPE', mkSnapshot(), emptyRt)).toThrow('unknown terminal');
+  });
+
+  it('derives a laying_over marker from STOPPED_AT at a terminal stop and exposes the reported stop', () => {
+    const { engine } = makeEngine();
+    const snapshot = mkSnapshot({
+      routes: [{
+        routeId: '1',
+        routeShortName: '1',
+        incoming: [],
+        layovers: [{
+          routeId: '1', routeShortName: '1', tripId: 'L1', vehicleId: 'V1',
+          scheduledDeparture: 0, scheduledArrival: 0, expectedDeparture: 0,
+          predictedDeparture: 0, countdownSeconds: 0,
+        }],
+        departed: [],
+        interventions: [],
+      }],
+    });
+    const map = engine.buildMapSnapshot('T', snapshot, {
+      timestamp: 1700000000,
+      tripUpdates: [],
+      vehiclePositions: [vpStatus('V1', 'T', 'STOPPED_AT', 41.8, -87.6)],
+    });
+    const marker = map.vehicles[0]!;
+    expect(marker.status).toBe('laying_over');
+    expect(marker.currentStatus).toBe('STOPPED_AT');
+    expect(marker.currentStopId).toBe('T');
+    expect(marker.currentStopName).toBe('Terminal');
+  });
+
+  it('derives an arriving marker from INCOMING_AT at a terminal stop', () => {
+    const { engine } = makeEngine();
+    const snapshot = mkSnapshot({
+      routes: [{
+        routeId: '1',
+        routeShortName: '1',
+        incoming: [],
+        layovers: [{
+          routeId: '1', routeShortName: '1', tripId: 'L1', vehicleId: 'V1', arrivalPending: true,
+          scheduledDeparture: 0, scheduledArrival: 0, expectedDeparture: 0,
+          predictedDeparture: 0, countdownSeconds: 0,
+        }],
+        departed: [],
+        interventions: [],
+      }],
+    });
+    const map = engine.buildMapSnapshot('T', snapshot, {
+      timestamp: 1700000000,
+      tripUpdates: [],
+      vehiclePositions: [vpStatus('V1', 'T', 'INCOMING_AT', 41.8001, -87.6001)],
+    });
+    expect(map.vehicles[0]!.status).toBe('arriving');
+  });
+
+  it('derives a departing marker from IN_TRANSIT_TO or a non-terminal reported stop', () => {
+    const { engine } = makeEngine();
+    const snapshot = mkSnapshot({
+      routes: [{
+        routeId: '1',
+        routeShortName: '1',
+        incoming: [],
+        layovers: [
+          {
+            routeId: '1', routeShortName: '1', tripId: 'L1a', vehicleId: 'V1',
+            scheduledDeparture: 0, scheduledArrival: 0, expectedDeparture: 0,
+            predictedDeparture: 0, countdownSeconds: 0,
+          },
+          {
+            routeId: '1', routeShortName: '1', tripId: 'L1b', vehicleId: 'V2',
+            scheduledDeparture: 0, scheduledArrival: 0, expectedDeparture: 0,
+            predictedDeparture: 0, countdownSeconds: 0,
+          },
+        ],
+        departed: [],
+        interventions: [],
+      }],
+    });
+    const map = engine.buildMapSnapshot('T', snapshot, {
+      timestamp: 1700000000,
+      tripUpdates: [],
+      vehiclePositions: [
+        vpStatus('V1', 'T', 'IN_TRANSIT_TO', 41.8005, -87.6),
+        vpStatus('V2', 'B', 'STOPPED_AT', 41.7, -87.7),
+      ],
+    });
+    const byVehicle = new Map(map.vehicles.map((m) => [m.vehicleId, m.status]));
+    expect(byVehicle.get('V1')).toBe('departing');
+    expect(byVehicle.get('V2')).toBe('departing');
+  });
+
+  it('keeps an inbound bus inbound when it reports a non-terminal stop en route', () => {
+    const { engine } = makeEngine();
+    const snapshot = mkSnapshot({
+      routes: [{
+        routeId: '1',
+        routeShortName: '1',
+        incoming: [{
+          routeId: '1', routeShortName: '1', tripId: 'I1', vehicleId: 'V1',
+          scheduledArrival: 0, predictedArrival: 0, etaSeconds: 60, delaySeconds: 0,
+          nextTripId: 'D1', nextDestination: 'B', scheduledDeparture: 0, expectedDeparture: 0,
+        }],
+        layovers: [],
+        departed: [],
+        interventions: [],
+      }],
+    });
+    const map = engine.buildMapSnapshot('T', snapshot, {
+      timestamp: 1700000000,
+      tripUpdates: [],
+      vehiclePositions: [vpStatus('V1', 'B', 'INCOMING_AT', 41.7, -87.7)],
+    });
+    expect(map.vehicles[0]!.status).toBe('inbound');
+  });
+
+  it('keeps a committed departure departed even when the live status says IN_TRANSIT_TO', () => {
+    const { engine } = makeEngine();
+    const snapshot = mkSnapshot({
+      routes: [{
+        routeId: '1',
+        routeShortName: '1',
+        incoming: [],
+        layovers: [],
+        departed: [{
+          routeId: '1', routeShortName: '1', tripId: 'D1', vehicleId: 'V1',
+          scheduledDeparture: 0, departureSeconds: 0,
+        }],
+        interventions: [],
+      }],
+    });
+    const map = engine.buildMapSnapshot('T', snapshot, {
+      timestamp: 1700000000,
+      tripUpdates: [],
+      vehiclePositions: [vpStatus('V1', 'B', 'IN_TRANSIT_TO', 41.7, -87.7)],
+    });
+    expect(map.vehicles[0]!.status).toBe('departed');
+  });
+
+  it('flags the geofence circles as the fallback path', () => {
+    const { engine } = makeEngine();
+    const map = engine.buildMapSnapshot('T', mkSnapshot(), emptyRt);
+    expect(map.buffers.length).toBeGreaterThan(0);
+    expect(map.buffers.every((b) => b.fallback === true)).toBe(true);
   });
 });

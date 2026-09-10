@@ -1,5 +1,16 @@
 # Live CTA VP Feed Analysis — arrival/departure recording feasibility
 
+> **Correction (2026-09-08, live 2026-09 capture):** the VP feed NOW reliably carries stop
+> identity — `stop_id` on ~99% of entities (was ~8%) and `current_status` on ~90% with all three
+> states observed (typical poll: INCOMING_AT ~60%, STOPPED_AT ~15%, IN_TRANSIT_TO ~15%).
+> STOPPED_AT IS emitted for the terminal stop at tight physical distance (5–50 m), and the
+> terminal stop is stable across the trip flip for the vast majority of terminals. The engine now
+> treats stop-status as the PRIMARY arrival/departure signal with geometry as fallback — see
+> `engine.ts recordFacts`. **§1 and §4 below are stale** and describe the pre-2026-09 feed; the
+> "current_status is always IN_TRANSIT_TO" and "~92% of VP can never trigger a transition" claims
+> no longer hold. `current_stop_sequence` remains unreliable (CTA reports 1 at terminals) and is
+> never used for stop resolution.
+
 > **Correction (2026-09-03, owner review):** the PROGRESS 2026-08-16 note and
 > one reading of this file claimed "TU carries no timing fields at all
 > (0/6115 entities)". That is wrong as a general statement: live CTA
@@ -21,8 +32,14 @@ capture script at `%TEMP%/opencode/vp_capture.cjs` (not part of the repo).
 
 ### 1. VP almost never carries stop identity — the current engine is starved
 
-Across three captures (Sun), only **~8.3%** of VP observations carry a `stop_id`,
-and **`current_stop_sequence` is never populated (0.0%)**. The existing
+> **Stale (2026-09-08):** superseded by the 2026-09 capture — see the correction at the top.
+> stop_id now rides on ~99% of entities and current_status on ~90% with all three states
+> observed. The engine's stop-status path (`stopped_at` / `in_transit_to` facts) is now the
+> primary signal; geometry is the fallback. The sequence-based half of the old claim remains
+> dead: CTA still never sends a trustworthy `current_stop_sequence`.
+
+Across three captures (Sun), only **~8.3%** of VP observations carry a `stop_id`, and
+**`current_stop_sequence` is never populated (0.0%)**. The existing
 arrival/departure machinery (`engine.ts recordFacts`: `at_last_stop`,
 `past_first_stop`) is stop-matched, so ~92% of VP data can never trigger a
 transition by that path — and the sequence-based half of it is doubly dead
@@ -60,6 +77,11 @@ bus is at the terminal and reassigned) but arrives *after* the bus is already
 sitting — consistent with the earlier "certain but late" concern.
 
 ### 4. Resting distance from the terminus is spread wide — a tight buffer would miss most layovers
+
+> **Stale (2026-09-08):** this describes the geometry-only FALLBACK path. With stop-status primary,
+> STOPPED_AT fires at 5–50 m from the terminal stop, so the tight-buffer concern no longer governs
+> arrival detection — but the spread still matters for the geometric fallback, which must stay loose
+> enough to catch layovers from vehicles that omit status/stop_id (~10%).
 
 Re-measured (2026-08-16, second capture) against the corrected anchor — **stop 1
 of the next outbound trip** (block-chain-derived), for 451 resting samples at a

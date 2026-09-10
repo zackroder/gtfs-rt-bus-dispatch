@@ -1,5 +1,5 @@
 import type { Database } from 'better-sqlite3';
-import type { HoldOverride, Terminal, TripUpdateInfo } from '../../../shared/types';
+import type { HoldOverride, Terminal, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
 import { unixToServiceSeconds } from '../gtfs/time';
 import { effectiveDeparture, expectedDepartureTime } from './dispatch';
@@ -18,7 +18,9 @@ export type FactEvidence =
   | 'trip_flip'
   | 'motion_exit'
   | 'out_of_buffer'
-  | 'restored_vp';
+  | 'restored_vp'
+  | 'stopped_at'
+  | 'in_transit_to';
 
 export interface RunRecord {
   arrivalSeconds?: number;
@@ -106,6 +108,32 @@ export interface VehicleTerminalState {
 // incorrectly make a bus at terminal A appear laid over at terminal B.
 export function vehicleTerminalKey(vehicleId: string, terminalId: string): string {
   return `${vehicleId}|${terminalId}`;
+}
+
+// Collapse the rare multi-entity VP during a trip flip (one vehicle under two tripIds, ~2
+// vehicles/poll on the live CTA feed) to one entity per vehicleId. Keep the entity with the latest
+// timestamp; on ties prefer the entity whose stop_id is a terminal stop, because the flip/movement
+// report is the more decisive signal for fact recording.
+export function dedupeVehiclePositions(
+  positions: readonly VehiclePositionInfo[],
+  terminals: readonly { stopIds: readonly string[] }[],
+): VehiclePositionInfo[] {
+  const terminalStopIds = new Set(terminals.flatMap((terminal) => terminal.stopIds));
+  const best = new Map<string, VehiclePositionInfo>();
+  for (const vp of positions) {
+    const current = best.get(vp.vehicleId);
+    if (!current) {
+      best.set(vp.vehicleId, vp);
+      continue;
+    }
+    const currentIsTerminal = current.stopId !== undefined && terminalStopIds.has(current.stopId);
+    const vpIsTerminal = vp.stopId !== undefined && terminalStopIds.has(vp.stopId);
+    const replace =
+      vp.timestamp > current.timestamp ||
+      (vp.timestamp === current.timestamp && vpIsTerminal && !currentIsTerminal);
+    if (replace) best.set(vp.vehicleId, vp);
+  }
+  return Array.from(best.values());
 }
 
 // Build predecessor/successor links for trips assigned to the same block.
@@ -330,7 +358,9 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
 
   const tripToVehicle = buildTripToVehicle(opts.rt);
   const vpTripByVehicle = new Map<string, string>();
-  for (const vp of opts.rt.vehiclePositions) {
+  // Multi-entity VP (one vehicle under two tripIds during a flip) is collapsed so the current-trip
+  // assignment reflects the newest/terminal report instead of entity order.
+  for (const vp of dedupeVehiclePositions(opts.rt.vehiclePositions, [opts.terminal])) {
     // VP is the stronger assignment signal when TU and VP disagree; TU remains a fallback
     // for feeds that omit a trip from the vehicle-position entity.
     if (vp.vehicleId && vp.tripId) {

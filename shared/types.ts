@@ -45,12 +45,18 @@ export interface TripUpdateInfo {
   timestamp: number;
 }
 
+/** GTFS-RT VehicleStopStatus: the relationship of a vehicle to the stop it reports. */
+export type VehicleStopStatus = 'INCOMING_AT' | 'STOPPED_AT' | 'IN_TRANSIT_TO';
+
 /** Vehicle-position information used to associate a vehicle with a trip and stop. */
 export interface VehiclePositionInfo {
   vehicleId: string;
   tripId?: string;
   stopId?: string;
   currentStopSequence?: number;
+  /** The vehicle's reported relationship to stopId (absent when the feed omits the field; the
+   *  protobuf default IN_TRANSIT_TO is deliberately not materialized here). */
+  currentStatus?: VehicleStopStatus;
   lat?: number;
   lon?: number;
   /** Compass bearing reported by the vehicle (degrees clockwise from north), when the feed supplies it. */
@@ -198,6 +204,9 @@ export interface TerminalMapBuffer {
   lon: number;
   radiusMeters: number;
   kind: 'arrival' | 'movement' | 'departure';
+  /** When true this circle is the geometry-only fallback geofence; stop-status is the primary
+   *  arrival/departure signal, so the fallback is rendered de-emphasized on the debug map. */
+  fallback?: boolean;
 }
 
 /** A terminal stop projected onto the debug map. */
@@ -221,6 +230,10 @@ export interface VehicleMapMarker {
   headingDegrees?: number;
   label: string;
   etaSeconds?: number;
+  /** The stop the vehicle reports it is at/in transit to, when the feed carries it (now reliable). */
+  currentStopId?: string;
+  currentStopName?: string;
+  currentStatus?: VehicleStopStatus;
 }
 
 /** Point-in-time debug map payload for one terminal. */
@@ -418,6 +431,7 @@ const terminalMapBufferSchema = z.object({
   lon: z.number(),
   radiusMeters: z.number(),
   kind: z.enum(['arrival', 'movement', 'departure']),
+  fallback: z.boolean().optional(),
 });
 
 const terminalMapStopSchema = z.object({
@@ -438,6 +452,9 @@ const vehicleMapMarkerSchema = z.object({
   headingDegrees: z.number().optional(),
   label: z.string(),
   etaSeconds: z.number().optional(),
+  currentStopId: z.string().optional(),
+  currentStopName: z.string().optional(),
+  currentStatus: z.enum(['INCOMING_AT', 'STOPPED_AT', 'IN_TRANSIT_TO']).optional(),
 });
 
 /** Validates the read-only debug map payload served by GET /api/terminals/:id/map. */

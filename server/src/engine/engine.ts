@@ -15,6 +15,7 @@ import type {
   VehicleMapMarker,
   VehicleMapStatus,
   VehiclePositionInfo,
+  VehicleStopStatus,
 } from '../../../shared/types';
 import type { RealtimeSnapshot } from '../providers/types';
 import { InterventionStore } from '../db/interventions';
@@ -24,6 +25,7 @@ import {
   buildBlockChains,
   buildDepartures,
   buildTripEnds,
+  dedupeVehiclePositions,
   type BlockChains,
   type ArrivalAtStop,
   type FactSource,
@@ -65,6 +67,7 @@ export interface VehiclePositionDiagnostic {
   previousTripId?: string;
   stopId?: string;
   currentStopSequence?: number;
+  currentStatus?: VehicleStopStatus;
   observationTimestamp: number;
   ageSeconds: number;
   matchedTrip: boolean;
@@ -106,10 +109,13 @@ interface VehicleTrack {
   // VP timestamps are monotonic per vehicle. Refresh cadence and provider caching must not
   // turn one observation into multiple dwell or departure samples.
   lastVpTimestamp?: number;
-  // Arrival arm: candidate outbound trip + the first qualifying parked ping time.
+  // Arrival arm: candidate outbound trip + the first qualifying parked ping time. armSource
+  // records whether the arm came from stop-status (INCOMING_AT, authoritative) or geometry;
+  // only geometry-armed candidates abort when the vehicle leaves the hold zone.
   parkedStreak: number;
   armTripId?: string;
   armAtSvc?: number;
+  armSource?: 'stop_status' | 'geometry';
   // Committed layover: the outbound trip the vehicle is resting for, and its anchor stop.
   layoverTripId?: string;
   layoverAnchorStopId?: string;
@@ -209,21 +215,30 @@ export class Engine {
   }
 
   private vehicleCurrentStop(vp: VehiclePositionInfo): string | undefined {
-    let stopId = vp.stopId;
-    if (!stopId && vp.tripId && vp.currentStopSequence !== undefined) {
-      // Some feeds provide only a sequence; resolve it through static stop_times and cache the name.
+    // stop_id is the trustworthy stop identity (present on ~99% of CTA VP entities), so it is the
+    // primary source for the displayed current stop. current_stop_sequence is unreliable on this
+    // feed (CTA reports 1 at terminals regardless of the static stop_sequence), so it is only a
+    // guarded fallback for feeds that omit stop_id entirely, and it never resolves to a terminal
+    // stop.
+    if (vp.stopId) return this.stopNames().get(vp.stopId);
+    if (vp.tripId && vp.currentStopSequence !== undefined) {
       const cacheKey = `${vp.tripId}:${vp.currentStopSequence}`;
       if (this.vehicleStopCache.has(cacheKey)) return this.vehicleStopCache.get(cacheKey);
       const row = prepared(
         this.db,
         'SELECT stop_id FROM stop_times WHERE trip_id = ? AND stop_sequence = ?',
       ).get(vp.tripId, vp.currentStopSequence) as { stop_id?: string } | undefined;
-      stopId = row?.stop_id;
-      const name = stopId ? this.stopNames().get(stopId) : undefined;
+      const stopId = row?.stop_id;
+      // Guard against the CTA terminal quirk: a sequence of 1 at a terminal must not be shown as
+      // the vehicle's current stop (stop_id alone decides terminal presence).
+      const terminalStopIds = new Set(this.getConfig().terminals.flatMap((t) => t.stopIds));
+      const name = stopId !== undefined && !terminalStopIds.has(stopId)
+        ? this.stopNames().get(stopId)
+        : undefined;
       this.vehicleStopCache.set(cacheKey, name);
       return name;
     }
-    return stopId ? this.stopNames().get(stopId) : undefined;
+    return undefined;
   }
 
   // These snapshots are intentionally in memory: they describe the last feed poll for diagnosis,
@@ -288,7 +303,7 @@ export class Engine {
     );
 
     const vpCurrentStop = new Map<string, string>();
-    for (const vp of rt.vehiclePositions) {
+    for (const vp of dedupeVehiclePositions(rt.vehiclePositions, config.terminals)) {
       const name = this.vehicleCurrentStop(vp);
       if (name) vpCurrentStop.set(vp.vehicleId, name);
     }
@@ -336,8 +351,13 @@ export class Engine {
     const record = this.ledger.get(tripId) ?? {};
     if (record.arrivalSource === 'vp') {
       // A later trip flip confirms an earlier geometric fact without replacing its physical event
-      // time. Keep the strongest evidence in memory for diagnostics and the current snapshot.
-      if (evidence === 'trip_flip' && record.arrivalEvidence !== 'trip_flip') {
+      // time. Keep the strongest evidence in memory for diagnostics and the current snapshot. A
+      // stop-status fact ('stopped_at') is already primary and is never relabeled as a later flip.
+      if (
+        evidence === 'trip_flip' &&
+        record.arrivalEvidence !== 'trip_flip' &&
+        record.arrivalEvidence !== 'stopped_at'
+      ) {
         record.arrivalEvidence = evidence;
         this.ledger.set(tripId, record);
       }
@@ -365,7 +385,11 @@ export class Engine {
   ): boolean {
     const record = this.ledger.get(tripId) ?? {};
     if (record.departureSource === 'vp') {
-      if (evidence === 'trip_flip' && record.departureEvidence !== 'trip_flip') {
+      if (
+        evidence === 'trip_flip' &&
+        record.departureEvidence !== 'trip_flip' &&
+        record.departureEvidence !== 'in_transit_to'
+      ) {
         record.departureEvidence = evidence;
         this.ledger.set(tripId, record);
       }
@@ -521,7 +545,9 @@ export class Engine {
     const movementMeters = config.terminalMovementMeters ?? 75;
 
     const terminalStopIds = new Set(terminals.flatMap((terminal) => terminal.stopIds));
-    for (const vp of rt.vehiclePositions) {
+    // Collapse the rare multi-entity VP (one vehicle under two tripIds during a flip) before the
+    // per-vehicle state machine runs, so a vehicle cannot produce two facts in one refresh.
+    for (const vp of dedupeVehiclePositions(rt.vehiclePositions, terminals)) {
       const vpSeconds = vp.timestamp > generatedAt
         ? nowSvc
         : unixToServiceSeconds(vp.timestamp, serviceDayStartSeconds, timeZone);
@@ -548,6 +574,7 @@ export class Engine {
         previousTripId: track.tripId,
         stopId: vp.stopId,
         currentStopSequence: vp.currentStopSequence,
+        currentStatus: vp.currentStatus,
         observationTimestamp: vp.timestamp,
         ageSeconds: Math.max(0, generatedAt - vp.timestamp),
         matchedTrip: vp.tripId !== undefined && ends.has(vp.tripId),
@@ -610,6 +637,98 @@ export class Engine {
       diagnostic.firstStopSequence = end.firstStopSequence;
       diagnostic.lastStopId = end.lastStopId;
       diagnostic.lastStopSequence = end.lastStopSequence;
+
+      // --- Stop-status primary signal ---
+      // CTA's feed now reliably carries stop_id + current_status. STOPPED_AT at a terminal stop is
+      // an immediate observed arrival; INCOMING_AT arms the arrival posture (committed by the
+      // following STOPPED_AT or the geometric dwell fallback); and an outbound-trip entity reporting
+      // a non-terminal stop is an observed departure. stop_id is the only trustworthy stop identity —
+      // current_stop_sequence is unreliable on this feed and never resolves a stop here. Geometry
+      // below remains the fallback for entities without status/stop_id.
+      const status = vp.currentStatus;
+      const reportedStopInTerminal = vp.stopId !== undefined && terminalStopIds.has(vp.stopId);
+      const statusTerminal = reportedStopInTerminal
+        ? terminals.find((candidate) => candidate.stopIds.includes(vp.stopId!))
+        : undefined;
+      if (status !== undefined) {
+        if (reportedStopInTerminal && statusTerminal) {
+          // The arrival belongs to whichever trip the flip-aware target resolves to: the entity may
+          // still carry the inbound trip (block successor is the outbound run) or already the
+          // outbound trip (co-located bays resolve to the trip itself).
+          const target = this.arrivalTargetFor(vp.tripId, vp.vehicleId, rt, chains, statusTerminal);
+          if (target) {
+            if (status === 'STOPPED_AT') {
+              const alreadyArrived = this.ledger.get(target)?.arrivalSeconds !== undefined;
+              if (!alreadyArrived && freshObservation) {
+                diagnostic.arrivalCandidateTripId = target;
+                // The STOPPED_AT sample is the physical stop time, so the committed arrival is the
+                // observed stop instant, NOT the earlier INCOMING_AT arm time. Using the arm time
+                // would start the operator-rest clock slightly early (the bus is still 5-50 m out);
+                // the arm time remains the basis only for the geometry/trip-flip fallback commits.
+                diagnostic.recordedArrival = this.recordArrival(
+                  target,
+                  vpSeconds,
+                  'vp',
+                  'stopped_at',
+                  generatedAt,
+                  serviceDate,
+                  vp.vehicleId,
+                );
+                diagnostic.reasons.push('stopped_at_arrival');
+                track.layoverTripId = target;
+                track.layoverAnchorStopId = this.tripEnds().get(target)?.firstStopId;
+                track.parkedStreak = 0;
+                track.armTripId = undefined;
+                track.armSource = undefined;
+              } else {
+                diagnostic.reasons.push(alreadyArrived ? 'arrival_already_recorded' : 'stopped_at_not_fresh');
+              }
+            } else if (status === 'INCOMING_AT' && freshObservation) {
+              // Arm the arrival posture; the earliest arm time becomes the committed event time.
+              if (track.armTripId !== undefined && track.armTripId !== target) {
+                track.parkedStreak = 0;
+                track.armAtSvc = undefined;
+                track.armSource = undefined;
+              }
+              track.armTripId = target;
+              if (track.armAtSvc === undefined) {
+                track.armAtSvc = vpSeconds;
+                track.armSource = 'stop_status';
+              }
+              diagnostic.arrivalCandidateTripId = target;
+              diagnostic.reasons.push('incoming_at_arrival_arm');
+            }
+            // IN_TRANSIT_TO at a terminal stop is ambiguous (pulling out vs. stale label); geometry
+            // decides rather than forcing a fact from the status alone.
+          } else {
+            diagnostic.reasons.push('no_arrival_target');
+          }
+        } else if (!reportedStopInTerminal && vp.stopId !== undefined &&
+          end.firstStopId !== undefined && terminalStopIds.has(end.firstStopId)) {
+          // The entity is on an outbound trip whose first stop is this terminal and reports a
+          // non-terminal stop: it has pulled away from the bay. Any status value beyond the
+          // terminal counts (IN_TRANSIT_TO / INCOMING_AT / STOPPED_AT en route).
+          if (freshObservation) {
+            diagnostic.departureCandidateTripId = vp.tripId;
+            diagnostic.recordedDeparture = this.recordDeparture(
+              vp.tripId,
+              vpSeconds,
+              'vp',
+              'in_transit_to',
+              generatedAt,
+              serviceDate,
+              vp.vehicleId,
+            ) || diagnostic.recordedDeparture;
+            diagnostic.reasons.push('outbound_reported_stop_departure');
+            if (track.layoverTripId === vp.tripId) {
+              track.layoverTripId = undefined;
+              track.layoverAnchorStopId = undefined;
+              track.departStreak = 0;
+              track.departAtSvc = undefined;
+            }
+          }
+        }
+      }
 
       // Trip re-key semantics follow the corrected model: flipping onto an outbound trip
       // confirms that trip's arrival/assignment. A re-key is not a departure signal because the
@@ -675,10 +794,13 @@ export class Engine {
               track.parkedStreak = 0;
               track.armAtSvc = undefined;
               track.armTripId = undefined;
+              track.armSource = undefined;
             }
             if (track.armTripId === undefined) {
               track.armAtSvc = vpSeconds;
               track.armTripId = target;
+              // Geometry is the fallback signal, so a freshly geometric arm is abortable.
+              track.armSource = 'geometry';
             }
             if (stationaryInHoldZone) {
               track.parkedStreak++;
@@ -702,6 +824,7 @@ export class Engine {
               track.layoverAnchorStopId = this.tripEnds().get(target)?.firstStopId;
               track.parkedStreak = 0;
               track.armTripId = undefined;
+              track.armSource = undefined;
             } else {
               diagnostic.reasons.push(stationaryInHoldZone ? 'arrival_armed' : 'arrival_waiting_dwell');
             }
@@ -714,12 +837,19 @@ export class Engine {
       } else if (diagnostic.parked) {
         diagnostic.reasons.push('parked_not_in_terminal_buffer');
       } else if (track.armTripId) {
-        // Left the hold zone entirely: drop the pending arm so a bus that pulls out before the
-        // arm latches does not linger as a would-be layover.
-        diagnostic.reasons.push('left_hold_zone_abort');
-        track.parkedStreak = 0;
-        track.armTripId = undefined;
-        track.armAtSvc = undefined;
+        // A stop-status INCOMING_AT arm is the feed's own word that the bus is pulling in, so it
+        // persists until a STOPPED_AT or the geometric dwell commits it. A geometry-only arm that
+        // leaves the hold zone entirely is dropped so a bus that pulls out before the arm latches
+        // does not linger as a would-be layover.
+        if (track.armSource === 'stop_status') {
+          diagnostic.reasons.push('stop_status_arm_held');
+        } else {
+          diagnostic.reasons.push('left_hold_zone_abort');
+          track.parkedStreak = 0;
+          track.armTripId = undefined;
+          track.armAtSvc = undefined;
+          track.armSource = undefined;
+        }
       }
 
       // Position-based fallback: a vehicle first seen on an outbound trip beyond the tight
@@ -782,6 +912,14 @@ export class Engine {
         }
       }
 
+      if (reportedStopInTerminal) {
+        // Stop-status is authoritative for the terminal posture: a vehicle the feed reports at a
+        // terminal stop is in the buffer (parked once STOPPED_AT) regardless of coordinate noise,
+        // so the diagnostic shows the feed's word instead of the geometry-only anchor distance.
+        diagnostic.inTerminalBuffer = true;
+        diagnostic.parked = status === 'STOPPED_AT';
+      }
+
       if (!diagnostic.recordedArrival && !diagnostic.recordedDeparture && diagnostic.reasons.length === 0) {
         diagnostic.reasons.push('no_transition');
       }
@@ -795,6 +933,22 @@ export class Engine {
           terminalId: postureTerminal.id,
           inBuffer: diagnostic.inTerminalBuffer,
           parked: diagnostic.parked,
+          distToTerminalM: diagnostic.distToTerminalM,
+          armTripId: track.armTripId,
+          layoverTripId: track.layoverTripId,
+          departurePending: track.layoverTripId !== undefined && track.departStreak > 0,
+        });
+      }
+
+      // Stop-status is authoritative for the terminal posture and overrides the geometry-derived
+      // state: a vehicle the feed reports at a terminal stop is inside that terminal's buffer
+      // (parked once STOPPED_AT) independent of coordinate noise. buildDepartures consumes this for
+      // its inBuffer/parked layover classification, so it must reflect the final track state.
+      if (reportedStopInTerminal && statusTerminal) {
+        vpTerminalState.set(vehicleTerminalKey(vp.vehicleId, statusTerminal.id), {
+          terminalId: statusTerminal.id,
+          inBuffer: true,
+          parked: status === 'STOPPED_AT',
           distToTerminalM: diagnostic.distToTerminalM,
           armTripId: track.armTripId,
           layoverTripId: track.layoverTripId,
@@ -982,6 +1136,8 @@ export class Engine {
     // Buffer radii mirror the geofence arms in recordFacts: the arrival circle is the terminal
     // arrival geofence (per-terminal override wins), the movement/hysteresis circle extends it by
     // the terminal movement allowance, and the departure circle is the outbound departure trigger.
+    // Stop-status is now the PRIMARY arrival/departure signal, so these circles describe only the
+    // geometry fallback path; they are flagged `fallback` for the client to de-emphasize.
     const arrivalRadius = terminal.radiusMeters ?? config.arrivalRadiusMeters ?? 150;
     const movementMeters = config.terminalMovementMeters ?? 75;
     const departureRadius = config.departureTriggerMeters ?? 75;
@@ -996,9 +1152,9 @@ export class Engine {
       const name = names.get(stopId) ?? stopId;
       stops.push({ stopId, name, lat: coord.lat, lon: coord.lon });
       buffers.push(
-        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius, kind: 'arrival' },
-        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius + movementMeters, kind: 'movement' },
-        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: departureRadius, kind: 'departure' },
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius, kind: 'arrival', fallback: true },
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: arrivalRadius + movementMeters, kind: 'movement', fallback: true },
+        { stopId, lat: coord.lat, lon: coord.lon, radiusMeters: departureRadius, kind: 'departure', fallback: true },
       );
       latSum += coord.lat;
       lonSum += coord.lon;
@@ -1009,11 +1165,14 @@ export class Engine {
       ? { lat: latSum / centerCount, lon: lonSum / centerCount }
       : { lat: 0, lon: 0 };
 
-    const vpByVehicle = new Map(rt.vehiclePositions.map((vp) => [vp.vehicleId, vp]));
+    const vpByVehicle = new Map(
+      dedupeVehiclePositions(rt.vehiclePositions, [terminal]).map((vp) => [vp.vehicleId, vp]),
+    );
+    const terminalStopIds = new Set(terminal.stopIds);
     const vehicles: VehicleMapMarker[] = [];
     for (const route of snapshot.routes) {
       for (const bus of route.incoming) {
-        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'inbound', bus.etaSeconds, vpByVehicle, center);
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'inbound', bus.etaSeconds, vpByVehicle, center, terminalStopIds);
         if (marker) vehicles.push(marker);
       }
       for (const bus of route.layovers) {
@@ -1024,11 +1183,11 @@ export class Engine {
           : bus.departurePending === true
             ? 'departing'
             : 'laying_over';
-        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, status, undefined, vpByVehicle, center);
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, status, undefined, vpByVehicle, center, terminalStopIds);
         if (marker) vehicles.push(marker);
       }
       for (const bus of route.departed) {
-        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'departed', undefined, vpByVehicle, center);
+        const marker = this.toMapMarker(bus.vehicleId, bus.tripId, route, 'departed', undefined, vpByVehicle, center, terminalStopIds);
         if (marker) vehicles.push(marker);
       }
     }
@@ -1173,27 +1332,52 @@ export class Engine {
     etaSeconds: number | undefined,
     vpByVehicle: ReadonlyMap<string, VehiclePositionInfo>,
     center: GeoPoint,
+    terminalStopIds: ReadonlySet<string>,
   ): VehicleMapMarker | undefined {
     if (!vehicleId) return undefined;
     const vp = vpByVehicle.get(vehicleId);
     if (vp === undefined || vp.lat === undefined || vp.lon === undefined) return undefined;
     const point = { lat: vp.lat, lon: vp.lon };
     const towardTerminal = bearingDegrees(point, center);
+    const markerStatus = this.mapStatusFromVp(status, vp, terminalStopIds);
     const computed =
-      (towardTerminal + (status === 'departing' || status === 'departed' ? 180 : 0)) % 360;
+      (towardTerminal + (markerStatus === 'departing' || markerStatus === 'departed' ? 180 : 0)) % 360;
     const headingDegrees = vp.bearing !== undefined ? vp.bearing : computed;
     return {
       vehicleId,
       tripId,
       routeShortName: route.routeShortName,
       routeColor: route.color,
-      status,
+      status: markerStatus,
       lat: vp.lat,
       lon: vp.lon,
       headingDegrees,
       label: vehicleId,
       etaSeconds,
+      currentStopId: vp.stopId,
+      currentStopName: vp.stopId ? this.stopNames().get(vp.stopId) : undefined,
+      currentStatus: vp.currentStatus,
     };
+  }
+
+  // The debug map's arrow color follows the snapshot-derived classification, refined by the
+  // (now reliable) stop-status when the feed reports it: STOPPED_AT at a terminal stop is laying
+  // over, INCOMING_AT at a terminal stop is arriving, and a reported non-terminal stop or
+  // IN_TRANSIT_TO means the bus is beyond the terminal (departing). A genuinely inbound bus keeps
+  // its inbound color, and a bus with a committed departure stays departed rather than flickering
+  // back into the terminal color scheme from its live status.
+  private mapStatusFromVp(
+    fallback: VehicleMapStatus,
+    vp: VehiclePositionInfo,
+    terminalStopIds: ReadonlySet<string>,
+  ): VehicleMapStatus {
+    if (vp.currentStatus === undefined) return fallback;
+    const atTerminal = vp.stopId !== undefined && terminalStopIds.has(vp.stopId);
+    if (atTerminal && vp.currentStatus === 'STOPPED_AT') return 'laying_over';
+    if (atTerminal && vp.currentStatus === 'INCOMING_AT') return 'arriving';
+    if (fallback === 'inbound') return 'inbound';
+    if (fallback === 'departed') return 'departed';
+    return 'departing';
   }
 
 }

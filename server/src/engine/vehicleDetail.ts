@@ -112,17 +112,15 @@ function toPassedStop(deps: BuildVehicleDetailDeps, stop: StaticStop): PassedSto
   };
 }
 
-// Whether a TU stop update refers to the stop the vehicle currently occupies. VP carries
-// stop_id only ~8% of the time and never current_stop_sequence, so this rarely fires, but the
-// owner decision is explicit: an update for the current stop is never shown as upcoming.
+// Whether a TU stop update refers to the stop the vehicle currently occupies. stop_id is the only
+// trustworthy stop identity (the feed now carries it on ~99% of entities). current_stop_sequence is
+// unreliable on this feed — CTA reports 1 at terminals regardless of the static sequence — so it is
+// never used for stop resolution here; an update for the current stop is simply not shown as upcoming.
 function isCurrentStop(
   update: StopTimePrediction,
   currentStopId: string | undefined,
-  currentStopSequence: number | undefined,
 ): boolean {
-  if (currentStopId !== undefined && update.stopId === currentStopId) return true;
-  if (currentStopSequence !== undefined && update.stopSequence === currentStopSequence) return true;
-  return false;
+  return currentStopId !== undefined && update.stopId === currentStopId;
 }
 
 // Build the upcoming-stops list and its passed counterpart.
@@ -137,7 +135,6 @@ function buildStopWindow(
   stops: StaticStop[],
   tu: TripUpdateInfo | undefined,
   currentStopId: string | undefined,
-  currentStopSequence: number | undefined,
 ): { upcoming: UpcomingStop[]; passedCount: number; passedStops: PassedStop[] } {
   const firstSequence = stops[0]?.stopSequence ?? 0;
 
@@ -154,7 +151,7 @@ function buildStopWindow(
 
   const carried = new Map<number, StopTimePrediction>();
   for (const update of tu.stopTimeUpdates) {
-    if (isCurrentStop(update, currentStopId, currentStopSequence)) continue;
+    if (isCurrentStop(update, currentStopId)) continue;
     carried.set(update.stopSequence, update);
   }
   const sequences = [...carried.keys()].sort((a, b) => a - b);
@@ -241,7 +238,7 @@ export function buildVehicleDetail(deps: BuildVehicleDetailDeps): VehicleDetail 
   const stopsTripEnd = deps.tripEnds.get(stopsTripId);
   const stops = loadStops(deps, stopsTripId);
   const tu = deps.rt.tripUpdates.find((u) => u.tripId === stopsTripId);
-  const timeline = buildStopWindow(deps, stops, tu, vp?.stopId, vp?.currentStopSequence);
+  const timeline = buildStopWindow(deps, stops, tu, vp?.stopId);
 
   const nextTripId = deps.blockChains.nextTrip.get(deps.tripId);
   const nextTripEnd = nextTripId ? deps.tripEnds.get(nextTripId) : undefined;
