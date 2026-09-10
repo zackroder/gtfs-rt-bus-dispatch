@@ -62,14 +62,18 @@ Declined, canceled, and expired recommendations never affect dispatch.
   vehicle's current stop.
 - **Intervention queue** — persistent hold recommendations with a reason, and
   audited apply/decline/cancel actions.
-- **Debug map** — geofence circles around a terminal's stops plus color-coded
-  arrows for live vehicles (inbound, arriving, laying over, departing,
-  departed). Linked from each terminal view.
+- **Debug map** — a terminal's stops, the fallback geofence circles, and
+  color-coded arrows for live vehicles (inbound, arriving, laying over,
+  departing, departed). Marker tooltips carry the stop and status the feed
+  reports; stop-status is the primary arrival/departure signal and the
+  geofence is the geometry fallback. Linked from each terminal view.
 - **Vehicle card detail** — selecting any bus card opens a panel with a mini
   map (live arrow, upcoming stop dots), the upcoming stops list (schedule
   times with "est" when the TripUpdates feed predicts them), and the run's
-  block strip: one colored segment per trip labeled by route number,
-  destination, and direction (deterministic shading of the route color).
+  block manifest: a compact vertical list of the block's trips showing each
+  trip's origin → destination, cardinal direction (inferred from the
+  first→last stop bearing), scheduled window, and observed terminal
+  arrival/departure times when the feed confirmed them.
 - **Live updates** — GTFS-Realtime polling pushed to the UI over WebSocket, with
   a polling fallback.
 - **Configurable rules** — rest, hold, and lookahead parameters plus feed URLs,
@@ -166,9 +170,10 @@ routes (co-located terminals); `radiusMeters` overrides the global
   realtime prediction exists), block identity, hold state, and the block
   successor. 404 for an unknown terminal, a trip absent from static, or a trip
   with no live presence at the terminal.
-- `GET /api/blocks/:blockId` — the block strip for the active service date:
-  one segment per trip (past/current/future, observed departure ticks). 404 for
-  an unknown block.
+- `GET /api/blocks/:blockId` — the block manifest for the active service
+  date: one row per trip in block order (origin → destination, cardinal
+  direction, scheduled window, observed arrival/departure when recorded).
+  404 for an unknown block.
 - `GET /api/interventions?terminalId=T` — intervention queue for the active
   service day.
 - `GET /api/interventions/:id` — one intervention and its current status.
@@ -206,8 +211,12 @@ Local development: `npm run dev`.
 - Holds are decided in a single pass and are not re-solved after being applied.
 - The first and last departures in a sequence have only one neighbor and are
   never held.
-- Arrival/departure facts come only from fresh VehiclePosition coordinates;
-  cached, duplicate, out-of-order, or stale samples cannot trigger transitions.
+- Arrival/departure facts come primarily from the feed's stop-status
+  (STOPPED_AT at a terminal stop, INCOMING_AT arrival arms, and an outbound
+  entity reporting a non-terminal stop); geometry (geofence dwell / motion
+  exit) is the fallback for vehicles whose feed omits status/stop_id or whose
+  trip is not in static. Cached, duplicate, out-of-order, or stale samples
+  cannot trigger transitions.
 - TripUpdates supply estimates (arrival, ETA) but are never treated as observed
   facts.
 - Co-located multi-route terminal views and manager roles are not in scope.
