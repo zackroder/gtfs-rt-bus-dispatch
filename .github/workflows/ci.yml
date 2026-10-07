@@ -1,0 +1,28 @@
+# Continuous integration for the dispatch pilot.
+# See .agents/DEPLOYMENT_PLAN.md (Phase 6). Runs on every PR into dev/main and on
+# every push to dev; the deploy workflow is gated on this job via branch protection.
+name: ci
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev]
+
+jobs:
+  # The job is named `ci` so branch protection can require exactly this status check.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # better-sqlite3 ships Linux x64 prebuilds, so no apt packages are needed.
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
