@@ -299,6 +299,65 @@ describe('api routes', () => {
     expect((await applied.json() as { status: string }).status).toBe('applied');
   });
 
+  it('gates mutating routes when a dispatch token is configured', async () => {
+    const deps = makeDeps({
+      dispatchToken: 'sekrit',
+      getHealth: () => ({ ok: true, tokenRequired: true, lastRefreshAt: 123, staticLoadedAt: 456 }),
+    });
+    const serviceDate = activeServiceDate(new Date(), getServiceDayStart(deps.db), 'UTC');
+    const now = Math.floor(Date.now() / 1000);
+    const intervention = deps.interventions.createSuggestion({
+      id: `hold:${serviceDate}:T1:1:D1`,
+      serviceDate,
+      terminalId: 'T1',
+      routeId: '1',
+      rule: 'hold',
+      tripId: 'D1',
+      holdSeconds: 90,
+      reason: 'uneven headways',
+      until: 900,
+      generatedAt: now,
+      expiresAt: now + 3600,
+    });
+    const base = await startServer(deps);
+
+    // Reads stay open and report that a token is required.
+    const health = await fetch(`${base}/health`);
+    expect(health.status).toBe(200);
+    expect((await health.json() as { tokenRequired?: boolean }).tokenRequired).toBe(true);
+
+    // Mutating routes without the header are rejected.
+    const blockedView = await fetch(`${base}/interventions/${intervention.id}/view`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actorId: 'manager-1' }),
+    });
+    expect(blockedView.status).toBe(401);
+    expect((await blockedView.json() as { error: string }).error).toBe('token required');
+    const blockedConfig = await fetch(`${base}/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(baseConfig),
+    });
+    expect(blockedConfig.status).toBe(401);
+    const blockedReload = await fetch(`${base}/static/reload`, { method: 'POST' });
+    expect(blockedReload.status).toBe(401);
+
+    // A wrong token is rejected; the correct one passes the gate.
+    const wrongToken = await fetch(`${base}/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-dispatch-token': 'nope' },
+      body: JSON.stringify(baseConfig),
+    });
+    expect(wrongToken.status).toBe(401);
+    const allowedView = await fetch(`${base}/interventions/${intervention.id}/view`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-dispatch-token': 'sekrit' },
+      body: JSON.stringify({ actorId: 'manager-1' }),
+    });
+    expect(allowedView.status).toBe(200);
+  });
+
   it('returns the append-only run events log, filterable by terminal', async () => {
     const deps = makeDeps();
     const now = Math.floor(Date.now() / 1000);

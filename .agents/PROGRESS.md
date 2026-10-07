@@ -725,3 +725,33 @@ Deviations / measurements:
   config schema requires integer hours; the stale code path is identical.
 
 `npm run typecheck`, `npm run lint`, `npm test` (171 tests) all green.
+
+## Deployment Phase 4 — Dispatch token gate (complete)
+
+Branch `feat/dispatch-token-gate` → PR into `dev`.
+
+- New env `DISPATCH_TOKEN` (documented in `.env.example`). Unset → behavior
+  identical to before (friction-free local dev).
+- A `requireToken` middleware guards every mutating route: the four intervention
+  POSTs (`view|apply|decline|cancel`), `PUT /api/config`, and
+  `POST /api/static/reload`. A missing/wrong `x-dispatch-token` → `401`
+  `{"error":"token required"}`; comparison is constant-time
+  (`crypto.timingSafeEqual`).
+- `GET /api/health` now includes `tokenRequired: boolean` (schema updated).
+- Web: `web/src/api.ts` attaches `x-dispatch-token` from
+  `localStorage.dispatchToken` to mutating requests only (reads and WS never send
+  it); `testDispatchToken()` probes a mutating route with no side effects.
+  `ConfigPage` gains an Operator-token field with Save/Test/Clear.
+- `routes.test.ts`: with `dispatchToken` set, mutating routes 401 without the
+  header and succeed with it; reads stay open. Without the token, the whole
+  suite passes unchanged.
+
+Acceptance evidence (local server with `DISPATCH_TOKEN=test-token-123`):
+
+- `GET /api/health` → `tokenRequired: true`; reads `/api/run-events`,
+  `/api/terminals`, `/api/config` all 200; WS `/api/ws` connects.
+- `POST /api/static/reload` and `POST /api/interventions/__token-test__/view`
+  and `PUT /api/config` → `401` without the header; the intervention probe
+  returns `409` (unknown id, i.e. it cleared the gate) with the header.
+
+`npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.

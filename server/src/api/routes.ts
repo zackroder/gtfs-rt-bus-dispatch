@@ -1,4 +1,5 @@
-import { Router, type Request, type Response } from 'express';
+import crypto from 'node:crypto';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import type { Database } from 'better-sqlite3';
 import {
   appConfigSchema,
@@ -40,6 +41,7 @@ export interface ApiDeps {
   computeBlockTimeline(blockId: string): Promise<BlockTimeline | undefined>;
   getHealth(): {
     ok: boolean;
+    tokenRequired?: boolean;
     lastRefreshAt: number | null;
     staticLoadedAt: number | null;
     ready?: boolean;
@@ -55,6 +57,20 @@ export interface ApiDeps {
   reloadStatic(): Promise<void>;
   refreshOnce(): Promise<void>;
   interventions: InterventionStore;
+  /** When set, mutating routes require an `x-dispatch-token` header matching this value. */
+  dispatchToken?: string;
+}
+
+// Constant-time token comparison; timingSafeEqual throws on a length mismatch, so unequal
+// lengths compare a buffer against itself first to avoid an exception-driven timing signal.
+function tokensMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) {
+    crypto.timingSafeEqual(a, a);
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
 }
 
 // Keep response construction in one place so every endpoint uses Express JSON serialization.
@@ -79,6 +95,22 @@ function routeIdsForTerminal(db: Database, stopIds: string[]): string[] {
 // Build the API router around injectable stores and engine callbacks for production and tests.
 export function createApi(deps: ApiDeps): Router {
   const router = Router();
+
+  // Optional token gate for mutating routes. Unset DISPATCH_TOKEN leaves local/dev behavior
+  // identical to before; reads and the WS stream are never gated.
+  const requireToken = (req: Request, res: Response, next: NextFunction): void => {
+    const expected = deps.dispatchToken;
+    if (!expected) {
+      next();
+      return;
+    }
+    const provided = req.header('x-dispatch-token') ?? '';
+    if (!tokensMatch(provided, expected)) {
+      sendJson(res, 401, { error: 'token required' });
+      return;
+    }
+    next();
+  };
 
   router.get('/health', (_req, res) => {
     sendJson(res, 200, deps.getHealth());
@@ -185,16 +217,16 @@ export function createApi(deps: ApiDeps): Router {
     }
   };
 
-  router.post('/interventions/:id/view', (req, res) => {
+  router.post('/interventions/:id/view', requireToken, (req, res) => {
     void action('view', req, res);
   });
-  router.post('/interventions/:id/apply', (req, res) => {
+  router.post('/interventions/:id/apply', requireToken, (req, res) => {
     void action('apply', req, res);
   });
-  router.post('/interventions/:id/decline', (req, res) => {
+  router.post('/interventions/:id/decline', requireToken, (req, res) => {
     void action('decline', req, res);
   });
-  router.post('/interventions/:id/cancel', (req, res) => {
+  router.post('/interventions/:id/cancel', requireToken, (req, res) => {
     void action('cancel', req, res);
   });
 
@@ -344,7 +376,7 @@ export function createApi(deps: ApiDeps): Router {
     sendJson(res, 200, redactConfig(deps.getConfig()));
   });
 
-  router.put('/config', (req, res) => {
+  router.put('/config', requireToken, (req, res) => {
     // Zod validation happens at the API boundary before persistence or audit logging.
     const parsed = appConfigSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -361,7 +393,7 @@ export function createApi(deps: ApiDeps): Router {
     sendJson(res, 200, redactConfig(config));
   });
 
-  router.post('/static/reload', async (_req, res) => {
+  router.post('/static/reload', requireToken, async (_req, res) => {
     // A static reload refreshes both the schedule tables and the derived live snapshot.
     try {
       await deps.reloadStatic();
