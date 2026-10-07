@@ -543,3 +543,19 @@ feed fetch, never `engine.refresh`).
    `/api/diagnostics/vp` (`dist_to_terminal_m`, parked/armed/flip reasons).
 2. Add browser-level tests for queue actions and WebSocket reconnect behavior.
 3. Add co-located multi-route terminal view improvements.
+
+---
+
+# Deployment plan execution
+
+Tracks execution of `.agents/DEPLOYMENT_PLAN.md` (phases 0–6). Each phase lands
+as its own focused PR into `dev`; the owner handles the Phase 6 owner tasks
+(branch protection, default branch, `FLY_API_TOKEN`) and Phases 7–8.
+
+## Deployment Phase 0 — Hygiene (complete)
+
+- Removed the untracked scratch file `server/src/_vpStatus.ts` (unreferenced
+  duplicate of the `gtfs/realtime.ts` decode logic; it also failed lint). No
+  tracked files changed.
+- Baseline verified on `dev`: `npm run typecheck`, `npm run lint`, and
+  `npm test` (162 tests) all green; working tree clean of untracked files.
