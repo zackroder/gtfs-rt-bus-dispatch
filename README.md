@@ -152,10 +152,15 @@ Environment variables only seed first-run defaults.
 | `departureTriggerMeters` | 75 | Distance beyond the outbound first stop that starts departure confirmation |
 | `terminals` | auto-discovered | `[{ id, name, stopIds[], routeIds[]?, radiusMeters? }]` |
 
-Terminals are auto-discovered from GTFS as the first/last stops of routes and
-can be overridden in config. A terminal can map to multiple `stop_id`s and
-routes (co-located terminals); `radiusMeters` overrides the global
-`arrivalRadiusMeters` for that terminal.
+Terminals are auto-discovered from GTFS as the endpoints of routes: every
+distinct first/last stop served by at least two trips, across the union of
+service IDs active over the next seven days (so weekend-only and time-of-day
+variants — e.g. the #9 southbound 104 Vincennes morning vs. 95 Beverly midday —
+are all found). A terminal can map to multiple `stop_id`s and routes
+(co-located terminals); `radiusMeters` overrides the global
+`arrivalRadiusMeters` for that terminal. Auto-discovery re-runs on every static
+load and replaces the configured list when it changes; saving the Settings page
+marks the terminals as a manual override, which discovery then never touches.
 
 ## API
 

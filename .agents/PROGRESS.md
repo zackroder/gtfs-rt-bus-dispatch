@@ -559,3 +559,65 @@ as its own focused PR into `dev`; the owner handles the Phase 6 owner tasks
   tracked files changed.
 - Baseline verified on `dev`: `npm run typecheck`, `npm run lint`, and
   `npm test` (162 tests) all green; working tree clean of untracked files.
+
+## Deployment Phase 1 — Time-of-day terminal discovery + active-only display (complete)
+
+Branch `feat/terminal-time-variants` → PR into `dev`.
+
+- Discovery (`engine/terminal.ts`) now keeps **every** distinct first/last stop
+  served by ≥ `DISCOVERY_MIN_TRIPS` (2) trips per `route:direction` instead of
+  only the modal endpoint, so minority time-of-day variants survive; one-off
+  deadheads/short-turns are filtered.
+- Discovery unions `activeServiceIds` over the next 7 service dates
+  (`discoveryServiceIds`), so weekend-only variants are found.
+- `config.ts` persists `terminalsSource: 'auto' | 'manual'` (absent → auto).
+  `discoverTerminals()` re-runs on every static load in auto mode and replaces
+  `config.terminals` only when it changes; a successful `PUT /api/config` marks
+  the terminals manual and discovery never touches them again.
+- New windowed activity query `activeRoutesByStop` / `activeRoutesAtTerminal`:
+  a route is active at a terminal when it has an endpoint event (first-stop
+  departure or last-stop arrival) in `[now − 30 min, now + lookahead]`. The
+  inbound-arrival side makes a terminal that currently only receives buses show
+  as active.
+- `GET /api/terminals` splits each route's `terminalIds` (active) from
+  `inactiveTerminalIds` (off-duty); the shared Zod schema and `web/src/api.ts`
+  DTO carry the new field.
+- `web/src/pages/Terminals.tsx` renders active links, tucks inactive ones into a
+  collapsed `<details>` "Off-duty" disclosure, polls every 60 s, and refetches on
+  `visibilitychange`.
+- `engine.ts` intersects an auto terminal's whole-day `routeIds` with the
+  windowed route list (union with queued intervention routes unchanged), so a
+  route with no departures in the window produces no empty route state while
+  queued work stays visible.
+- README "Terminals are auto-discovered…" paragraph updated for variants, 7-day
+  scope, and re-discovery.
+
+Measurements (CTA full feed: 10,695 stops, 100k trips, 6.0M stop_times; 485
+discovered terminals):
+
+- `GET /api/terminals` wall time: **~1.4 s** (after optimization).
+- Static **reuse** boot (discovery included): **~4.4 s** (was ~18.6 s).
+
+Deviations / notes:
+
+- The plan's per-terminal `activeRoutesAtTerminal` SQL (correlated `MIN`/`MAX`
+  subqueries) made `/api/terminals` take **~66 s** on the full feed. Replaced the
+  endpoint's batch path with a single `trip_bounds` CTE query
+  (`activeRoutesByStop`), reducing it to ~1.4 s. `activeRoutesAtTerminal` now
+  delegates to it (tests unchanged in intent).
+- The engine route intersection uses `now − 30 min … now + lookahead` (the same
+  window `buildDepartures` uses), not `now … now + lookahead`; otherwise active
+  layovers and recently-departed routes dropped out of the snapshot and broke
+  the vehicle-detail projection.
+- `autoDiscoverTerminals` was rewritten to return only each active trip's
+  first/last stop (bounds CTE) rather than every `stop_time`; the original query
+  with the new 7-day union took ~18.6 s per static load.
+- `PUT /api/config` marks `terminalsSource = 'manual'` on any successful write
+  (the config schema always carries a `terminals` array), matching the
+  pre-Phase-1 behavior where any persisted terminal list disabled discovery.
+
+Acceptance: both #9 southbound variants (`Vincennes & 104th Street` and
+`Ashland & 95th Street`) are discovered and present in config `terminals`, and
+the live `/api/terminals` response splits route 9 into active vs off-duty
+terminals; the exact 07:00/midday flip is covered by unit tests against a fixed
+window. `npm run typecheck`, `npm run lint`, `npm test` (167 tests) all green.

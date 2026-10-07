@@ -499,6 +499,8 @@ export const terminalsResponseSchema = z.object({
     color: z.string().optional(),
     textColor: z.string().optional(),
     terminalIds: z.array(z.string()),
+    /** Terminals serving the route that are off duty at the current moment (collapsed in the UI). */
+    inactiveTerminalIds: z.array(z.string()),
   })),
 });
 

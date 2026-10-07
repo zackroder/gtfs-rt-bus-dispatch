@@ -26,6 +26,7 @@ import {
   buildDepartures,
   buildTripEnds,
   dedupeVehiclePositions,
+  PAST_WINDOW_SECONDS,
   type BlockChains,
   type ArrivalAtStop,
   type FactSource,
@@ -975,15 +976,31 @@ export class Engine {
   ): RouteState[] {
     const config = this.getConfig();
     const queueInterventions = this.interventions.listForTerminal(ctx.serviceDate, terminal.id);
-    const configuredRouteIds =
-      terminal.routeIds ??
-      outboundRoutesAtTerminal(
-        this.db,
-        terminal.stopIds,
-        ctx.activeServiceIds,
-        ctx.nowSvc,
-        ctx.nowSvc + ctx.lookaheadSeconds,
-      );
+    // Auto-discovered terminals carry a whole-day route list, so intersect it with the same
+    // departure window buildDepartures uses (now−30m … now+lookahead): a route with no outbound
+    // departure in that window produces no empty route state and no wasted compute, while a route
+    // whose bus is still laying over or recently departed stays visible. Manual terminals without
+    // routeIds keep the current windowed fallback unchanged.
+    const configuredRouteIds = terminal.routeIds
+      ? (() => {
+          const activeWindow = new Set(
+            outboundRoutesAtTerminal(
+              this.db,
+              terminal.stopIds,
+              ctx.activeServiceIds,
+              ctx.nowSvc - PAST_WINDOW_SECONDS,
+              ctx.nowSvc + ctx.lookaheadSeconds,
+            ),
+          );
+          return terminal.routeIds!.filter((routeId) => activeWindow.has(routeId));
+        })()
+      : outboundRoutesAtTerminal(
+          this.db,
+          terminal.stopIds,
+          ctx.activeServiceIds,
+          ctx.nowSvc,
+          ctx.nowSvc + ctx.lookaheadSeconds,
+        );
     const routeIds = new Set([
       ...configuredRouteIds,
       ...queueInterventions.map((intervention) => intervention.routeId),

@@ -32,6 +32,8 @@ export interface TerminalsResponse {
     color?: string;
     textColor?: string;
     terminalIds: string[];
+    /** Terminals serving the route that are off duty at the current moment. */
+    inactiveTerminalIds: string[];
   }>;
 }
 

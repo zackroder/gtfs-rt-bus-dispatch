@@ -17,6 +17,27 @@ export function setSetting(db: Database, key: string, value: unknown): void {
   ).run(key, JSON.stringify(value));
 }
 
+// Whether terminals are managed by auto-discovery or frozen by an explicit owner override.
+export type TerminalsSource = 'auto' | 'manual';
+
+// Terminal-discovery mode is persisted separately from the config object so the settings API can
+// flag an owner override without letting the internal discovery path flip itself to manual.
+export function getTerminalsSource(db: Database): TerminalsSource {
+  const raw = getSetting(db, 'terminalsSource');
+  if (raw === null) return 'auto';
+  try {
+    // Absent (or malformed) means auto: the only way terminals were populated historically is
+    // discovery, so existing deployments keep being re-discovered after this change.
+    return JSON.parse(raw) === 'manual' ? 'manual' : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function setTerminalsSource(db: Database, source: TerminalsSource): void {
+  setSetting(db, 'terminalsSource', source);
+}
+
 const DEFAULT_URLS = {
   tripUpdatesUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb',
   vehiclePositionsUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb',
