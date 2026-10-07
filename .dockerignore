@@ -1,0 +1,14 @@
+# Keep the build context small and free of local state/secrets. The Dockerfile copies only the
+# workspace manifests and sources, but the daemon would otherwise upload all of this.
+node_modules
+**/node_modules
+**/dist
+data
+**/data
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.agents
+*.log

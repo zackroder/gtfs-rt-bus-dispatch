@@ -755,3 +755,45 @@ Acceptance evidence (local server with `DISPATCH_TOKEN=test-token-123`):
   returns `409` (unknown id, i.e. it cleared the gate) with the header.
 
 `npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.
+
+## Deployment Phase 5 — Docker + Fly packaging (complete, with a sizing blocker)
+
+Branch `chore/docker-fly-packaging` → PR into `dev`.
+
+- `Dockerfile` (repo root, multi-stage): `node:22-slim` + `build-essential`
+  + `python3` builder runs `npm ci` → `npm run build` (typecheck + web +
+  server bundle) → `npm ci --omit=dev`; the runtime stage copies the prod
+  `node_modules`, `server/dist`, `web/dist`, and the workspace manifests.
+  `ENV PORT=8080 DB_PATH=/data/dispatch.db STATIC_GTFS_PATH=/data/gtfs.zip`;
+  `CMD ["node", "server/dist/index.js"]`.
+- `fly.toml` (repo root): `app = "dispatch-pilot"`, `primary_region = "ord"`,
+  `internal_port = 8080`, `force_https = true`, `min_machines_running = 1`
+  (never autostop), `[[mounts]] data → /data`, an `/api/health` HTTP check
+  (10 s / 5 s), `kill_timeout = 30`, `[[vm]] shared-cpu-1x`.
+- `.dockerignore` added so the build context excludes `node_modules`, `data/`,
+  `.env`, and `.git` (the Dockerfile copies explicit paths, but the daemon would
+  otherwise upload the 736 MB local DB and secrets).
+
+Verification (no Docker Desktop — the image build is deferred to Fly's remote
+builder at first deploy; the plan's substitute is the fresh-clone sequence):
+
+- Fresh `git clone` of `dev` → `npm ci` → `npm run build` → `npm ci --omit=dev`
+  all green; `require('better-sqlite3')` loads and queries.
+- `node server/dist/index.js` (production bundle) boots; `/api/health` → `ready`;
+  `/api/ws` connects; `GET /api/terminals/:id` returns a snapshot; `/` serves the
+  built web index.
+
+**Memory measurement (blocker):**
+
+- Full CTA static load on the production bundle: **peak RSS ~3.5 GB during
+  parse**, ~2.6 GB during persist (96,025 trips / 5.9 M stop_times). Steady-state
+  after a `[static] reuse` boot: **~368 MB RSS**.
+- The plan's rule is ">400 MB → 1 GB", so `fly.toml` is set to `memory = "1gb"`,
+  but the measured peak is ~3.5 GB — the 1 GB (indeed 512 MB) machine will very
+  likely OOM on the first static load. Fixing this needs either a larger machine
+  (breaks the $2–4/mo target) or a streaming/memory-efficient GTFS parse, which
+  is a re-architecture outside this plan. **Flagged for the owner before Phase 7.**
+- The image build itself (Dockerfile correctness under the remote builder) is
+  deferred to Phase 7, as the plan specifies.
+
+`npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.
