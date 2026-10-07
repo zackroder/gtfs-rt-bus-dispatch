@@ -678,3 +678,50 @@ Acceptance: with the app running and no browser open, `run_events` and
 `interventions` accumulated across hundreds of terminals, and decision context is
 machine-readable. `npm run typecheck`, `npm run lint`, `npm test` (169 tests) all
 green.
+
+## Deployment Phase 3 — Scheduled static GTFS refresh (complete)
+
+Branch `fix/static-auto-refresh` → PR into `dev`.
+
+- `downloadStatic(url, cachePath, opts?)` gained `opts.force`: a forced load skips
+  the cache read but still writes the freshly downloaded bytes back, so a
+  persistent volume no longer freezes on the day-0 artifact. Non-force behavior
+  is unchanged.
+- `GtfsStaticProvider.load()` passes `cachePath` + `force` for forced loads
+  (manual reloads now refresh the cache instead of downloading with no cache).
+- `ensureStaticLoadedInternal` computes `refreshCache = force || stale`, so the
+  stale branch re-downloads with force semantics (the cached bytes are what is
+  stale); the fresh-reuse branch is byte-identical.
+- New self-scheduling `scheduleStaticCheck()` runs alongside `scheduleRefresh()`
+  and calls `ensureStaticLoaded(false)` every `STATIC_CHECK_SECONDS` (default
+  3600, env-tunable and documented in `.env.example`). The call no-ops unless
+  `staticRefreshHours` has elapsed.
+- New `server/src/gtfs/static.test.ts` (mocked `fetch`, temp cache dir): a valid
+  cache short-circuits non-force; force fetches and replaces the cache bytes;
+  a missing cache downloads and writes.
+
+Acceptance evidence (with `STATIC_CHECK_SECONDS=60` and `staticLoadedAt` aged in
+the DB, since `staticRefreshHours` is integer-only so the plan's `0.02` cannot be
+set through `PUT /api/config`):
+
+- Logs: `[static] inspect … stale=true` → `[static] load … force=true`.
+- Cached `gtfs.zip` replaced: 99,567,748 bytes (Aug 14) → 68,738,293 bytes
+  (fresh, mtime advanced).
+- Pending interventions dropped from 51 to 0 on the reload and were re-created
+  afterward (30 `canceled` events for the service date).
+
+Deviations / measurements:
+
+- Raised the static download timeout (`fetchZip`) from 30 s to 120 s: the CTA zip
+  exceeded 30 s on this network, so every scheduled refresh aborted
+  (`error=This operation was aborted`). The realtime feeds keep their own short
+  timeouts.
+- Static reload on this dev machine was very slow: **persist ~27 min**,
+  **total ~35 min**, with **peak RSS ~2.2–2.5 GB** during parse/persist (likely
+  memory pressure/swap). This is a strong signal that the plan's 512 MB (even
+  1 GB) machine is undersized for the static-load step — flagged for Phase 5's
+  memory measurement and first deploy.
+- The acceptance used DB aging rather than `staticRefreshHours=0.02` because the
+  config schema requires integer hours; the stale code path is identical.
+
+`npm run typecheck`, `npm run lint`, `npm test` (171 tests) all green.

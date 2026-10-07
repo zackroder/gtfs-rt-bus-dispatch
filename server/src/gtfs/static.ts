@@ -31,7 +31,9 @@ function isZip(buffer: Buffer): boolean {
   );
 }
 
-async function fetchZip(url: string, timeoutMs = 30000): Promise<Buffer> {
+// The static zip is large and the CTA host can be slow; a scheduled re-download must not abort
+// mid-transfer, so allow a generous window (the realtime feeds keep their own short timeouts).
+async function fetchZip(url: string, timeoutMs = 120000): Promise<Buffer> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -52,11 +54,17 @@ async function fetchZip(url: string, timeoutMs = 30000): Promise<Buffer> {
   }
 }
 
-// Load a valid cached zip or download and optionally cache a fresh static feed.
-export async function downloadStatic(url: string, cachePath?: string): Promise<Buffer> {
+// Load a valid cached zip or download and optionally cache a fresh static feed. A forced load
+// skips the cache read (the cached bytes are what's stale) but still replaces it with the fresh
+// download, so a persistent volume does not freeze on the day-0 artifact forever.
+export async function downloadStatic(
+  url: string,
+  cachePath?: string,
+  opts: { force?: boolean } = {},
+): Promise<Buffer> {
   // A valid local cache avoids an unnecessary download; invalid cache bytes are removed so
   // the next attempt cannot repeatedly parse the same bad artifact.
-  if (cachePath && fs.existsSync(cachePath)) {
+  if (!opts.force && cachePath && fs.existsSync(cachePath)) {
     const cached = fs.readFileSync(cachePath);
     if (isZip(cached)) return cached;
     fs.unlinkSync(cachePath);
@@ -201,10 +209,11 @@ export class GtfsStaticProvider implements StaticProvider {
 
   // Load the configured static feed using the provider's cache policy.
   async load(): Promise<ParsedStaticGtfs> {
-    // Forced reloads bypass the cache; normal loads use it as the offline/startup fallback.
-    const buffer = this.options.force
-      ? await downloadStatic(this.options.url, undefined)
-      : await downloadStatic(this.options.url, this.options.cachePath);
+    // Forced reloads bypass the cache read but still refresh the cache with the fresh bytes;
+    // normal loads use the cache as the offline/startup fallback.
+    const buffer = await downloadStatic(this.options.url, this.options.cachePath, {
+      force: this.options.force,
+    });
     return parseStatic(buffer);
   }
 }

@@ -35,6 +35,13 @@ import type { RealtimeSnapshot } from './providers/types';
 const PORT = Number(process.env.PORT ?? 8080);
 const DB_PATH = process.env.DB_PATH ?? './data/dispatch.db';
 const STATIC_GTFS_PATH = process.env.STATIC_GTFS_PATH ?? './data/gtfs.zip';
+const parsedStaticCheckSeconds = Number(process.env.STATIC_CHECK_SECONDS);
+// How often to re-check static staleness while running; the call no-ops unless the configured
+// staticRefreshHours window has elapsed. Env-tunable so the acceptance test can run in minutes.
+const STATIC_CHECK_SECONDS =
+  Number.isFinite(parsedStaticCheckSeconds) && parsedStaticCheckSeconds > 0
+    ? parsedStaticCheckSeconds
+    : 3600;
 
 const db = createDatabase(DB_PATH);
 try {
@@ -135,12 +142,17 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
     return;
   }
 
+  // Staleness means the cached bytes are what's stale: re-download and replace the cache. A
+  // first load (no cache) and an explicit manual reload already fetch from the URL.
+  const refreshCache = force || stale;
   const providerInstance = new GtfsStaticProvider({
     url: config.staticGtfsUrl,
     cachePath: STATIC_GTFS_PATH,
-    force,
+    force: refreshCache,
   });
-  console.log(`[static] load source=${config.staticGtfsUrl} cache=${STATIC_GTFS_PATH}`);
+  console.log(
+    `[static] load source=${config.staticGtfsUrl} cache=${STATIC_GTFS_PATH} force=${refreshCache}`,
+  );
   const gtfs = await providerInstance.load();
   console.log(
     `[static] parsed stops=${gtfs.stops.length} routes=${gtfs.routes.length} ` +
@@ -326,6 +338,19 @@ function scheduleRefresh(): void {
   }, intervalMs);
 }
 
+function scheduleStaticCheck(): void {
+  // The realtime loop never re-checks static staleness, so a long-running collector would keep
+  // serving the day-0 schedule forever. This self-scheduling timer re-runs the (cheap) load
+  // guard; it no-ops unless staticRefreshHours has elapsed.
+  setTimeout(() => {
+    void ensureStaticLoaded(false)
+      .catch((err: unknown) => {
+        console.error('scheduled static check failed:', err instanceof Error ? err.message : err);
+      })
+      .finally(() => scheduleStaticCheck());
+  }, STATIC_CHECK_SECONDS * 1000);
+}
+
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use('/api', (req, res, next) => {
@@ -400,6 +425,7 @@ httpServer.listen(PORT, () => {
     })
     .finally(() => {
       scheduleRefresh();
+      scheduleStaticCheck();
       void refreshOnce().catch(() => undefined);
     });
 });
