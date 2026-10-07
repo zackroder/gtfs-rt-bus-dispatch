@@ -1,0 +1,43 @@
+# Fly.io configuration for the dispatch pilot: one always-on collector in Chicago.
+# The owner adopts this file with `fly launch --no-deploy` (Phase 7); no app is created here.
+app = "dispatch-pilot"
+primary_region = "ord"
+
+[build]
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # The collector must never autostop: it evaluates the whole active board continuously and
+  # records facts/recommendations with no viewer.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # /api/health returns 200 even while static GTFS loads (phase communicates detail), which is
+  # fine for keep-alive. The grace period covers the boot-time static check.
+  [[http_service.checks]]
+    interval = "10s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/api/health"
+
+# Memory is 1 GB per the plan's fallback for a >400 MB peak. WARNING: the measured peak during
+# a full CTA static parse was ~3.5 GB (see PROGRESS.md), so this machine may OOM at first load.
+# The owner must decide between a larger machine or a streaming-parse refactor (out of scope).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+# 1 GB persistent volume for dispatch.db + the cached GTFS zip. Created by the owner at launch
+# (`fly volumes create data --size 1 --region ord`).
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+# Let the refresh loop settle on shutdown; facts are committed synchronously to SQLite.
+kill_timeout = 30
