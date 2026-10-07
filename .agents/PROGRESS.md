@@ -797,3 +797,26 @@ builder at first deploy; the plan's substitute is the fresh-clone sequence):
   deferred to Phase 7, as the plan specifies.
 
 `npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.
+
+## Deployment Phase 6 — GitHub CI/CD (complete; owner tasks remain)
+
+Branch `chore/github-ci` → PR into `dev`.
+
+- `.github/workflows/ci.yml`: triggers on `pull_request` (dev, main) and `push`
+  (dev); one `ci` job on `ubuntu-latest`, Node 22 via `actions/setup-node@v4`
+  (`cache: npm`), running `npm ci` → `npm run lint` → `npm run typecheck` →
+  `npm run build` → `npm test`. The job is named `ci` so branch protection can
+  require that exact check.
+- `.github/workflows/deploy.yml`: triggers on `push` (main) and
+  `workflow_dispatch`; checkout → `superfly/flyctl-actions/setup-flyctl@master`
+  → `flyctl deploy --remote-only` (remote builder). Uses the `FLY_API_TOKEN`
+  repo secret; `concurrency: group: deploy, cancel-in-progress: false`. A header
+  comment notes it intentionally does not rerun tests — it is gated on the same
+  commit's `ci` check via branch protection.
+- Both files validated as parseable YAML.
+
+Owner tasks deferred (per the task scope — not done here): configure branch
+protection on `main`/`dev` (require PR, require the `ci` status check, no force
+push/direct push), set the default branch to `dev`, and create the
+`FLY_API_TOKEN` repository secret. The deploy workflow is inert until the Fly app
+and that secret exist (Phase 7).

@@ -1,0 +1,30 @@
+# Auto-deploy to Fly.io on merge to main.
+# See .agents/DEPLOYMENT_PLAN.md (Phase 6). The first real image build happens here on
+# Fly's remote builder (Windows contributors do not need Docker locally).
+#
+# This workflow deliberately does NOT rerun tests: it is gated on the same commit's CI
+# (`ci`) through branch protection on main (require the `ci` status check before merge).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  # Manual redeploy of the current main.
+  workflow_dispatch:
+
+# Serialize deploys so two merges cannot race the remote builder / machine update.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          # Repository secret created by the owner (Phase 7):
+          #   fly tokens create deploy -a dispatch-pilot
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
