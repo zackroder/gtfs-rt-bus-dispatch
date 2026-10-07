@@ -6,6 +6,18 @@ import type {
 } from '../../../shared/types';
 import { prepared } from './prepare';
 
+// Machine-readable decision context persisted on created/updated audit events so recommendation
+// quality (gaps, EDTs, caps) can be analyzed later without parsing the human `reason` string.
+export interface InterventionDecisionContext {
+  forwardHeadwaySeconds: number;
+  backwardHeadwaySeconds: number;
+  leaderEdt: number;
+  followerEdt: number;
+  centerEdt: number;
+  maxHoldSeconds: number;
+  leadTimeSeconds: number;
+}
+
 // InterventionStore is the durable lifecycle boundary for recommendations. State changes and
 // their audit events are committed together so a UI action cannot be recorded without its outcome.
 export interface InterventionSuggestionInput {
@@ -23,6 +35,7 @@ export interface InterventionSuggestionInput {
   until: number;
   generatedAt: number;
   expiresAt: number;
+  decisionContext?: InterventionDecisionContext;
 }
 
 export interface InterventionActor {
@@ -112,7 +125,7 @@ export class InterventionStore {
         );
       // Audit the revision with the generation timestamp so the event timeline shows when the
       // recommendation changed, not when the refresh loop happened to notice.
-      this.insertEvent(input.id, 'updated', input.generatedAt, 'system');
+      this.insertEvent(input.id, 'updated', input.generatedAt, 'system', undefined, this.metadataFor(input));
       return 'updated';
     });
     return transaction();
@@ -149,7 +162,7 @@ export class InterventionStore {
         );
       if (result.changes > 0) {
         // Only the refresh that actually inserted the row emits the creation event.
-        this.insertEvent(input.id, 'created', input.generatedAt, 'system');
+        this.insertEvent(input.id, 'created', input.generatedAt, 'system', undefined, this.metadataFor(input));
       }
     });
     transaction();
@@ -333,21 +346,27 @@ export class InterventionStore {
     return this.require(id);
   }
 
+  // Serialize the optional decision context once for the created/updated audit events.
+  private metadataFor(input: InterventionSuggestionInput): string | null {
+    return input.decisionContext ? JSON.stringify(input.decisionContext) : null;
+  }
+
   private insertEvent(
     interventionId: string,
     action: InterventionAction,
     occurredAt: number,
     actorId: string,
     requestId?: string,
+    metadataJson?: string | null,
   ): void {
     // request_id makes retried API requests append at most one event for the same action.
     this.db
       .prepare(
         `INSERT OR IGNORE INTO intervention_events
-         (intervention_id, action, occurred_at, actor_id, request_id)
-         VALUES (?, ?, ?, ?, ?)`
+         (intervention_id, action, occurred_at, actor_id, request_id, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?)`
       )
-      .run(interventionId, action, occurredAt, actorId, requestId ?? null);
+      .run(interventionId, action, occurredAt, actorId, requestId ?? null, metadataJson ?? null);
   }
 }
 

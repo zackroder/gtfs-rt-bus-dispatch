@@ -11,14 +11,21 @@ import { loadStatic } from './db/staticLoader';
 import { GtfsStaticProvider } from './gtfs/static';
 import { GtfsRealtimeProvider } from './providers/gtfsrt';
 import { Engine } from './engine/engine';
-import { autoDiscoverTerminals, discoveryServiceIds } from './engine/terminal';
+import {
+  ACTIVITY_LOOKBACK_SECONDS,
+  activeTerminalIds,
+  autoDiscoverTerminals,
+  discoveryServiceIds,
+} from './engine/terminal';
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
 import { InterventionStore } from './db/interventions';
 import {
   activeServiceDate,
+  activeServiceIds,
   getServiceDayStart,
   getStaticLoadedAt,
+  nowServiceSeconds,
 } from './gtfs/time';
 import type { AppConfig, BlockTimeline, Terminal, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';
@@ -257,16 +264,30 @@ async function refreshInternal(): Promise<void> {
   }
   try {
     if (!latestRt) return;
-    // The engine always records facts globally, but only builds snapshots for subscribed terminals.
-    const wanted = new Set(subscriptions.keys());
-    const fresh = engine.refresh(latestRt, new Date(), wanted);
+    const now = new Date();
+    // Evaluate every active terminal on each refresh so recommendations and run facts accumulate
+    // with nobody watching; a user watching an off-duty terminal still gets a snapshot.
+    const serviceDayStart = getServiceDayStart(db);
+    const nowSvc = nowServiceSeconds(now, serviceDayStart, config.agencyTimezone);
+    const active = activeTerminalIds(
+      db,
+      config.terminals,
+      activeServiceIds(db, activeServiceDate(now, serviceDayStart, config.agencyTimezone)),
+      nowSvc - ACTIVITY_LOOKBACK_SECONDS,
+      nowSvc + config.lookaheadMinutes * 60,
+    );
+    const wanted = new Set([...active, ...subscriptions.keys()]);
+    const fresh = engine.refresh(latestRt, now, wanted);
     for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
     for (const terminalId of wanted) {
       if (!fresh.some((snapshot) => snapshot.terminalId === terminalId)) snapshots.delete(terminalId);
     }
     lastRefreshAt = Date.now();
-    broadcaster?.broadcast(fresh);
-    console.log(`[refresh] complete duration_ms=${Date.now() - startedAt} snapshots=${fresh.length}`);
+    // Broadcast stays viewer-scoped: only clients watching a terminal receive its snapshot.
+    broadcaster?.broadcast(fresh.filter((snapshot) => subscriptions.has(snapshot.terminalId)));
+    console.log(
+      `[refresh] complete duration_ms=${Date.now() - startedAt} snapshots=${fresh.length} active=${active.size}`,
+    );
   } catch (err) {
     lastRefreshError = errorMessage(err);
     console.error(`[refresh] engine failed error=${lastRefreshError}`);
@@ -274,6 +295,12 @@ async function refreshInternal(): Promise<void> {
   } finally {
     lastRefreshDurationMs = Date.now() - startedAt;
     if (serverPhase === 'refreshing') serverPhase = 'ready';
+    // Warn when a cycle eats more than half the cadence: all-terminal evaluation must not let the
+    // 10 s refresh loop fall behind (measure, don't re-architect).
+    const slowThresholdMs = config.refreshIntervalSeconds * 500;
+    if (lastRefreshDurationMs > slowThresholdMs) {
+      console.warn(`[refresh] slow duration_ms=${lastRefreshDurationMs} threshold_ms=${slowThresholdMs}`);
+    }
     console.log(`[refresh] end duration_ms=${lastRefreshDurationMs}`);
   }
 }

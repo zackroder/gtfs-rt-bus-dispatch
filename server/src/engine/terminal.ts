@@ -247,6 +247,30 @@ export function activeRoutesAtTerminal(
   return Array.from(routes).sort();
 }
 
+// Terminal ids with at least one route endpoint event in the window. Used to evaluate the whole
+// active board every refresh (not just viewed terminals) so recommendations and run facts are
+// recorded even when nobody has the app open.
+export function activeTerminalIds(
+  db: Database,
+  terminals: Terminal[],
+  activeServiceIds: Set<string>,
+  fromSvc: number,
+  toSvc: number,
+): Set<string> {
+  const allStopIds = Array.from(new Set(terminals.flatMap((terminal) => terminal.stopIds)));
+  const byStop = activeRoutesByStop(db, allStopIds, activeServiceIds, fromSvc, toSvc);
+  const active = new Set<string>();
+  for (const terminal of terminals) {
+    for (const stopId of terminal.stopIds) {
+      if ((byStop.get(stopId)?.size ?? 0) > 0) {
+        active.add(terminal.id);
+        break;
+      }
+    }
+  }
+  return active;
+}
+
 // Infer terminal candidates from the endpoints of active route/direction schedules.
 export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string>): Terminal[] {
   const serviceList = Array.from(activeServiceIds);

@@ -68,6 +68,13 @@ export interface TripletDecision {
   holdSeconds: number;
   until: number;
   reason: string;
+  // Machine-readable decision context, persisted on the recommendation's audit events so hold
+  // quality can be analyzed later without parsing the human `reason` string.
+  centerEdt: number;
+  leaderEdt: number;
+  followerEdt: number;
+  forwardHeadwaySeconds: number;
+  backwardHeadwaySeconds: number;
 }
 
 export interface DecideTripletsOptions {
@@ -102,13 +109,15 @@ export function decideTriplets(
 
     const leader = working[i - 1]!;
     const follower = working[i + 1]!;
-    const forwardHeadway = center.edt - effectiveDeparture(leader);
+    const leaderEdt = effectiveDeparture(leader);
+    const followerEdt = effectiveDeparture(follower);
+    const forwardHeadway = center.edt - leaderEdt;
     // Both gaps measure around the center with the same rule: an already-departed neighbor
     // contributes its actual departure, not its EDT. Measuring the backward gap from raw EDT
     // let a follower that left early/late produce a fictional gap and recommend holding the
     // center past a follower that is already gone. Because the hold is half the difference,
     // the recommended `until` always stays strictly before the follower's real departure.
-    const backwardHeadway = effectiveDeparture(follower) - center.edt;
+    const backwardHeadway = followerEdt - center.edt;
     // The working copy lets an earlier decision affect the next triplet without mutating the caller's input.
     const seconds = holdSeconds(backwardHeadway, forwardHeadway, opts.maxHoldSeconds);
     if (seconds > 0) {
@@ -126,6 +135,11 @@ export function decideTriplets(
         reason:
           `Gap behind is ${formatMinutes(backwardHeadway)} vs ${formatMinutes(forwardHeadway)} ahead; ` +
           `hold the center ${formatMinutes(seconds)} to even headways`,
+        centerEdt: center.edt,
+        leaderEdt,
+        followerEdt,
+        forwardHeadwaySeconds: forwardHeadway,
+        backwardHeadwaySeconds: backwardHeadway,
       });
     }
   }
