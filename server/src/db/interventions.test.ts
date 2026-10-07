@@ -98,6 +98,33 @@ describe('InterventionStore', () => {
     expect(events.map((e) => e.action)).toEqual(['created', 'updated']);
   });
 
+  it('stores machine-readable decision context on created and updated events', () => {
+    const db = createDatabase(':memory:');
+    const store = new InterventionStore(db);
+    const context = {
+      forwardHeadwaySeconds: 120,
+      backwardHeadwaySeconds: 300,
+      leaderEdt: 800,
+      followerEdt: 1200,
+      centerEdt: 900,
+      maxHoldSeconds: 600,
+      leadTimeSeconds: 300,
+    };
+    const created = store.createSuggestion({ ...suggestion(), decisionContext: context });
+    store.refreshSuggestion({
+      ...suggestion(),
+      until: 930,
+      expiresAt: 260,
+      decisionContext: { ...context, centerEdt: 930 },
+    });
+    const events = db
+      .prepare(`SELECT action, metadata_json FROM intervention_events WHERE intervention_id = ? ORDER BY id`)
+      .all(created.id) as Array<{ action: string; metadata_json: string | null }>;
+    expect(events.map((e) => e.action)).toEqual(['created', 'updated']);
+    expect(JSON.parse(events[0]!.metadata_json!)).toEqual(context);
+    expect(JSON.parse(events[1]!.metadata_json!)).toEqual({ ...context, centerEdt: 930 });
+  });
+
   it('never revises a suggestion once it left the pending state', () => {
     const db = createDatabase(':memory:');
     const store = new InterventionStore(db);

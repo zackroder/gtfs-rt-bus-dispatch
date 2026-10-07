@@ -224,6 +224,12 @@ Local development: `npm run dev`.
   cannot trigger transitions.
 - TripUpdates supply estimates (arrival, ETA) but are never treated as observed
   facts.
+- `run_events` is dispatch-window-bound: it records observed arrivals/departures
+  only near the current moment (roughly now − 30 min … now + 90 min) at
+  configured terminals, so it is not a complete vehicle history. Every active
+  terminal is evaluated on each refresh — not only terminals someone is
+  watching — so the log and the intervention queue cover all active terminals
+  with no browser open.
 - Co-located multi-route terminal views and manager roles are not in scope.
 
 ## Other documentation

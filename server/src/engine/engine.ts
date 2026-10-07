@@ -1052,6 +1052,16 @@ export class Engine {
           reason: decision.reason,
           generatedAt: ctx.generatedAt,
           expiresAt: suggestionExpiresAt(decision.until, ctx.nowSvc, ctx.generatedAt),
+          // Persist the numeric decision context alongside the human reason for later analysis.
+          decisionContext: {
+            forwardHeadwaySeconds: decision.forwardHeadwaySeconds,
+            backwardHeadwaySeconds: decision.backwardHeadwaySeconds,
+            leaderEdt: decision.leaderEdt,
+            followerEdt: decision.followerEdt,
+            centerEdt: decision.centerEdt,
+            maxHoldSeconds: config.maxHoldMinutes * 60,
+            leadTimeSeconds: config.leadTimeMinutes * 60,
+          },
         });
       }
       const interventions = this.interventions.listForRoute(ctx.serviceDate, terminal.id, routeId);

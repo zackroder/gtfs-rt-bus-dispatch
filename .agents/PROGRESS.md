@@ -621,3 +621,60 @@ Acceptance: both #9 southbound variants (`Vincennes & 104th Street` and
 the live `/api/terminals` response splits route 9 into active vs off-duty
 terminals; the exact 07:00/midday flip is covered by unit tests against a fixed
 window. `npm run typecheck`, `npm run lint`, `npm test` (167 tests) all green.
+
+## Deployment Phase 2 — Recommendations + logging for every active terminal (complete)
+
+Branch `feat/global-recommendations` → PR into `dev`.
+
+- `refreshInternal` now evaluates `wanted = active terminals ∪ subscriptions`
+  every poll, so recommendations (`interventions`), run facts, and `run_events`
+  are produced for the whole active board with no viewer. The active set comes
+  from the Phase 1 windowed activity query (`activeTerminalIds`).
+- Broadcast stays viewer-scoped: only snapshots for terminals in `subscriptions`
+  are pushed over WS; snapshots for every active terminal are still cached for
+  REST reads.
+- The `[refresh]` finally block now warns when a cycle exceeds
+  `refreshIntervalSeconds / 2` (5 s at the 10 s default).
+- `TripletDecision` carries `centerEdt`/`leaderEdt`/`followerEdt` and
+  `forward`/`backwardHeadwaySeconds`; the engine threads these plus
+  `maxHoldSeconds`/`leadTimeSeconds` into `refreshSuggestion`, which writes them
+  to `intervention_events.metadata_json` on `created` and `updated` events.
+- Audit pass: recommendations resolve through the existing
+  `expirePending`/`completeTrip` paths; no per-poll VP/snapshot logging was
+  added. README "Known limitations" now documents that `run_events` is
+  dispatch-window-bound (roughly now − 30 min … now + 90 min) while covering all
+  active terminals.
+
+Measurements (CTA full feed, fresh static: 96,025 trips, 5.9 M stop_times;
+288–296 active terminals; ~1,950 TU / ~1,440 VP per poll):
+
+- Full all-terminal refresh wall time: **~2.8–3.5 s** steady state while the
+  loaded static did not match the live feed (trip join short-circuits), but
+  **~40–60 s** once the live feed matched static and the engine did real
+  per-terminal work (all active terminals). The slow-cycle warning fires every
+  cycle in that state.
+- Accumulation with no browser open (~10 min): `run_events` 1,063 rows across
+  220 terminals for the service date; `interventions` 237 rows across 96
+  terminals (19 pending); `intervention_events.metadata_json` populated on 101
+  `created` + 56 `updated` events.
+- Sample decision context:
+  `{"forwardHeadwaySeconds":656,"backwardHeadwaySeconds":1830,"leaderEdt":48994,"followerEdt":51480,"centerEdt":49650,"maxHoldSeconds":600,"leadTimeSeconds":300}`.
+
+Risk / deviation (reported, not re-architected, per the plan):
+
+- The 40–60 s refresh exceeds the plan's ~2–3 s expectation. Per the plan's
+  Phase 2a instruction ("do not re-architect — report the measurement and
+  proceed"), no engine rework was done; the hotspot is the per-terminal
+  schedule/route work now run for every active terminal (`outboundRoutesAtTerminal`
+  plus `buildDepartures`). This is the main thing to watch at first deploy
+  (Phase 7); the 10 s cadence cannot keep up on a machine of this speed.
+- The local cached `gtfs.zip` was ~27 days stale and the pre-Phase-3 stale-reload
+  path reused it, so the live feed's trip IDs matched nothing until a manual
+  `POST /api/static/reload` fetched fresh static. This is exactly the Phase 3
+  bug; it also explains the "fast" ~3 s refreshes before the reload (no facts
+  were being recorded).
+
+Acceptance: with the app running and no browser open, `run_events` and
+`interventions` accumulated across hundreds of terminals, and decision context is
+machine-readable. `npm run typecheck`, `npm run lint`, `npm test` (169 tests) all
+green.

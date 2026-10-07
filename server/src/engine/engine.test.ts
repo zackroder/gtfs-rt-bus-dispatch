@@ -475,6 +475,31 @@ describe('engine triplet dispatch', () => {
     expect(d1.departureSeconds).toBe(svc('08:05'));
   });
 
+  it('queues recommendations with decision context for an evaluated active terminal', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    // The active set is passed explicitly, mirroring the refresh loop's global evaluation; no
+    // subscriber exists for T in this test.
+    const fresh = engine.refresh(stdRt(), nowAt('08:08'), new Set(['T']));
+    expect(fresh.map((s) => s.terminalId)).toEqual(['T']);
+
+    const created = data.db
+      .prepare(`SELECT metadata_json FROM intervention_events WHERE action = 'created'`)
+      .get() as { metadata_json: string | null } | undefined;
+    expect(created).toBeDefined();
+    const context = JSON.parse(created!.metadata_json!) as Record<string, number>;
+    expect(context.backwardHeadwaySeconds).toBeTypeOf('number');
+    expect(context.forwardHeadwaySeconds).toBeTypeOf('number');
+    expect(context.centerEdt).toBeTypeOf('number');
+    expect(context.maxHoldSeconds).toBe(600);
+    expect(context.leadTimeSeconds).toBe(300);
+
+    const facts = data.db
+      .prepare(`SELECT COUNT(*) AS c FROM run_events WHERE terminal_id = 'T'`)
+      .get() as { c: number };
+    expect(facts.c).toBeGreaterThan(0);
+  });
+
   it('keeps a queued intervention route visible even without departures in the window', () => {
     const engine = makeEngine();
     const data = testData(engine);
