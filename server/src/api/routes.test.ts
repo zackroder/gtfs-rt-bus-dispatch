@@ -5,7 +5,7 @@ import express from 'express';
 import { createDatabase } from '../db/schema';
 import { createApi, type ApiDeps } from './routes';
 import { InterventionStore } from '../db/interventions';
-import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
+import { activeServiceDate, getServiceDayStart, nowServiceSeconds } from '../gtfs/time';
 import type { AppConfig, BlockTimeline, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../../shared/types';
 
 // API tests use an in-memory database and real HTTP requests to cover validation, redaction,
@@ -114,7 +114,7 @@ describe('api routes', () => {
     const base = await startServer(makeDeps());
     const res = await fetch(`${base}/terminals`);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { terminals: unknown[]; routes: Array<{ routeId: string; shortName: string; longName?: string; color?: string; textColor?: string; terminalIds: string[] }> };
+    const body = (await res.json()) as { terminals: unknown[]; routes: Array<{ routeId: string; shortName: string; longName?: string; color?: string; textColor?: string; terminalIds: string[]; inactiveTerminalIds: string[] }> };
     expect(body.terminals).toHaveLength(2);
     expect(body.routes.map((r) => r.routeId)).toEqual(['2', '1']);
     const route1 = body.routes.find((r) => r.routeId === '1')!;
@@ -122,11 +122,44 @@ describe('api routes', () => {
     expect(route1.longName).toBe('Route Ten');
     expect(route1.color).toBe('FFB81C');
     expect(route1.textColor).toBe('000000');
-    expect(route1.terminalIds).toEqual(['T1']);
+    // With no schedule loaded, both terminals are off duty at this moment.
+    expect(route1.terminalIds).toEqual([]);
+    expect(route1.inactiveTerminalIds).toEqual(['T1']);
     const route2 = body.routes.find((r) => r.routeId === '2')!;
     expect(route2.shortName).toBe('2');
     expect(route2.color).toBe('C8102E');
-    expect(route2.terminalIds).toEqual(['T2']);
+    expect(route2.terminalIds).toEqual([]);
+    expect(route2.inactiveTerminalIds).toEqual(['T2']);
+  });
+
+  it('splits terminals into active and off-duty per route at the current moment', async () => {
+    const deps = makeDeps();
+    const db = deps.db;
+    const serviceDayStart = getServiceDayStart(db);
+    const now = new Date();
+    const serviceDate = activeServiceDate(now, serviceDayStart, 'UTC');
+    const nowSvc = nowServiceSeconds(now, serviceDayStart, 'UTC');
+    // Register a service active only on the current date, then a departure at T1's stop exactly
+    // now (inside the activity window). T2 has no schedule, so it stays off duty.
+    db.prepare(`INSERT INTO calendar_dates (service_id, date, exception_type) VALUES (?, ?, 1)`)
+      .run('SVCX', serviceDate);
+    db.prepare(`INSERT INTO stops (stop_id, stop_code, stop_name, parent_station, lat, lon) VALUES (?,?,?,?,?,?)`)
+      .run('S1', 'S1', 'Terminal 1', null, 41.8, -87.6);
+    db.prepare(`INSERT INTO trips (trip_id, route_id, service_id, block_id, direction_id, headsign) VALUES (?,?,?,?,?,?)`)
+      .run('ACT', '1', 'SVCX', null, 1, null);
+    db.prepare(`INSERT INTO stop_times (trip_id, stop_sequence, stop_id, arrival_time, departure_time, pickup_type, drop_off_type) VALUES (?,?,?,?,?,?,?)`)
+      .run('ACT', 0, 'S1', nowSvc, nowSvc, 0, 0);
+
+    const base = await startServer(deps);
+    const res = await fetch(`${base}/terminals`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { routes: Array<{ routeId: string; terminalIds: string[]; inactiveTerminalIds: string[] }> };
+    const route1 = body.routes.find((r) => r.routeId === '1')!;
+    expect(route1.terminalIds).toEqual(['T1']);
+    expect(route1.inactiveTerminalIds).toEqual([]);
+    const route2 = body.routes.find((r) => r.routeId === '2')!;
+    expect(route2.terminalIds).toEqual([]);
+    expect(route2.inactiveTerminalIds).toEqual(['T2']);
   });
 
   it('serves a terminal snapshot and supports route filtering', async () => {

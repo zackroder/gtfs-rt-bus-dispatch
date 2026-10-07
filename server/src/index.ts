@@ -6,22 +6,21 @@ import express from 'express';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 import { createDatabase } from './db/schema';
-import { applyConfig, loadConfig } from './config';
+import { applyConfig, getTerminalsSource, loadConfig, setTerminalsSource } from './config';
 import { loadStatic } from './db/staticLoader';
 import { GtfsStaticProvider } from './gtfs/static';
 import { GtfsRealtimeProvider } from './providers/gtfsrt';
 import { Engine } from './engine/engine';
-import { autoDiscoverTerminals } from './engine/terminal';
+import { autoDiscoverTerminals, discoveryServiceIds } from './engine/terminal';
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
 import { InterventionStore } from './db/interventions';
 import {
   activeServiceDate,
-  activeServiceIds,
   getServiceDayStart,
   getStaticLoadedAt,
 } from './gtfs/time';
-import type { AppConfig, BlockTimeline, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../shared/types';
+import type { AppConfig, BlockTimeline, Terminal, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../shared/types';
 import type { RealtimeSnapshot } from './providers/types';
 
 // The process owns one database, provider, engine, and refresh loop. HTTP and WS layers
@@ -61,16 +60,31 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Discovery unions this many service dates so day-of-week terminal variants are all found.
+const DISCOVERY_DAYS = 7;
+
+// Compare discovered terminals to the active config by identity and membership, ignoring order.
+function terminalsEqual(a: Terminal[], b: Terminal[]): boolean {
+  if (a.length !== b.length) return false;
+  const signature = (t: Terminal) =>
+    `${t.id}|${[...t.stopIds].sort().join(',')}|${[...(t.routeIds ?? [])].sort().join(',')}|${t.name}`;
+  const left = a.map(signature).sort();
+  const right = b.map(signature).sort();
+  return left.every((value, index) => value === right[index]);
+}
+
 function discoverTerminals(): void {
-  // Discovery is only a first-run convenience; an explicit terminal configuration is preserved.
-  if (config.terminals.length > 0) return;
+  // A manual terminal configuration is an owner override and is never replaced; in auto mode
+  // re-run on every static load (fresh or reuse) so time-of-day variants stay current.
+  if (getTerminalsSource(db) === 'manual') return;
   const serviceDayStart = getServiceDayStart(db);
   const now = new Date();
-  const active = activeServiceIds(db, activeServiceDate(now, serviceDayStart, config.agencyTimezone));
+  const serviceDate = activeServiceDate(now, serviceDayStart, config.agencyTimezone);
+  const active = discoveryServiceIds(db, serviceDate, DISCOVERY_DAYS);
   const terminals = autoDiscoverTerminals(db, active);
-  if (terminals.length > 0) {
-    config = applyConfig(db, config, { ...config, terminals });
-  }
+  if (terminals.length === 0) return;
+  if (terminalsEqual(config.terminals, terminals)) return;
+  config = applyConfig(db, config, { ...config, terminals });
 }
 
 async function ensureStaticLoaded(force = false): Promise<void> {
@@ -301,6 +315,9 @@ app.use(
     getConfig: () => config,
     applyConfig: (next) => {
       config = applyConfig(db, config, next);
+      // An explicit settings write carries the owner's terminals payload, so it overrides
+      // auto-discovery permanently (matching the pre-Phase-1 behavior of any persisted config).
+      setTerminalsSource(db, 'manual');
       return config;
     },
     computeTerminal: ensureTerminal,

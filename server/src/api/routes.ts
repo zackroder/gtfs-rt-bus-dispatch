@@ -14,12 +14,12 @@ import {
   type VehicleDetail,
 } from '../../../shared/types';
 import { recordConfigEvent, redactConfig } from '../config';
-import { routeStyle } from '../engine/terminal';
+import { ACTIVITY_LOOKBACK_SECONDS, activeRoutesByStop, routeStyle } from '../engine/terminal';
 import {
   InterventionConflictError,
   InterventionStore,
 } from '../db/interventions';
-import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
+import { activeServiceDate, activeServiceIds, getServiceDayStart, nowServiceSeconds } from '../gtfs/time';
 
 // Route labels, rather than opaque route IDs, are the user-facing sort key.
 function byRouteName(a: { shortName: string; routeId: string }, b: { shortName: string; routeId: string }): number {
@@ -200,10 +200,40 @@ export function createApi(deps: ApiDeps): Router {
 
   router.get('/terminals', (_req, res) => {
     const config = deps.getConfig();
-    const routes = new Map<string, { shortName: string; longName?: string; color?: string; textColor?: string; terminalIds: string[] }>();
-    // Group terminals by route for the home screen while retaining each configured terminal list.
+    const serviceDayStart = getServiceDayStart(deps.db);
+    const now = new Date();
+    const nowSvc = nowServiceSeconds(now, serviceDayStart, config.agencyTimezone);
+    const activeIds = activeServiceIds(
+      deps.db,
+      activeServiceDate(now, serviceDayStart, config.agencyTimezone),
+    );
+    // A terminal is active for a route when that route has an endpoint event (departure as first
+    // stop or arrival as last stop) now−30m … now+lookahead. One batched query covers every
+    // terminal stop, then each terminal unions the routes of its own stops.
+    const fromSvc = nowSvc - ACTIVITY_LOOKBACK_SECONDS;
+    const toSvc = nowSvc + config.lookaheadMinutes * 60;
+    const allStopIds = Array.from(new Set(config.terminals.flatMap((terminal) => terminal.stopIds)));
+    const activeByStop = activeRoutesByStop(deps.db, allStopIds, activeIds, fromSvc, toSvc);
+    const activeRoutesFor = (stopIds: string[]): Set<string> => {
+      const active = new Set<string>();
+      for (const stopId of stopIds) {
+        for (const routeId of activeByStop.get(stopId) ?? []) active.add(routeId);
+      }
+      return active;
+    };
+    const routes = new Map<string, {
+      shortName: string;
+      longName?: string;
+      color?: string;
+      textColor?: string;
+      terminalIds: string[];
+      inactiveTerminalIds: string[];
+    }>();
+    // Group terminals by route for the home screen, splitting each route's terminals into the
+    // ones active at this moment and the ones off duty while retaining the full configured list.
     for (const terminal of config.terminals) {
       const routeIds = terminal.routeIds ?? routeIdsForTerminal(deps.db, terminal.stopIds);
+      const active = activeRoutesFor(terminal.stopIds);
       for (const routeId of routeIds) {
         let entry = routes.get(routeId);
         if (!entry) {
@@ -214,10 +244,12 @@ export function createApi(deps: ApiDeps): Router {
             color: style.color,
             textColor: style.textColor,
             terminalIds: [],
+            inactiveTerminalIds: [],
           };
           routes.set(routeId, entry);
         }
-        if (!entry.terminalIds.includes(terminal.id)) entry.terminalIds.push(terminal.id);
+        const bucket = active.has(routeId) ? entry.terminalIds : entry.inactiveTerminalIds;
+        if (!bucket.includes(terminal.id)) bucket.push(terminal.id);
       }
     }
     const entries = Array.from(routes.entries()).map(([routeId, entry]) => ({
@@ -227,6 +259,7 @@ export function createApi(deps: ApiDeps): Router {
       color: entry.color,
       textColor: entry.textColor,
       terminalIds: entry.terminalIds,
+      inactiveTerminalIds: entry.inactiveTerminalIds,
     }));
     entries.sort(byRouteName);
     sendJson(res, 200, { terminals: config.terminals, routes: entries });
