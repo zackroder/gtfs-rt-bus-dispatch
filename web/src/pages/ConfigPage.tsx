@@ -1,12 +1,14 @@
 /** Runtime settings editor for dispatch thresholds and GTFS data sources. */
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getConfig, putConfig, reloadStatic } from '../api';
+import { getConfig, putConfig, reloadStatic, testDispatchToken } from '../api';
 import { appConfigSchema, type AppConfig } from '../../../shared/types';
 
 export default function ConfigPage() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [terminalsJson, setTerminalsJson] = useState('');
+  const [token, setToken] = useState('');
+  const [tokenMessage, setTokenMessage] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
@@ -19,6 +21,8 @@ export default function ConfigPage() {
       .catch((err: unknown) =>
         setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) }),
       );
+    // The dispatch token lives only in this browser, never in server config.
+    setToken(window.localStorage.getItem('dispatchToken') ?? '');
   }, []);
 
   if (!config) return <div className="loading">Loading settings…</div>;
@@ -66,6 +70,33 @@ export default function ConfigPage() {
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) });
     }
+  };
+
+  const saveToken = () => {
+    // The token is a browser-local credential for mutating routes; it is never sent to reads.
+    const trimmed = token.trim();
+    if (trimmed) window.localStorage.setItem('dispatchToken', trimmed);
+    else window.localStorage.removeItem('dispatchToken');
+    setToken(trimmed);
+    setTokenMessage(trimmed ? 'Token saved in this browser.' : 'Token cleared.');
+  };
+
+  const clearToken = () => {
+    window.localStorage.removeItem('dispatchToken');
+    setToken('');
+    setTokenMessage('Token cleared.');
+  };
+
+  const testToken = async () => {
+    setTokenMessage('Testing…');
+    const result = await testDispatchToken();
+    setTokenMessage(
+      result === 'ok'
+        ? 'Server accepted the request (token valid, or none required).'
+        : result === 'unauthorized'
+          ? 'Server rejected the token (401).'
+          : 'Unexpected response while testing the token.',
+    );
   };
 
   const numeric = (value: number) => String(value);
@@ -160,6 +191,31 @@ export default function ConfigPage() {
       <section className="route-group">
         <h2>Terminals (JSON)</h2>
         <textarea value={terminalsJson} onChange={(e) => setTerminalsJson(e.target.value)} />
+      </section>
+
+      <section className="route-group">
+        <h2>Operator token</h2>
+        {/* Optional access control: when the server sets DISPATCH_TOKEN, mutating actions need it. */}
+        <div className="form-row">
+          <label htmlFor="dispatchToken">Dispatch token</label>
+          <input
+            id="dispatchToken"
+            type="password"
+            placeholder="stored in this browser only"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+        </div>
+        <button type="button" onClick={saveToken}>
+          Save token
+        </button>
+        <button type="button" onClick={() => void testToken()}>
+          Test token
+        </button>
+        <button type="button" onClick={clearToken}>
+          Clear token
+        </button>
+        {tokenMessage && <div className="ok-msg">{tokenMessage}</div>}
       </section>
 
       {message && <div className={message.kind === 'ok' ? 'ok-msg' : 'error'}>{message.text}</div>}

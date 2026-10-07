@@ -477,6 +477,8 @@ export const wsSnapshotMessageSchema = z.object({
 /** Health metadata used to distinguish a healthy process from fresh realtime data. */
 export const healthSchema = z.object({
   ok: z.boolean(),
+  /** True when the server requires `x-dispatch-token` on mutating routes. */
+  tokenRequired: z.boolean().optional(),
   lastRefreshAt: z.number().nullable(),
   staticLoadedAt: z.number().nullable(),
   ready: z.boolean().optional(),

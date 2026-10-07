@@ -35,6 +35,8 @@ import type { RealtimeSnapshot } from './providers/types';
 const PORT = Number(process.env.PORT ?? 8080);
 const DB_PATH = process.env.DB_PATH ?? './data/dispatch.db';
 const STATIC_GTFS_PATH = process.env.STATIC_GTFS_PATH ?? './data/gtfs.zip';
+// Optional access control for mutating routes; unset keeps local/dev behavior unchanged.
+const DISPATCH_TOKEN = process.env.DISPATCH_TOKEN || undefined;
 const parsedStaticCheckSeconds = Number(process.env.STATIC_CHECK_SECONDS);
 // How often to re-check static staleness while running; the call no-ops unless the configured
 // staticRefreshHours window has elapsed. Env-tunable so the acceptance test can run in minutes.
@@ -377,6 +379,7 @@ app.use(
     computeVehicleDetail,
     computeBlockTimeline,
     interventions,
+    dispatchToken: DISPATCH_TOKEN,
     getVpDiagnostics: () => ({
       generatedAt: Math.floor(Date.now() / 1000),
       latestPollAt: latestRt?.timestamp ?? null,
@@ -387,6 +390,7 @@ app.use(
     }),
     getHealth: () => ({
       ok: true,
+      tokenRequired: DISPATCH_TOKEN !== undefined,
       ready: serverPhase === 'ready' || serverPhase === 'refreshing',
       phase: serverPhase,
       staticLoading: staticLoadInFlight !== null,
