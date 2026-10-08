@@ -8,9 +8,11 @@ owner-approved). **Phase 10 complete on `dev`** (merged `25d06be`,
 awaiting the owner's release PR): chunked decision passes, memoized
 `/api/terminals`, tolerant health check restored, focus field in Settings,
 structural loop fix with watchdog backstop — decision cadence 30 s
-preserved throughout. Remaining: the owner's `dev` → `main` release PR,
-then Phase 9 (data review) after ~24 h of runtime. Decisions are final; do
-not re-litigate them without the owner. Update PROGRESS.md after each phase.
+preserved throughout. **Phase 11 added** (owner-approved: basic-auth gate
+over the whole site, `GET /api/health` exempt). Remaining: the owner's
+`dev` → `main` release PR, then Phase 9 (data review) after ~24 h of
+runtime. Decisions are final; do not re-litigate them without the owner.
+Update PROGRESS.md after each phase.
 
 ## Goal
 
@@ -38,7 +40,7 @@ Secondary goals shipped alongside, because they block the two above:
 | Host | Fly.io, single app, `ord` region, **1 GB machine** (512 MB measured too thin for the baked-table copy; downsize later if metrics allow), **10 GB volume** — the full free allowance; ≥2 GB is required (see the WAL-spike note in 7b) |
 | Environments | One production instance only; `dev` branch runs CI, does not deploy |
 | Deploy trigger | Push to `main` (merged PR) → CI → bake + auto `fly deploy`; **plus a scheduled daily cron deploy** that refreshes the baked static data |
-| Access control | Optional `DISPATCH_TOKEN` env: mutating routes require `x-dispatch-token`; all reads stay open |
+| Access control | Basic-auth gate over the entire site (SPA + all endpoints + WS) with `DISPATCH_TOKEN` as the password (Phase 11); `GET /api/health` exempt (Fly's check); `x-dispatch-token` still accepted for scripts; unset token = open (local dev) |
 | Static data | **Baked into the image by CI** — the GTFS parse (~3.5 GB peak) never runs on the Fly machine; runtime copies the baked static tables into the volume DB when the image is newer |
 | Route focus | `focusRouteIds` config (env `FOCUS_ROUTES` seed, default = all routes): the pilot tracks a subset of routes end-to-end — menu, facts, recommendations, logs — runtime-adjustable, no restart |
 | Refresh ticks | Facts at 10 s; decisions flat every 30 s (`DECISION_INTERVAL_SECONDS`) over the focused active terminals |
@@ -796,13 +798,99 @@ current list as `route1, route2`). Test: edit round-trips through
 decision pass; no health-check flapping with the check re-added; 30 s decision
 cadence restored.
 
+## Phase 11 — Basic-auth gate over the whole site (post-launch)
+
+Branch: `feat/site-auth-gate` → merge into `dev`, release to `main`. Owner
+approved option 1 ("conceal everything with the token"): one gate in front
+of the SPA, every `/api` route, and the WS handshake. Motivation: the pilot
+lives on the public internet at a guessable URL (`dispatch-pilot.fly.dev`),
+and today only mutations are gated — every read (schedules, recorded
+arrivals/departures, recommendations) is public.
+
+### 11a. Server gate middleware
+
+A small module (e.g. `server/src/api/authGate.ts`) with the gate plus
+unit-tested helpers, registered in `index.ts` after the `[http]` logging
+middleware and BEFORE `createApi`, `express.static`, and the SPA fallback
+route — so it covers every inbound path.
+
+- `DISPATCH_TOKEN` unset → no-op (local dev unchanged; same rule as the
+  mutating-route gate).
+- Accepts EITHER:
+  - `Authorization: Basic <b64(user:password)>` with password ===
+    `DISPATCH_TOKEN` — any username; constant-time compare
+    (`crypto.timingSafeEqual`), malformed header → 401; or
+  - `x-dispatch-token: <DISPATCH_TOKEN>` — existing scripts (curl /
+    PowerShell recipes) keep working unchanged.
+- Failure → 401. Distinguish the two shapes:
+  - non-`/api` paths (SPA, assets): include
+    `WWW-Authenticate: Basic realm="dispatch"` so the browser shows its
+    native prompt once and caches credentials for the session;
+  - `/api` paths: plain `{"error":"authentication required"}` JSON, no
+    `WWW-Authenticate` (fetch/XHR must not trigger browser dialogs).
+- Exempt exactly one route: `GET /api/health` — Fly's health check probes
+  it without credentials, and gating it would mark the machine unhealthy
+  and unroute the app (the exact failure mode Phase 10 fixed). It exposes
+  liveness/timing only; that trade is deliberate.
+
+### 11b. WS handshake gate
+
+`server/src/api/ws.ts`: express middleware never sees HTTP `upgrade`
+events, so the identical check runs inside the ws upgrade handler — accept
+the basic-auth header or a `?token=` query parameter; otherwise respond 401
+and destroy the socket. Browsers attach cached basic credentials to
+same-origin WS upgrades (primary path); the query param is the reliable
+cross-browser fallback.
+
+### 11c. Web client
+
+- The WS connect URL appends `?token=` from localStorage when the dispatch
+  token is set in Settings.
+- A 401 from any API call surfaces a clear message ("Authentication
+  required — refresh to log in, or set the dispatch token in Settings")
+  instead of a generic error. Most users never see it: the browser's native
+  prompt handles login.
+
+### 11d. Docs
+
+README access-control section + this plan's Decisions table: access is now
+"basic-auth gate over everything except `GET /api/health`;
+`x-dispatch-token` still accepted for scripts" — replacing "reads stay
+open for easy testing".
+
+### Tests
+
+- Gate: no credentials → 401 on a GET API route, on `/` (SPA), and on an
+  asset; correct basic password (any username) → 200; wrong password → 401;
+  `x-dispatch-token` → 200; `DISPATCH_TOKEN` unset → everything open
+  (back-compat; existing tests must keep passing unchanged).
+- `GET /api/health` → 200 with and without credentials.
+- WS: an upgrade without credentials → 401 and socket closed; with
+  `?token=` (and separately with a basic header) → handshake completes
+  (raw `http.request` upgrade against the test server).
+
+### Acceptance
+
+Locally with `DISPATCH_TOKEN` set: the browser prompts once, then the app
+works end-to-end (pages, terminal views, WS live updates); curl without
+credentials → 401; curl with `x-dispatch-token` → 200; `/api/health` open.
+After release: same on the deployed site, and the Fly health check stays
+green through a deploy boot.
+
+### Notes / non-goals
+
+- No brute-force throttling — the token is a long random string; revisit if
+  logs show attempts.
+- The app remains discoverable by name; auth is the barrier, not obscurity.
+- No per-user accounts or identity — one shared token.
+
 ## Non-goals (explicitly out of scope — do not build)
 
 - No vehicle-ping logging, no per-poll snapshot persistence, no feed-sample
   capture in production (the `data/*_capture_*.csv` files are local dev
   artifacts; the volume only carries `dispatch.db` + the cached GTFS zip).
-- No auth beyond the mutating-route token; reads stay public for easy
-  testing.
+- No auth beyond the Phase 11 basic-auth gate + the shared `DISPATCH_TOKEN`
+  (no per-user accounts or identity; no brute-force throttling).
 - No staging instance, no multi-machine, no Postgres, no Litestream backups
   (Fly snapshots volumes on deploy; revisit if the data becomes precious).
 - No prebuilt-image registry split (GHCR) yet — the baked.db rides the
