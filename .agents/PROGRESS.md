@@ -917,3 +917,97 @@ volume `data` 1 GB created before first deploy, secrets incl. optional
 `FOCUS_ROUTES` seed, deploy token → GitHub `FLY_API_TOKEN`, branch protection,
 default branch `dev`, then the `dev`→`main` release PR) and Phase 9 (~24 h data
 review).
+
+## Deployment Phase 10 — Post-launch performance fixes (complete)
+
+Branch `fix/post-launch-perf` → merge into `dev`. Fixes the first production-day
+findings: single-threaded 10–18 s decision passes blocked concurrent requests and
+tripped Fly's 5 s health check (edge unrouting), and a fetch wedged past its
+abort froze both tick loops. **The decision cadence stays at 30 s**
+(`DECISION_INTERVAL_SECONDS = "30"` in `fly.toml` untouched throughout).
+
+### 10a — Chunked decision pass
+
+- `Engine.refreshChunked` shares the exact preparation and per-terminal builder as
+  `refresh` but evaluates terminals in bounded slices, yielding to the event loop
+  after `sliceSize` (8) terminals or `sliceBudgetMs` (250 ms), whichever comes
+  first; `shouldContinue` lets an abandoned pass stop early. `index.ts` decision
+  ticks use it. Fact ticks stay synchronous (sub-second). The ledger mutates only
+  in whole-terminal units, so an interleaved read/compute-on-miss never sees a
+  half-built terminal.
+
+### 10b — Memoized GET /api/terminals
+
+- The route caches its computed body for 30 s, keyed on `getTerminalsVersion()`
+  (bumped on every config write and completed static load), so config changes and
+  static refreshes invalidate immediately. Sub-second p95 thereafter, even during
+  a pass.
+
+### 10c — Tolerant health check re-added
+
+- `fly.toml`: `[[http_service.checks]]` interval 10 s, timeout 25 s, grace 1 m on
+  `/api/health`, restored only after 10a/10e landed.
+
+### 10d — Focus field in the Settings UI
+
+- `web/src/pages/ConfigPage.tsx` gains a comma-separated **Focus routes** field
+  backed by pure `formatFocusRoutes`/`parseFocusRoutes` helpers; it round-trips
+  through `PUT /api/config` and the server recomputes the terminal list with no
+  restart (existing 7c path).
+
+### 10e — Structural tick-loop fix
+
+- `index.ts` now runs on `server/src/refreshLoop.ts`: unconditional tick
+  rescheduling, a hard per-cycle abandon (`REFRESH_ABANDON_SECONDS`, default 25 —
+  above the 15 s fetch timeout, below the watchdog), coalesced decisions, and
+  generation guards. `refreshInternal(runDecisions, isCurrent)` gates every shared
+  write (`latestRt`, snapshots, `lastRefreshAt`/`lastRefreshError`/
+  `lastRefreshDurationMs`, broadcasts, watchdog touch) and skips engine work when
+  its generation was abandoned. `requestDecision` settles within one cycle or the
+  abandon bound, so HTTP callers can never hang on a wedged loop. The liveness
+  watchdog stays as belt-and-braces. `runRefresh`/`decisionRequested`/
+  `scheduleFactTick`/`scheduleDecisionTick` removed; `loops.isRunning()` feeds the
+  health `refreshInFlight` flag.
+
+### Tests (182 → 197)
+
+- `refreshLoop.test.ts` (6): never-settling cycle cannot stop the loops; abandon
+  frees the slot; a late zombie cannot clear a newer slot/drain waiters/requeue;
+  a decision requested during a fact cycle runs immediately after and resolves its
+  waiters; cycle errors never stop the loops; `stop()` halts and resolves waiters.
+- `refreshChunked.test.ts` (4): identical output to the unchunked pass;
+  interleaved work served between slices; time budget bounds a slice;
+  `shouldContinue` abandons early.
+- `routes.test.ts` (2): memoization within the window + version invalidation;
+  `focusRouteIds` round-trips through `PUT /api/config` and recomputes terminals.
+- `focus.test.ts` (3): format/parse/round-trip.
+
+### Measurements (local, production-like baked mode from the repo `baked.db`)
+
+- Fresh-volume baked copy: `[static] ready` in **147.7 s**, then the real CTA
+  feeds.
+- Focus `9,49,79`: **3 routes / 24 terminals**, **19 active**.
+- Decision passes: **4.7 s cold**, **1.34 s warm** — comfortably inside 30 s with
+  room; fact passes 1.6 s cold / 0.18 s warm. No slow-cycle warnings.
+- `GET /api/terminals`: **815 ms cold → 3 ms cached**.
+- Hung-cycle demo (feed URLs repointed at a non-routable host,
+  `REFRESH_ABANDON_SECONDS=10` to make the bound observable): logs show
+  `[refresh] abandoned generation=4 decisions=true waited_ms=10007` and
+  `generation=6 decisions=false waited_ms=10006`; `[refresh] begin` kept firing,
+  and `/api/health` stayed `ready=true refreshInFlight=true` throughout — a hung
+  refresh is now a bounded gap, not a freeze.
+
+### Deviations / notes
+
+- Runtime acceptance used the repo's baked `baked.db` to avoid the ~27 min
+  dev-machine parse measured in Phase 3/5; baked mode is the production shape.
+- The hung-cycle demo lowered `REFRESH_ABANDON_SECONDS` to 10 s only to observe the
+  abandon on the dev machine (the default remains 25). The 15 s provider abort
+  settles the zombie fetch; its post-abandon `AbortError` is suppressed by the
+  generation guard.
+- `[[http_service.checks]]` replaces fly.toml's interim "no health check" comment.
+
+`npm run typecheck`, `npm run lint`, `npm test` (**197 tests**) all green; branch
+merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
+`dev`→`main` release PR (watch the deploy + first boot), then Phase 9's ~24 h data
+review.

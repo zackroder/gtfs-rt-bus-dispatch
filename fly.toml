@@ -27,12 +27,17 @@ primary_region = "ord"
   auto_start_machines = true
   min_machines_running = 1
 
-  # No HTTP health check — deliberate, first production-day finding: the decision pass
-  # blocks the single-threaded event loop for 10-18 s, and Fly's check (5 s timeout) then
-  # marked the machine unhealthy and UNROUTED it at the edge — intermittent browser 503s.
-  # A busy loop is not a dead app; routing follows machine state. Monitoring stays with
-  # /api/health and the logs. Re-add a tolerant check (interval 10s, timeout 25s) only
-  # after the chunked-pass fix (plan Phase 10) lands.
+  # Tolerant HTTP health check (plan Phase 10c), re-added only after the chunked decision pass
+  # (10a) and the abandoned-loop fix (10e) landed. The decision pass now yields between slices and
+  # a wedged cycle is abandoned within REFRESH_ABANDON_SECONDS, so the 25 s timeout comfortably
+  # covers any residual slice stall without the 10-18 s blocking pass that caused the first
+  # production day's edge unrouting. /api/health returns 200 even while static is loading.
+  [[http_service.checks]]
+    interval = "10s"
+    timeout = "25s"
+    grace_period = "1m"
+    method = "GET"
+    path = "/api/health"
 
 # 1 GB is sufficient in baked mode: the ~3.5 GB parse happens in CI, and the runtime copies the
 # static tables with SQL-level INSERT ... SELECT (steady-state RSS ~368 MB + the copy). The

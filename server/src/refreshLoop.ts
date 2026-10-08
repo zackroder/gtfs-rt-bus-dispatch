@@ -32,6 +32,8 @@ export interface RefreshLoops {
   /** Request a decision cycle; coalesces behind a running cycle and settles within one
    * cycle (or the abandon bound) — callers can never hang on a wedged loop again. */
   requestDecision(): Promise<void>;
+  /** True while a cycle holds the slot (a fact or decision pass is running). Health/diagnostics. */
+  isRunning(): boolean;
   stop(): void;
 }
 
@@ -145,6 +147,7 @@ export function startRefreshLoops(deps: RefreshLoopDeps): RefreshLoops {
 
   return {
     requestDecision,
+    isRunning: () => running !== null,
     stop() {
       stopped = true;
       running = null;
