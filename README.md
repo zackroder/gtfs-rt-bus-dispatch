@@ -162,9 +162,21 @@ are all found). A terminal can map to multiple `stop_id`s and routes
 load and replaces the configured list when it changes; saving the Settings page
 marks the terminals as a manual override, which discovery then never touches.
 
+## Access control
+
+When `DISPATCH_TOKEN` is set, the whole site is behind HTTP basic auth: every
+page, all `/api` routes, and the WebSocket handshake require the token (any
+username; the token is the password). The browser shows its native prompt once
+and caches the credentials for the session. `GET /api/health` stays open so the
+platform's health check can probe it without credentials, and the
+`x-dispatch-token: <token>` header remains accepted on any request (including
+the WebSocket upgrade) so existing curl/PowerShell scripts keep working; the
+WebSocket also accepts `?token=<token>` as a fallback. Unset, the gate is a
+no-op for friction-free local development.
+
 ## API
 
-- `GET /api/health` — liveness and last-refresh info.
+- `GET /api/health` — liveness and last-refresh info (never gated).
 - `GET /api/terminals` — terminal list grouped by route.
 - `GET /api/terminals/:id?route=R` — snapshot with `incoming[]`, `layovers[]`,
   `departed[]`, `interventions[]`.

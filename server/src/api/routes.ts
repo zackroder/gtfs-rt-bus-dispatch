@@ -1,6 +1,6 @@
-import crypto from 'node:crypto';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import type { Database } from 'better-sqlite3';
+import { constantTimeEquals } from './authGate';
 import {
   appConfigSchema,
   blockTimelineSchema,
@@ -65,18 +65,6 @@ export interface ApiDeps {
   dispatchToken?: string;
 }
 
-// Constant-time token comparison; timingSafeEqual throws on a length mismatch, so unequal
-// lengths compare a buffer against itself first to avoid an exception-driven timing signal.
-function tokensMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) {
-    crypto.timingSafeEqual(a, a);
-    return false;
-  }
-  return crypto.timingSafeEqual(a, b);
-}
-
 // Keep response construction in one place so every endpoint uses Express JSON serialization.
 function sendJson(res: Response, status: number, body: unknown): void {
   res.status(status).json(body);
@@ -116,7 +104,7 @@ export function createApi(deps: ApiDeps): Router {
       return;
     }
     const provided = req.header('x-dispatch-token') ?? '';
-    if (!tokensMatch(provided, expected)) {
+    if (!constantTimeEquals(provided, expected)) {
       sendJson(res, 401, { error: 'token required' });
       return;
     }

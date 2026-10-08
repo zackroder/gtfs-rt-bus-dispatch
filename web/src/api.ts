@@ -54,6 +54,11 @@ export interface Health {
   lastRefreshDurationMs?: number | null;
 }
 
+/** Shown when the site-wide auth gate rejects a request (plan Phase 11c). Most users never see
+ *  it: the browser's native basic-auth prompt handles login before any fetch runs. */
+export const AUTH_REQUIRED_MESSAGE =
+  'Authentication required — refresh to log in, or set the dispatch token in Settings';
+
 // This deliberately matches the small interface needed by Zod's parse methods.
 interface Parser<T> {
   parse(value: unknown): T;
@@ -65,6 +70,9 @@ async function request<T>(url: string, parser: Parser<T>, init?: RequestInit): P
   const timeout = window.setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
+    if (res.status === 401) {
+      throw new Error(AUTH_REQUIRED_MESSAGE);
+    }
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }
@@ -94,6 +102,9 @@ async function requestOptional<T>(url: string, parser: Parser<T>): Promise<T | n
   try {
     const res = await fetch(url, { signal: controller.signal });
     if (res.status === 404) return null;
+    if (res.status === 401) {
+      throw new Error(AUTH_REQUIRED_MESSAGE);
+    }
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`);
     }

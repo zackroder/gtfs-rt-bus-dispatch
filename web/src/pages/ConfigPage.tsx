@@ -220,7 +220,8 @@ export default function ConfigPage() {
 
       <section className="route-group">
         <h2>Operator token</h2>
-        {/* Optional access control: when the server sets DISPATCH_TOKEN, mutating actions need it. */}
+        {/* Site-wide access control: when the server sets DISPATCH_TOKEN, this token unlocks the
+            whole site (native prompt) and is attached to mutating requests and the WS handshake. */}
         <div className="form-row">
           <label htmlFor="dispatchToken">Dispatch token</label>
           <input
