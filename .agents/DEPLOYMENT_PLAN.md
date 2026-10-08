@@ -31,7 +31,7 @@ Secondary goals shipped alongside, because they block the two above:
 
 | Decision | Choice |
 | --- | --- |
-| Host | Fly.io, single app, `ord` region, **1 GB machine** (512 MB measured too thin for the baked-table copy; downsize later if metrics allow), 1 GB volume (first 10 GB free) |
+| Host | Fly.io, single app, `ord` region, **1 GB machine** (512 MB measured too thin for the baked-table copy; downsize later if metrics allow), **10 GB volume** — the full free allowance; ≥2 GB is required (see the WAL-spike note in 7b) |
 | Environments | One production instance only; `dev` branch runs CI, does not deploy |
 | Deploy trigger | Push to `main` (merged PR) → CI → bake + auto `fly deploy`; **plus a scheduled daily cron deploy** that refreshes the baked static data |
 | Access control | Optional `DISPATCH_TOKEN` env: mutating routes require `x-dispatch-token`; all reads stay open |
@@ -493,7 +493,14 @@ baked mode; local dev without it keeps the existing download path unchanged.
   re-discovery, WAL checkpoint). Copy strictly the static tables — never
   the baked `settings` or other operational tables (the volume's config and
   logs live there). SQL-level copy, no JS row materialization: memory stays
-  near steady state; target < 5 min on shared-cpu-1x.
+  near steady state; target < 5 min on shared-cpu-1x. Volume sizing
+  follows from this: the copy is one transaction and the WAL cannot
+  checkpoint past an open transaction, so peak disk during each daily
+  copy is DB (~640 MB) + WAL (~500–650 MB) ≈ 1.2 GB — a 1 GB volume
+  would hit SQLITE_FULL on the second day (day 1 on a fresh volume
+  squeaks by, the nasty part). Size the volume ≥ 2 GB; the eventual
+  code-level alternative is batching the copy so the WAL checkpoints
+  between transactions.
 - In baked mode the runtime must **never** download/parse the zip: if both
   DBs are older than `staticRefreshHours`, log it and surface
   `staticStale: true` on `/api/health` (awaiting the next scheduled deploy).
@@ -607,8 +614,11 @@ Owner-only steps (account/billing — workers do not attempt these):
    from the release PR via GitHub Actions, which adopts the repo's
    `fly.toml` (port 8080, HTTPS forced, 1 GB machine, `/data` mount).
 3. Create the volume **before** the first deploy (app → Volumes → new):
-   name `data`, 1 GB, region `ord` — the `fly.toml` mount requires it.
-   (`fly volumes create data --size 1 --region ord`.)
+   name `data`, **10 GB** (the free-allowance maximum — $0; do not exceed
+   10 GB, that is where billing starts), region `ord` — the `fly.toml`
+   mount requires it (≥2 GB is the hard floor: the daily baked copy is one
+   transaction and the WAL spikes to ~1.2 GB peak — see 7b).
+   (`fly volumes create data --size 10 --region ord`.)
 4. Set secrets (app → Secrets): `CTA_API_KEY=<from local .env>`,
    `AGENCY_TIMEZONE=America/Chicago`, `DISPATCH_TOKEN=<generated random>`.
    Never commit these; `.env` stays gitignored. (Optional:

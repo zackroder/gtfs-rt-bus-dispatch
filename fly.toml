@@ -41,8 +41,11 @@ primary_region = "ord"
   size = "shared-cpu-1x"
   memory = "1gb"
 
-# 1 GB persistent volume for dispatch.db + the cached GTFS zip. Created by the owner at launch
-# (`fly volumes create data --size 1 --region ord`).
+# 10 GB persistent volume for dispatch.db — the full free-allowance maximum ($0; billing
+# starts above 10 GB). Must be ≥2 GB because of the WAL spike: the baked copy runs as ONE
+# transaction and the WAL cannot checkpoint past an open transaction, so peak disk is
+# DB (~640 MB) + WAL (~500-650 MB) during each daily copy — 1 GB would hit SQLITE_FULL on the
+# second day. Created by the owner at launch (`fly volumes create data --size 10 --region ord`).
 [[mounts]]
   source = "data"
   destination = "/data"
