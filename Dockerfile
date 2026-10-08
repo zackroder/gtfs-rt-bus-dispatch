@@ -18,6 +18,9 @@ COPY web/package.json web/
 RUN npm ci
 
 # Copy the sources and build (typecheck + Vite web bundle + esbuild server bundle).
+# tsconfig.base.json is required: both workspaces' tsconfigs extend it, and the typecheck
+# silently degrades to default compiler options (then fails) when it is absent.
+COPY tsconfig.base.json ./
 COPY shared ./shared
 COPY server ./server
 COPY web ./web
