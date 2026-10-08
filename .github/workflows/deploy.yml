@@ -7,6 +7,10 @@
 #
 # This workflow deliberately does NOT rerun tests: it is gated on the same commit's CI (`ci`)
 # through branch protection on main (require the `ci` status check before merge).
+#
+# NOTE: GitHub scheduled workflows run ONLY from the workflow file on the repo's DEFAULT
+# branch. The default branch must therefore remain `main` (not `dev`) — otherwise the nightly
+# cron would deploy unreleased dev code to production, bypassing the release PR.
 name: deploy
 
 on:

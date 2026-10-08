@@ -38,7 +38,7 @@ Secondary goals shipped alongside, because they block the two above:
 | Static data | **Baked into the image by CI** — the GTFS parse (~3.5 GB peak) never runs on the Fly machine; runtime copies the baked static tables into the volume DB when the image is newer |
 | Route focus | `focusRouteIds` config (env `FOCUS_ROUTES` seed, default = all routes): the pilot tracks a subset of routes end-to-end — menu, facts, recommendations, logs — runtime-adjustable, no restart |
 | Refresh ticks | Facts at 10 s; decisions flat every 30 s (`DECISION_INTERVAL_SECONDS`) over the focused active terminals |
-| Branch protection | `main`: PR + `ci` check, no direct push. `dev`: stays open to direct merges (matches how agents integrate; retroactive PRs unnecessary) |
+| Branch protection | `main`: PR + `ci` check, no direct push. `dev`: stays open to direct merges (matches how agents integrate; retroactive PRs unnecessary). **Default branch stays `main`** — GitHub scheduled workflows only run from the default branch, so `dev` as default would make the nightly cron deploy unreleased code |
 | Cost target | ~$6.40/month total (1 GB machine; volume free) |
 
 ## Verified baseline findings (do not re-research)
@@ -436,9 +436,13 @@ fly.toml to be merged first; the deploy workflow is inert until the app and
 installed on the dev machine)
 
 - `main`: require PR, require status check `ci` (lint/typecheck/test job),
-  no force push, no direct push. `dev`: same minus "require PR" is optional —
-  keep identical to keep the main line uniform.
-- Set default branch to `dev` (new PRs target `dev` automatically).
+  no force push, no direct push. `dev`: stays open to direct merges (the
+  workers integrate with `--no-ff` merges; retroactive PRs unnecessary).
+- Keep the default branch as `main`. GitHub scheduled workflows run only
+  from the default branch's workflow file — a `dev` default would make the
+  nightly cron deploy unreleased dev code. Feature PRs are rare (direct
+  merges are the norm); the one PR that matters (the `dev`→`main` release)
+  wants base `main`, which GitHub preselects when `main` is default.
 
 **Acceptance:** a PR into `dev` shows CI checks and blocks merge on failure;
 a merged PR `dev`→`main` auto-deploys (verify after Phase 8).
@@ -615,8 +619,10 @@ Owner-only steps (account/billing — workers do not attempt these):
    repo secret `FLY_API_TOKEN` (repo Settings → Secrets and variables →
    Actions).
 6. Complete the Phase 6 owner tasks if not done: branch protection on
-   `main` (PR + `ci` check, no direct push), default branch = `dev`
-   (GitHub web UI — `gh` is not installed).
+   `main` (PR + `ci` check, no direct push); keep the default branch as
+   `main` (GitHub web UI — `gh` is not installed; a `dev` default would
+   break the nightly cron, which runs from the default branch's
+   workflow file).
 7. Merge `dev` → `main` via PR → watch the Actions deploy run.
 
 Verify (worker, ~15 min after deploy — all doable in a browser):
@@ -626,7 +632,10 @@ Verify (worker, ~15 min after deploy — all doable in a browser):
   On failure the fix is almost certainly in the Dockerfile (prod install
   with workspaces, runtime-stage file copies) — fix, merge into `dev`, and
   redeploy.
-- `https://dispatch-pilot.fly.dev/api/health` → `ready`.
+- `https://dispatch-pilot.fly.dev/api/health` → `ready` (expect ~2–3 min
+  from deploy to ready: the baked copy runs synchronously at boot; the
+  health check's 5 m grace period covers the window — a longer freeze
+  means the copy is slow on shared-cpu, not that the app is down).
 - Dashboard → Monitoring shows `[static] ready`, `[refresh] complete
   snapshots=N` with N > 0 even though nobody is watching (Phase 2 working).
 - Browser: WS live-updates on a terminal view; token field in Settings
