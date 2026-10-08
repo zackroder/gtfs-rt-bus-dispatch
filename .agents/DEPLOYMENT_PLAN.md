@@ -1,11 +1,15 @@
 # Deployment Plan — Dispatch Pilot
 
-Status: Phases 0–7 complete and merged to `dev` (see PROGRESS.md for run
+Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for run
 reports; the Phase 7 deviations — the baked copy carries both static
 markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
 flips to `manual` only on an actual terminal-list change — are
-owner-approved). Remaining: Phase 8 (owner, via the Fly/GitHub websites)
-and Phase 9 (data review after ~24 h of runtime). Decisions are final; do
+owner-approved). **Phase 10 complete on `dev`** (merged `25d06be`,
+awaiting the owner's release PR): chunked decision passes, memoized
+`/api/terminals`, tolerant health check restored, focus field in Settings,
+structural loop fix with watchdog backstop — decision cadence 30 s
+preserved throughout. Remaining: the owner's `dev` → `main` release PR,
+then Phase 9 (data review) after ~24 h of runtime. Decisions are final; do
 not re-litigate them without the owner. Update PROGRESS.md after each phase.
 
 ## Goal
@@ -703,6 +707,94 @@ plan's scope. Dashboard Monitoring works in a browser for the log checks.)
 
 Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
 (dashboard logs' `[refresh] complete` lines), any anomalies.
+
+## Phase 10 — Post-launch performance fixes (first production-day findings)
+
+Branch: `fix/post-launch-perf` → merge into `dev`, release to `main`.
+**Owner requirement: the decision cadence stays at 30 s** (`DECISION_INTERVAL_SECONDS`
+in `fly.toml` is back at 30; do not slow the tick — if passes outgrow it, report).
+
+State: the interim health-check removal is deployed; `DECISION_INTERVAL_SECONDS`
+is restored to 30 on `dev` with this phase. Shipped same-day on `dev` (the
+worker continues from these starting points): the emergency liveness
+watchdog (`server/src/watchdog.ts` + test, wired in `index.ts`,
+`WATCHDOG_STALE_SECONDS`, default 180) is complete, and
+`server/src/refreshLoop.ts` — the 10e loop module — is written but unwired
+and untested; finishing it is 10e's work.
+
+Found on the first production day: the decision pass is single-threaded SQLite
+work measuring **~10–18 s per pass on shared-cpu-1x** (vs ~2–3 s on the dev
+machine). While a pass runs, every concurrent request queues (`/api/terminals`
+served in 12–20 s), and Fly's HTTP health check (5 s timeout) marked the
+machine unhealthy, which **unrouted the app at the edge** — the intermittent
+browser 503s. Interim mitigations already shipped: the health check removed
+and `DECISION_INTERVAL_SECONDS=60` (now superseded — 30 s restored).
+
+### 10a. Chunked decision pass
+
+`server/src/index.ts` + `engine.ts`: run the decision pass in slices —
+evaluate a bounded set of terminals, yield to the event loop
+(`await setImmediate()` or a ~250 ms work budget per slice), repeat. A pass
+may take the same wall time, but no request ever waits past a slice boundary.
+Cadence semantics: the interval measures pass *ends*; skip a tick if the
+previous pass is still running. Fact ticks are unchanged (sub-second).
+
+### 10b. Memoize GET /api/terminals
+
+The batched activity query measured 0.9–2.4 s per request in production, the
+UI polls it every 60 s, and the response changes slowly — memoize the
+computed response for ~30 s; invalidate on config change and static refresh.
+Sub-second p95 thereafter, even during a pass.
+
+### 10c. Re-add a tolerant health check
+
+With 10a/10b in place: `[[http_service.checks]]` interval 10 s, timeout 25 s
+(covers any residual slice stall), grace 1 m — and return
+`DECISION_INTERVAL_SECONDS` to 30.
+
+### 10e. Structural fix for the wedged tick loops (watchdog is the stopgap)
+
+The 2026-10-08 production wedge: a refresh hung inside `provider.fetch()` past
+the 15 s AbortController (the abort signal cannot interrupt a fetch stuck in
+DNS/connect resolution), and because every tick coalesces onto the in-flight
+promise (`runRefresh`) and each loop reschedules only in that promise's
+`.finally`, one hung refresh froze both loops at zero CPU until a manual
+restart. The emergency liveness watchdog (exits after `WATCHDOG_STALE_SECONDS`,
+default 180, without a completed tick) shipped as the stopgap; this is the
+structural fix:
+
+- Reschedule the tick loops on unconditional timers rather than in the
+  refresh promise's `.finally` — a hung promise can never stop a loop again.
+- Race each refresh against a hard outer timeout (~25 s: above the fetch
+  timeout, below the watchdog). A losing refresh is abandoned — clear
+  `refreshInFlight` and write `lastRefreshAt` only through a generation guard,
+  so a late-settling zombie cannot clobber live state.
+- Keep the watchdog as belt-and-braces.
+
+Tests: a never-settling refresh cannot stop the loop (the next tick still
+runs); the abandoned generation never clears the new in-flight flag or updates
+`lastRefreshAt`; the watchdog still fires if both layers somehow fail.
+
+### 10d. Focus field in the Settings UI
+
+`focusRouteIds` is runtime-editable but has no Settings-page field (found
+post-launch: the owner had to hand-roll a GET/modify/PUT round-trip). Add a
+comma-separated text field to `web/src/pages/ConfigPage.tsx` that edits it
+like every other knob (string in, trimmed-split array out; render the
+current list as `route1, route2`). Test: edit round-trips through
+`PUT /api/config` and recomputes the terminal list with no restart.
+
+### Tests
+
+- Chunked pass: with a large active-terminal fixture, interleaved requests
+  are served while the pass runs; pass output identical to the unchunked
+  engine result; a slow pass skips the next tick rather than piling.
+- Memoization: a second call within the window serves the cached body; a
+  config change invalidates it.
+
+**Acceptance:** in production, `/api/terminals` p95 < 1 s even during a
+decision pass; no health-check flapping with the check re-added; 30 s decision
+cadence restored.
 
 ## Non-goals (explicitly out of scope — do not build)
 

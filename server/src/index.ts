@@ -22,6 +22,8 @@ import {
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
 import { InterventionStore } from './db/interventions';
+import { createWatchdog, type Watchdog } from './watchdog';
+import { startRefreshLoops, type RefreshLoops } from './refreshLoop';
 import {
   activeServiceDate,
   activeServiceIds,
@@ -53,6 +55,20 @@ const parsedDecisionSeconds = Number(process.env.DECISION_INTERVAL_SECONDS);
 // Flat decision cadence (recommendations/run_events/snapshots); facts tick at refreshIntervalSeconds.
 const DECISION_INTERVAL_SECONDS =
   Number.isFinite(parsedDecisionSeconds) && parsedDecisionSeconds > 0 ? parsedDecisionSeconds : 30;
+const parsedWatchdogSeconds = Number(process.env.WATCHDOG_STALE_SECONDS);
+// Emergency self-heal: a refresh that never settles (e.g. a fetch hung past its abort) wedges
+// both tick loops, because every tick coalesces onto the in-flight promise. After this many
+// seconds without a completed tick the process exits so the platform restart brings the
+// collector back. The structural fix is plan Phase 10e; this is the stopgap.
+const WATCHDOG_STALE_SECONDS =
+  Number.isFinite(parsedWatchdogSeconds) && parsedWatchdogSeconds > 0 ? parsedWatchdogSeconds : 180;
+const parsedAbandonSeconds = Number(process.env.REFRESH_ABANDON_SECONDS);
+// Hard outer bound on one refresh cycle (plan Phase 10e): above the 15 s feed-fetch timeout, below
+// the watchdog. A fetch wedged in DNS/connect resolution cannot be interrupted by its
+// AbortController, so the cycle is abandoned at this bound, the loop slot frees, and the next tick
+// starts a fresh generation — a hung refresh becomes a bounded data gap, never a permanent freeze.
+const REFRESH_ABANDON_SECONDS =
+  Number.isFinite(parsedAbandonSeconds) && parsedAbandonSeconds > 0 ? parsedAbandonSeconds : 25;
 
 const db = createDatabase(DB_PATH);
 try {
@@ -70,9 +86,18 @@ let latestRt: RealtimeSnapshot | null = null;
 const snapshots = new Map<string, TerminalSnapshot>();
 const subscriptions = new Map<string, number>();
 let lastRefreshAt: number | null = null;
+// Touched by every completed refresh cycle (fact or decision) and armed at boot after the
+// static load settles; see WATCHDOG_STALE_SECONDS for why this exists.
+let tickWatchdog: Watchdog | null = null;
 let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
-let refreshInFlight: Promise<void> | null = null;
+// Serialized tick loops with unconditional rescheduling and a hard per-cycle abandon bound; see
+// refreshLoop.ts and plan Phase 10e. Created before the server listens so REST/WS callers can
+// request decisions immediately; the watchdog is armed later, after static settles.
+let loops: RefreshLoops | null = null;
+// Bumped on every config write and completed static load; the memoized GET /api/terminals response
+// is keyed on it so those two events invalidate the cache (plan Phase 10b).
+let terminalsVersion = 0;
 let staticLoadInFlight: Promise<void> | null = null;
 type ServerPhase = 'starting' | 'loading_static' | 'ready' | 'refreshing' | 'error';
 let serverPhase: ServerPhase = staticLoadedAt === null ? 'starting' : 'ready';
@@ -135,6 +160,9 @@ async function ensureStaticLoaded(force = false): Promise<void> {
     .then(() => {
       serverPhase = 'ready';
       lastStaticLoadDurationMs = Date.now() - startedAt;
+      // Every completed static load (fresh, reuse, or baked copy) invalidates the memoized
+      // terminal listing, since route styles and terminal activity derive from the schedule.
+      terminalsVersion++;
       console.log(`[static] ready duration_ms=${lastStaticLoadDurationMs}`);
     })
     .catch((error: unknown) => {
@@ -324,8 +352,11 @@ function unsubscribe(terminalId: string): void {
 
 // One serialized refresh cycle. Fact ticks (runDecisions=false) record the global fact pass and
 // intervention expiry only; decision ticks also build route states, queue recommendations, write
-// run_events, and broadcast. Both share the engine's ledger, so they must never overlap.
-async function refreshInternal(runDecisions: boolean): Promise<void> {
+// run_events, and broadcast over the focused active terminals ∪ subscriptions. Both share the
+// engine's ledger, so the refresh loop serializes them. isCurrent() is the generation guard: an
+// abandoned cycle that settles late must touch no shared state and skip its engine work, because a
+// newer generation already owns the slot (plan Phase 10e).
+async function refreshInternal(runDecisions: boolean, isCurrent: () => boolean): Promise<void> {
   const startedAt = Date.now();
   console.log(`[refresh] begin decisions=${runDecisions} subscribed=${subscriptions.size}`);
   try {
@@ -333,9 +364,15 @@ async function refreshInternal(runDecisions: boolean): Promise<void> {
       console.log('[refresh] waiting_for_static_load');
       await staticLoadInFlight;
     }
+    // Abandoned while waiting on the static load: a newer cycle owns all shared state.
+    if (!isCurrent()) return;
     serverPhase = 'refreshing';
     const fetchStartedAt = Date.now();
-    latestRt = await provider.fetch();
+    const fetched = await provider.fetch();
+    // The fetch may outlive its abandon bound (a wedged DNS/connect the abort cannot interrupt);
+    // if so this is a zombie and must not write latestRt or clear the error.
+    if (!isCurrent()) return;
+    latestRt = fetched;
     lastRefreshError = null;
     console.log(
       `[refresh] feeds duration_ms=${Date.now() - fetchStartedAt} ` +
@@ -343,11 +380,12 @@ async function refreshInternal(runDecisions: boolean): Promise<void> {
         `vp_cached=${latestRt.vehiclePositionsFromCache === true}`,
     );
   } catch (err) {
+    if (!isCurrent()) return;
     lastRefreshError = errorMessage(err);
     console.error(`[refresh] preparation/feed failed error=${lastRefreshError}`);
   }
   try {
-    if (!latestRt) return;
+    if (!isCurrent() || !latestRt) return;
     const now = new Date();
     if (!runDecisions) {
       // Fact tick: an empty wanted set still runs recordFacts (focused terminals) and expiry,
@@ -368,7 +406,10 @@ async function refreshInternal(runDecisions: boolean): Promise<void> {
       nowSvc + config.lookaheadMinutes * 60,
     );
     const wanted = new Set([...active, ...subscriptions.keys()]);
-    const fresh = engine.refresh(latestRt, now, wanted);
+    // Chunked so this global pass yields between slices and never blocks a request past a slice
+    // boundary; shouldContinue abandons the pass early if its generation was superseded.
+    const fresh = await engine.refreshChunked(latestRt, now, wanted, { shouldContinue: isCurrent });
+    if (!isCurrent()) return;
     for (const snapshot of fresh) snapshots.set(snapshot.terminalId, snapshot);
     for (const terminalId of wanted) {
       if (!fresh.some((snapshot) => snapshot.terminalId === terminalId)) snapshots.delete(terminalId);
@@ -380,72 +421,40 @@ async function refreshInternal(runDecisions: boolean): Promise<void> {
       `[refresh] complete duration_ms=${Date.now() - startedAt} snapshots=${fresh.length} active=${active.size}`,
     );
   } catch (err) {
+    if (!isCurrent()) return;
     lastRefreshError = errorMessage(err);
     console.error(`[refresh] engine failed error=${lastRefreshError}`);
     throw err;
   } finally {
-    lastRefreshDurationMs = Date.now() - startedAt;
-    if (serverPhase === 'refreshing') serverPhase = 'ready';
-    // Warn when a pass eats its cadence: a decision pass over the focused set must fit the flat
-    // interval (the signal the focus list has outgrown the machine); a fact pass must fit half.
-    const slowThresholdMs = runDecisions
-      ? DECISION_INTERVAL_SECONDS * 1000
-      : config.refreshIntervalSeconds * 500;
-    if (lastRefreshDurationMs > slowThresholdMs) {
-      console.warn(
-        `[refresh] slow decisions=${runDecisions} duration_ms=${lastRefreshDurationMs} threshold_ms=${slowThresholdMs}`,
-      );
+    // Zombie cycles skip every shared-state write: the newer generation owns phase, timing,
+    // diagnostics, and the watchdog window.
+    if (isCurrent()) {
+      lastRefreshDurationMs = Date.now() - startedAt;
+      if (serverPhase === 'refreshing') serverPhase = 'ready';
+      // Warn when a pass eats its cadence: a decision pass over the focused set must fit the flat
+      // interval (the signal the focus list has outgrown the machine); a fact pass must fit half.
+      const slowThresholdMs = runDecisions
+        ? DECISION_INTERVAL_SECONDS * 1000
+        : config.refreshIntervalSeconds * 500;
+      if (lastRefreshDurationMs > slowThresholdMs) {
+        console.warn(
+          `[refresh] slow decisions=${runDecisions} duration_ms=${lastRefreshDurationMs} threshold_ms=${slowThresholdMs}`,
+        );
+      }
+      console.log(`[refresh] end decisions=${runDecisions} duration_ms=${lastRefreshDurationMs}`);
+      // A cycle that completed (even with an error) proves the loops are alive; a cycle that
+      // never settles is exactly the wedge the watchdog exists to recover from.
+      tickWatchdog?.touch();
     }
-    console.log(`[refresh] end decisions=${runDecisions} duration_ms=${lastRefreshDurationMs}`);
   }
 }
 
-// A decision requested while another pass is running is coalesced and run immediately after, so
-// a long fact/decision pass can never drop a decision tick entirely.
-let decisionRequested = false;
-
-function runRefresh(decisions: boolean): Promise<void> {
-  if (decisions) decisionRequested = true;
-  if (refreshInFlight) return refreshInFlight;
-  const runDecisions = decisionRequested;
-  decisionRequested = false;
-  refreshInFlight = refreshInternal(runDecisions).finally(() => {
-    refreshInFlight = null;
-    if (decisionRequested) {
-      void runRefresh(true).catch((err: unknown) => {
-        console.error('queued refresh failed:', err instanceof Error ? err.message : err);
-      });
-    }
-  });
-  return refreshInFlight;
-}
-
-// Decision refresh used by WS subscribe, REST compute-on-miss, and intervention actions.
+// Decision refresh used by WS subscribe, REST compute-on-miss, and intervention actions. The
+// refresh loop coalesces it behind a running cycle and settles it within one cycle (or the abandon
+// bound), so callers can never hang on a wedged loop again.
 function refreshOnce(): Promise<void> {
-  return runRefresh(true);
-}
-
-function scheduleFactTick(): void {
-  const intervalMs = config.refreshIntervalSeconds * 1000;
-  setTimeout(() => {
-    // Schedule the next tick after this one settles so slow feeds cannot create overlapping loops.
-    runRefresh(false)
-      .catch((err: unknown) => {
-        console.error('fact tick failed:', err instanceof Error ? err.message : err);
-      })
-      .finally(() => scheduleFactTick());
-  }, intervalMs);
-}
-
-function scheduleDecisionTick(): void {
-  const intervalMs = DECISION_INTERVAL_SECONDS * 1000;
-  setTimeout(() => {
-    runRefresh(true)
-      .catch((err: unknown) => {
-        console.error('decision tick failed:', err instanceof Error ? err.message : err);
-      })
-      .finally(() => scheduleDecisionTick());
-  }, intervalMs);
+  if (!loops) return Promise.resolve();
+  return loops.requestDecision();
 }
 
 function scheduleStaticCheck(): void {
@@ -479,6 +488,8 @@ app.use(
       const terminalsChanged = !terminalsEqual(config.terminals, next.terminals);
       const focusChanged = !sameStringSet(config.focusRouteIds ?? [], next.focusRouteIds ?? []);
       config = applyConfig(db, config, next);
+      // Any config write invalidates the memoized GET /api/terminals response (plan Phase 10b).
+      terminalsVersion++;
       // An explicit terminal-list change is an owner override that disables auto-discovery;
       // unrelated setting saves keep the current source so runtime focus changes can recompute.
       if (terminalsChanged) setTerminalsSource(db, 'manual');
@@ -486,6 +497,7 @@ app.use(
       if (focusChanged && getTerminalsSource(db) === 'auto') discoverTerminals();
       return config;
     },
+    getTerminalsVersion: () => terminalsVersion,
     computeTerminal: ensureTerminal,
     computeTerminalMap,
     computeVehicleDetail,
@@ -507,7 +519,7 @@ app.use(
       ready: serverPhase === 'ready' || serverPhase === 'refreshing',
       phase: serverPhase,
       staticLoading: staticLoadInFlight !== null,
-      refreshInFlight: refreshInFlight !== null,
+      refreshInFlight: loops?.isRunning() ?? false,
       startupError,
       lastRefreshError,
       lastStaticLoadDurationMs,
@@ -534,6 +546,26 @@ broadcaster = setupWs(httpServer, {
   unsubscribe,
 });
 
+// Start the tick loops before listening so REST/WS callers can request decisions immediately. The
+// loops reschedule unconditionally and race each cycle against REFRESH_ABANDON_SECONDS, so a hung
+// refresh can never freeze them (plan Phase 10e). The watchdog is armed separately, after static
+// settles, so a slow boot cannot trip it.
+loops = startRefreshLoops({
+  runCycle: refreshInternal,
+  factIntervalMs: () => config.refreshIntervalSeconds * 1000,
+  decisionIntervalMs: () => DECISION_INTERVAL_SECONDS * 1000,
+  abandonAfterMs: REFRESH_ABANDON_SECONDS * 1000,
+  onError: (source, err) => {
+    console.error(`${source} failed:`, err instanceof Error ? err.message : err);
+  },
+  onAbandon: (generation, decisions, waitedMs) => {
+    console.warn(
+      `[refresh] abandoned generation=${generation} decisions=${decisions} waited_ms=${waitedMs} ` +
+        `bound_ms=${REFRESH_ABANDON_SECONDS * 1000}`,
+    );
+  },
+});
+
 httpServer.listen(PORT, () => {
   console.log(`dispatch listening on :${PORT} phase=${serverPhase}`);
   ensureStaticLoaded()
@@ -541,8 +573,20 @@ httpServer.listen(PORT, () => {
       console.error('static load failed:', err instanceof Error ? err.message : err);
     })
     .finally(() => {
-      scheduleFactTick();
-      scheduleDecisionTick();
+      // Armed here (after static settles) so a slow boot cannot trip it; the interval matches
+      // the fastest loop so a hung cycle is detected within one watchdog window + the stale
+      // threshold. Every completed cycle touches it in refreshInternal's finally.
+      tickWatchdog = createWatchdog({
+        intervalMs: Math.min(config.refreshIntervalSeconds, DECISION_INTERVAL_SECONDS) * 1000,
+        staleMs: WATCHDOG_STALE_SECONDS * 1000,
+        onStale: (staleSeconds) => {
+          console.error(
+            `[watchdog] no completed tick for ${staleSeconds}s — a refresh hung ` +
+              '(see plan Phase 10e); exiting so the platform restarts the collector',
+          );
+          process.exit(1);
+        },
+      });
       scheduleStaticCheck();
       void refreshOnce().catch(() => undefined);
     });

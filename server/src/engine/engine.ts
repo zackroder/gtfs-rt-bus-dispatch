@@ -62,6 +62,32 @@ interface RefreshContext {
   vpTerminalState: Map<string, VehicleTerminalState>;
 }
 
+// Shared cross-refresh preparation, returned to both refresh shapes so they build identical output.
+interface PreparedRefresh {
+  config: AppConfig;
+  ctx: RefreshContext;
+  blockChains: BlockChains;
+}
+
+// Tunables for the chunked decision pass (plan Phase 10a). A slice yields to the event loop after
+// evaluating at most `sliceSize` terminals or consuming `sliceBudgetMs` of wall time, whichever
+// comes first, so a global pass over the focused board never blocks a concurrent request past a
+// slice boundary. The pass wall time is unchanged; only its blocking granularity is.
+export interface ChunkedRefreshOptions {
+  sliceSize?: number;
+  sliceBudgetMs?: number;
+  /** Injectable yield (defaults to setImmediate) and clock, for deterministic tests. */
+  yieldToEventLoop?: () => Promise<void>;
+  now?: () => number;
+  /** Checked between slices; returning false abandons the pass (generation guard) and discards the rest. */
+  shouldContinue?: () => boolean;
+}
+
+export const CHUNKED_REFRESH_DEFAULTS = {
+  sliceSize: 8,
+  sliceBudgetMs: 250,
+} as const;
+
 export interface VehiclePositionDiagnostic {
   vehicleId: string;
   tripId?: string;
@@ -254,6 +280,62 @@ export class Engine {
 
   // Convert one realtime poll into snapshots for the requested terminals.
   refresh(rt: RealtimeSnapshot, now: Date = new Date(), terminalIds?: Set<string>): TerminalSnapshot[] {
+    const prep = this.prepareRefresh(rt, now);
+    const wanted = terminalIds ?? new Set(prep.config.terminals.map((t) => t.id));
+    const snapshots: TerminalSnapshot[] = [];
+    for (const terminal of prep.config.terminals) {
+      if (!wanted.has(terminal.id)) continue;
+      snapshots.push(this.snapshotForTerminal(terminal, prep.ctx, prep.blockChains));
+    }
+    return snapshots;
+  }
+
+  // Chunked variant of refresh for the global decision pass (plan Phase 10a). It performs the same
+  // preparation and builds identical snapshots, but evaluates terminals in bounded slices, yielding
+  // to the event loop between them so a concurrent HTTP handler never waits past a slice boundary.
+  // The pass wall time is unchanged; only its blocking granularity is. An abandoned pass can stop
+  // early via shouldContinue and its partial output is discarded by the caller.
+  async refreshChunked(
+    rt: RealtimeSnapshot,
+    now: Date = new Date(),
+    terminalIds?: Set<string>,
+    options: ChunkedRefreshOptions = {},
+  ): Promise<TerminalSnapshot[]> {
+    const prep = this.prepareRefresh(rt, now);
+    const wanted = terminalIds ?? new Set(prep.config.terminals.map((t) => t.id));
+    const terminals = prep.config.terminals.filter((terminal) => wanted.has(terminal.id));
+    const sliceSize = Math.max(1, options.sliceSize ?? CHUNKED_REFRESH_DEFAULTS.sliceSize);
+    const sliceBudgetMs = Math.max(0, options.sliceBudgetMs ?? CHUNKED_REFRESH_DEFAULTS.sliceBudgetMs);
+    const yieldToEventLoop =
+      options.yieldToEventLoop ??
+      (() => new Promise<void>((resolve) => setImmediate(resolve)));
+    const clock = options.now ?? Date.now;
+    const shouldContinue = options.shouldContinue ?? (() => true);
+    const snapshots: TerminalSnapshot[] = [];
+    let index = 0;
+    while (index < terminals.length) {
+      const sliceStartedAt = clock();
+      let processedInSlice = 0;
+      while (index < terminals.length) {
+        snapshots.push(this.snapshotForTerminal(terminals[index++]!, prep.ctx, prep.blockChains));
+        processedInSlice++;
+        if (processedInSlice >= sliceSize) break;
+        if (clock() - sliceStartedAt >= sliceBudgetMs) break;
+      }
+      if (index < terminals.length) {
+        // The ledger mutates only in whole-terminal units, so an interleaved read or compute-on-miss
+        // can never observe a half-built terminal; it sees the prior or a later complete state.
+        await yieldToEventLoop();
+        if (!shouldContinue()) break;
+      }
+    }
+    return snapshots;
+  }
+
+  // Shared cross-refresh preparation for refresh and refreshChunked: service-day rollover, hold
+  // reconciliation, the global geometric fact pass, and the per-refresh context. Kept in one place
+  // so both pass shapes stay byte-identical.
+  private prepareRefresh(rt: RealtimeSnapshot, now: Date): PreparedRefresh {
     const config = this.getConfig();
     // All schedule/realtime clock conversions happen in the agency's timezone, never the
     // server's local zone, so the math is identical on a Chicago workstation or a UTC host.
@@ -291,6 +373,9 @@ export class Engine {
       };
       this.ledger.set(intervention.tripId, record);
     }
+    // Facts are recorded before per-terminal filtering so an unviewed terminal cannot cause a
+    // missed departure, and both pass shapes share the same schedule-derived block chains.
+    const blockChains = this.blockChains(activeIds);
     const vpTerminalState = new Map<string, VehicleTerminalState>();
     this.recordFacts(
       rt,
@@ -298,7 +383,7 @@ export class Engine {
       serviceDayStartSeconds,
       generatedAt,
       activeDate,
-      this.blockChains(activeIds),
+      blockChains,
       config.terminals,
       vpTerminalState,
     );
@@ -322,22 +407,21 @@ export class Engine {
       arrivalCache: new Map(),
       vpTerminalState,
     };
+    return { config, ctx, blockChains };
+  }
 
-    const wanted = terminalIds ?? new Set(config.terminals.map((t) => t.id));
-    // Facts are recorded before filtering so an unviewed terminal cannot cause a missed departure.
-    const blockChains = this.blockChains(activeIds);
-    const snapshots: TerminalSnapshot[] = [];
-    for (const terminal of config.terminals) {
-      if (!wanted.has(terminal.id)) continue;
-      const routes = this.buildRouteStates(terminal, ctx, blockChains);
-      snapshots.push({
-        terminalId: terminal.id,
-        generatedAt: ctx.generatedAt,
-        serviceDayStartSeconds: ctx.serviceDayStartSeconds,
-        routes,
-      });
-    }
-    return snapshots;
+  private snapshotForTerminal(
+    terminal: Terminal,
+    ctx: RefreshContext,
+    blockChains: BlockChains,
+  ): TerminalSnapshot {
+    const routes = this.buildRouteStates(terminal, ctx, blockChains);
+    return {
+      terminalId: terminal.id,
+      generatedAt: ctx.generatedAt,
+      serviceDayStartSeconds: ctx.serviceDayStartSeconds,
+      routes,
+    };
   }
 
   private recordArrival(
