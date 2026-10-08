@@ -20,6 +20,7 @@ import {
   filterTerminalsByFocus,
 } from './engine/terminal';
 import { createApi } from './api/routes';
+import { createAuthGate } from './api/authGate';
 import { setupWs } from './api/ws';
 import { InterventionStore } from './db/interventions';
 import { createWatchdog, type Watchdog } from './watchdog';
@@ -479,6 +480,10 @@ app.use('/api', (req, res, next) => {
   });
   next();
 });
+// Site-wide basic-auth gate (plan Phase 11): registered after the request log and before the API
+// router, static assets, and the SPA fallback so every inbound path is covered. A no-op when
+// DISPATCH_TOKEN is unset; GET /api/health stays exempt for Fly's health check.
+app.use(createAuthGate({ token: DISPATCH_TOKEN }));
 app.use(
   '/api',
   createApi({
@@ -544,6 +549,8 @@ const httpServer = http.createServer(app);
 broadcaster = setupWs(httpServer, {
   subscribe,
   unsubscribe,
+  // The Express gate cannot see HTTP upgrade events; the WS handshake re-checks the same token.
+  token: DISPATCH_TOKEN,
 });
 
 // Start the tick loops before listening so REST/WS callers can request decisions immediately. The

@@ -1,20 +1,54 @@
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
+import { basicAuthPassword, constantTimeEquals } from './authGate';
 import type { TerminalSnapshot } from '../../../shared/types';
 
 // The WS protocol is intentionally small: clients select one terminal and receive matching snapshots.
 export interface WsDeps {
   subscribe(terminalId: string): void;
   unsubscribe(terminalId: string): void;
+  /** Shared site token; undefined leaves the handshake open (local dev). See plan Phase 11b. */
+  token?: string;
 }
 
 export interface WsBroadcaster {
   broadcast(snapshots: TerminalSnapshot[]): void;
 }
 
+// The Express gate never sees HTTP upgrade events, so the identical credential check is repeated
+// here. Browsers attach cached basic credentials to same-origin upgrades (the primary path); the
+// `?token=` query parameter is the reliable cross-browser fallback.
+function authorizedUpgrade(req: IncomingMessage, token: string): boolean {
+  const headerToken = req.headers['x-dispatch-token'];
+  const provided = typeof headerToken === 'string' ? headerToken : undefined;
+  if (provided !== undefined && constantTimeEquals(provided, token)) return true;
+  const authorization = req.headers.authorization;
+  const password = basicAuthPassword(typeof authorization === 'string' ? authorization : undefined);
+  if (password !== null && constantTimeEquals(password, token)) return true;
+  try {
+    const parsed = new URL(req.url ?? '', 'http://localhost');
+    const queryToken = parsed.searchParams.get('token');
+    return queryToken !== null && constantTimeEquals(queryToken, token);
+  } catch {
+    return false;
+  }
+}
+
 // Attach the terminal subscription protocol and return a filtered snapshot broadcaster.
 export function setupWs(httpServer: Server, deps: WsDeps): WsBroadcaster {
-  const wss = new WebSocketServer({ server: httpServer, path: '/api/ws' });
+  const token = deps.token;
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: '/api/ws',
+    // verifyClient runs before the handshake completes: a rejected upgrade is answered 401 and
+    // the socket is closed, so an unauthenticated client never becomes a WS connection.
+    verifyClient: token
+      ? (info, done) => {
+          if (authorizedUpgrade(info.req, token)) done(true);
+          else done(false, 401, 'authentication required');
+        }
+      : undefined,
+  });
   const clientSubscriptions = new Map<WebSocket, Set<string>>();
   const alive = new WeakMap<WebSocket, boolean>();
   const heartbeat = setInterval(() => {
@@ -29,6 +63,9 @@ export function setupWs(httpServer: Server, deps: WsDeps): WsBroadcaster {
     }
   }, 30000);
   wss.on('close', () => clearInterval(heartbeat));
+  // The heartbeat must not outlive the HTTP server (e.g. in tests that close it); the server
+  // never closes in production, where the interval is expected to run for the process lifetime.
+  httpServer.once('close', () => clearInterval(heartbeat));
   wss.on('connection', (socket) => {
     const terminalIds = new Set<string>();
     clientSubscriptions.set(socket, terminalIds);
