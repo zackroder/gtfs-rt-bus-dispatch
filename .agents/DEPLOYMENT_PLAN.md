@@ -11,7 +11,9 @@ owner's next release PR): basic-auth gate over the whole site — SPA, all
 `x-dispatch-token` still accepted. Known follow-up for the next batch:
 the mutating-route gate should also accept basic auth (basic-only browser
 users can read but cannot apply/decline until they set the Settings
-token). Remaining: the owner's `dev` → `main` release PR, then Phase 9
+token). **Phase 12 added** (owner-reported quirks, root-caused:
+session-baseline facts, flip-geometry corroboration, terminal-scoped
+ledger facts). Remaining: the owner's `dev` → `main` release PR, then Phase 9
 (data review) after ~24 h of runtime. Decisions are final; do not
 re-litigate them without the owner. Update PROGRESS.md after each phase.
 
@@ -884,6 +886,95 @@ green through a deploy boot.
   logs show attempts.
 - The app remains discoverable by name; auth is the barrier, not obscurity.
 - No per-user accounts or identity — one shared token.
+
+## Phase 12 — Fact fidelity fixes (boot fabrications + wrong-terminal layover)
+
+Branch: `fix/fact-baseline-and-flip-geometry` → merge into `dev`, release to
+`main`. Two owner-reported production quirks, both root-caused in code, plus
+one related defect found while tracing.
+
+**Quirk 1 — boot fabricates event times.** A bus already laying over at
+boot gets an "arrival" stamped ~boot (STOPPED_AT at a terminal stop is
+treated as an immediate observed arrival — `engine.ts` recordFacts,
+~line 745); a bus mid-trip at boot gets a "departure" stamped ~boot (the
+in-transit departure path, ~line 786). The same happens at the ~02:40
+service-day rollover (ledger + vehicleTracks both clear). Owner's rule:
+an unobserved transition is unknowable — leave it blank.
+
+**Quirk 2 — wrong-terminal layover.** `buildDepartures` classifies a
+vehicle as laying over at T when VP says its current trip is the outbound
+trip from T (`onOutboundLeg`, `headway.ts:460`) — trip_id trusted with no
+geometric check. CTA flips a vehicle's trip_id to its next trip while it
+is still at the FAR terminal (the documented flip-window behavior); when
+the flip lands on the outbound trip early, the bus renders as "laying
+over" at T counting down to a departure a whole trip + layover away (the
+"65 minutes" symptom).
+
+**Related defect — cross-terminal ledger reads.** The ledger is keyed by
+`trip_id`, but an outbound trip's ARRIVAL fact belongs to the terminal
+where that trip ends (the far one). T reads it as "arrived here"
+(`terminalArrival = record?.arrivalSeconds`, `headway.ts:443`; the
+disjunct at `:466`) and `recordRunEvents` can write cross-terminal
+arrival rows for short trips whose far-end arrival lands inside T's
+30-minute past window.
+
+### 12a. Session-baseline facts (quirk 1)
+
+`engine.ts` recordFacts: the FIRST fresh observation of a vehicle in a
+session (boot or service-day rollover — both clear vehicleTracks)
+establishes its posture baseline only — no fact, arm, or confirmation
+fires from it. From the second observation on, the existing logic runs
+unchanged, making every recorded fact an observed transition by
+construction. Effects: a bus already parked at boot keeps a blank
+(unobserved) arrival — EDT falls back to schedule per the existing EDT
+rule — and its later STOPPED→IN_TRANSIT transition still records a true
+departure; a bus mid-trip at boot gets no fabricated departure.
+Restored `run_facts` are unaffected (ledger already-recorded checks
+still gate re-recording).
+
+Tests (engine.test.ts, existing synthetic-fixture patterns): a first
+observation of a vehicle already STOPPED_AT a terminal stop → no arrival
+fact or run_event (blank), EDT = scheduled; a mid-trip first observation
+→ no departure fact; the same vehicle's later live transitions record
+normally (INCOMING_AT→STOPPED_AT arrival at the stop instant,
+parked→motion departure); the geometric arm/confirm path still records
+after its baseline; a service-date rollover re-baselines.
+
+### 12b. Geometric corroboration for trip-flip layover (quirk 2)
+
+`headway.ts` buildDepartures: `onOutboundLeg` contributes to
+`arrivedAtTerminal` only when corroborated at THIS terminal — the vehicle
+is in T's buffer (`terminalState.inBuffer` for the (vehicle, T) key) or
+has a T-scoped posture for the trip. An ob-assigned vehicle elsewhere
+falls through to the existing ambiguous-posture 'incoming' catch-all
+(`headway.ts:474`): the card then shows the predecessor trip's predicted
+arrival at T (honest: arrives ~X, departs ~Y), never a phantom layover.
+
+Tests: VP carries the vehicle on the outbound trip while positioned at
+the far terminal → state 'incoming' with the predecessor trip's ETA, not
+layover; the same flip with the vehicle inside T's buffer → 'layover'
+with the outbound EDT (existing behavior preserved).
+
+### 12c. Terminal-scope the ledger's arrival/departure facts (hardening)
+
+Add the terminal id to arrival/departure facts: the in-memory
+`RunRecord` (headway.ts) gains arrival/departure terminal ids, persisted
+via additive `run_facts` columns using the existing `ensureColumn`
+migration pattern (schema.ts). Everywhere a fact is read *at* a terminal
+— `buildDepartures`' `terminalArrival`/`arrivedAtTerminal`
+(`headway.ts:443`, `:466`) and `recordRunEvents` — require the fact's
+terminal to match. This closes the cross-terminal class for display and
+for the run_events audit.
+
+Tests: a short-trip block whose far-end arrival lands inside T's past
+window → no arrival row at T for the outbound trip; facts recorded at
+the correct terminal only.
+
+**Acceptance:** boot the local server against the live feed mid-service:
+no arrival/departure rows stamped within each vehicle's first
+observation (spot-check `GET /api/run-events` before/after); the
+"65-minute layover at the wrong terminal" class renders as incoming with
+the predecessor ETA; all 212 existing tests green plus the new ones.
 
 ## Non-goals (explicitly out of scope — do not build)
 
