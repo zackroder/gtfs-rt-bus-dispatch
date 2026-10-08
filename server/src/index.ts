@@ -7,6 +7,7 @@ import express from 'express';
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 import { createDatabase } from './db/schema';
 import { applyConfig, getTerminalsSource, loadConfig, setTerminalsSource } from './config';
+import { bakedStaticIsStale, refreshStaticFromBaked } from './db/bakedStatic';
 import { loadStatic } from './db/staticLoader';
 import { GtfsStaticProvider } from './gtfs/static';
 import { GtfsRealtimeProvider } from './providers/gtfsrt';
@@ -16,6 +17,7 @@ import {
   activeTerminalIds,
   autoDiscoverTerminals,
   discoveryServiceIds,
+  filterTerminalsByFocus,
 } from './engine/terminal';
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
@@ -44,6 +46,13 @@ const STATIC_CHECK_SECONDS =
   Number.isFinite(parsedStaticCheckSeconds) && parsedStaticCheckSeconds > 0
     ? parsedStaticCheckSeconds
     : 3600;
+// Baked mode: when set, the runtime never downloads/parses the GTFS zip; it copies the image's
+// baked static tables into the volume DB when they are newer (Phase 7b).
+const BAKED_STATIC_DB = process.env.BAKED_STATIC_DB || undefined;
+const parsedDecisionSeconds = Number(process.env.DECISION_INTERVAL_SECONDS);
+// Flat decision cadence (recommendations/run_events/snapshots); facts tick at refreshIntervalSeconds.
+const DECISION_INTERVAL_SECONDS =
+  Number.isFinite(parsedDecisionSeconds) && parsedDecisionSeconds > 0 ? parsedDecisionSeconds : 30;
 
 const db = createDatabase(DB_PATH);
 try {
@@ -71,6 +80,9 @@ let startupError: string | null = null;
 let lastRefreshError: string | null = null;
 let lastStaticLoadDurationMs: number | null = null;
 let lastRefreshDurationMs: number | null = null;
+// Baked mode only: volume static data is older than staticRefreshHours and the image carries no
+// newer baked tables, so the machine is waiting for the next scheduled deploy (never downloads).
+let staticStale = false;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -89,6 +101,13 @@ function terminalsEqual(a: Terminal[], b: Terminal[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
+// Set equality ignoring order/duplicates, for comparing a route-focus list.
+function sameStringSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((value) => set.has(value));
+}
+
 function discoverTerminals(): void {
   // A manual terminal configuration is an owner override and is never replaced; in auto mode
   // re-run on every static load (fresh or reuse) so time-of-day variants stay current.
@@ -97,7 +116,9 @@ function discoverTerminals(): void {
   const now = new Date();
   const serviceDate = activeServiceDate(now, serviceDayStart, config.agencyTimezone);
   const active = discoveryServiceIds(db, serviceDate, DISCOVERY_DAYS);
-  const terminals = autoDiscoverTerminals(db, active);
+  // Scope discovery to the configured focus (empty = all routes); this scopes everything
+  // downstream because the engine's wanted set derives from config.terminals.
+  const terminals = filterTerminalsByFocus(autoDiscoverTerminals(db, active), config.focusRouteIds ?? []);
   if (terminals.length === 0) return;
   if (terminalsEqual(config.terminals, terminals)) return;
   config = applyConfig(db, config, { ...config, terminals });
@@ -129,6 +150,20 @@ async function ensureStaticLoaded(force = false): Promise<void> {
   return staticLoadInFlight;
 }
 
+// Shared post-load steps for both the download/parse path and the baked-copy path: fold the
+// WAL, drop schedule-derived engine state (this also cancels stale interventions), refresh the
+// loadedAt marker, and re-run discovery (which honours the current focus).
+function postStaticLoad(): void {
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // ignore checkpoint failures
+  }
+  engine.invalidateStaticCaches();
+  staticLoadedAt = getStaticLoadedAt(db);
+  discoverTerminals();
+}
+
 async function ensureStaticLoadedInternal(force = false): Promise<void> {
   const stopCount = (db.prepare('SELECT COUNT(*) AS c FROM stops').get() as { c: number }).c;
   const savedLoadedAt = getStaticLoadedAt(db);
@@ -136,7 +171,45 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
     savedLoadedAt !== null &&
     config.staticRefreshHours > 0 &&
     Date.now() - savedLoadedAt > config.staticRefreshHours * 3600 * 1000;
-  console.log(`[static] inspect stops=${stopCount} saved_loaded_at=${savedLoadedAt ?? 'none'} stale=${stale}`);
+  console.log(
+    `[static] inspect stops=${stopCount} saved_loaded_at=${savedLoadedAt ?? 'none'} ` +
+      `stale=${stale} baked=${BAKED_STATIC_DB ?? 'none'}`,
+  );
+
+  if (BAKED_STATIC_DB) {
+    // Baked mode: the GTFS parse never runs on this machine. Copy the image's baked static
+    // tables in when they are newer than the volume's; run the post-load steps on success.
+    const result = refreshStaticFromBaked(db, BAKED_STATIC_DB, () => postStaticLoad());
+    staticStale = bakedStaticIsStale(
+      result.copied,
+      savedLoadedAt,
+      stopCount,
+      config.staticRefreshHours,
+      Date.now(),
+    );
+    if (result.copied) {
+      console.log(`[static] baked copy loaded_at=${result.bakedLoadedAt}`);
+      return;
+    }
+    if (stopCount > 0) {
+      // Volume data is at least as new as the image; reuse it.
+      if (staticStale) {
+        console.warn(
+          `[static] baked stale volume_loaded_at=${savedLoadedAt} ` +
+            `baked_loaded_at=${result.bakedLoadedAt ?? 'none'}; awaiting next scheduled deploy`,
+        );
+      }
+      discoverTerminals();
+      console.log(`[static] baked reuse terminals=${config.terminals.length}`);
+      return;
+    }
+    // No volume static and no usable baked file: surface staleness instead of downloading (a
+    // download here is exactly what OOMs the machine the first day the volume data ages out).
+    console.warn('[static] baked file missing and volume empty; not downloading in baked mode');
+    return;
+  }
+
+  // Non-baked (local dev): the existing download/parse path is unchanged.
   if (!force && stopCount > 0 && !stale) {
     // Static tables are reusable until their configured refresh age is exceeded.
     discoverTerminals();
@@ -163,14 +236,8 @@ async function ensureStaticLoadedInternal(force = false): Promise<void> {
   const persistStartedAt = Date.now();
   loadStatic(db, gtfs);
   console.log(`[static] persisted duration_ms=${Date.now() - persistStartedAt}`);
-  try {
-    db.pragma('wal_checkpoint(TRUNCATE)');
-  } catch {
-    // ignore checkpoint failures
-  }
-  engine.invalidateStaticCaches();
-  staticLoadedAt = getStaticLoadedAt(db);
-  discoverTerminals();
+  staticStale = false;
+  postStaticLoad();
 }
 
 async function ensureTerminal(terminalId: string): Promise<TerminalSnapshot | undefined> {
@@ -255,9 +322,12 @@ function unsubscribe(terminalId: string): void {
   }
 }
 
-async function refreshInternal(): Promise<void> {
+// One serialized refresh cycle. Fact ticks (runDecisions=false) record the global fact pass and
+// intervention expiry only; decision ticks also build route states, queue recommendations, write
+// run_events, and broadcast. Both share the engine's ledger, so they must never overlap.
+async function refreshInternal(runDecisions: boolean): Promise<void> {
   const startedAt = Date.now();
-  console.log(`[refresh] begin subscribed=${subscriptions.size}`);
+  console.log(`[refresh] begin decisions=${runDecisions} subscribed=${subscriptions.size}`);
   try {
     if (staticLoadInFlight) {
       console.log('[refresh] waiting_for_static_load');
@@ -279,8 +349,15 @@ async function refreshInternal(): Promise<void> {
   try {
     if (!latestRt) return;
     const now = new Date();
-    // Evaluate every active terminal on each refresh so recommendations and run facts accumulate
-    // with nobody watching; a user watching an off-duty terminal still gets a snapshot.
+    if (!runDecisions) {
+      // Fact tick: an empty wanted set still runs recordFacts (focused terminals) and expiry,
+      // but writes no run_events/interventions and produces no snapshots.
+      engine.refresh(latestRt, now, new Set());
+      console.log(`[facts] complete duration_ms=${Date.now() - startedAt}`);
+      return;
+    }
+    // Evaluate every active terminal on each decision pass so recommendations and run facts
+    // accumulate with nobody watching; a user watching an off-duty terminal still gets a snapshot.
     const serviceDayStart = getServiceDayStart(db);
     const nowSvc = nowServiceSeconds(now, serviceDayStart, config.agencyTimezone);
     const active = activeTerminalIds(
@@ -309,34 +386,65 @@ async function refreshInternal(): Promise<void> {
   } finally {
     lastRefreshDurationMs = Date.now() - startedAt;
     if (serverPhase === 'refreshing') serverPhase = 'ready';
-    // Warn when a cycle eats more than half the cadence: all-terminal evaluation must not let the
-    // 10 s refresh loop fall behind (measure, don't re-architect).
-    const slowThresholdMs = config.refreshIntervalSeconds * 500;
+    // Warn when a pass eats its cadence: a decision pass over the focused set must fit the flat
+    // interval (the signal the focus list has outgrown the machine); a fact pass must fit half.
+    const slowThresholdMs = runDecisions
+      ? DECISION_INTERVAL_SECONDS * 1000
+      : config.refreshIntervalSeconds * 500;
     if (lastRefreshDurationMs > slowThresholdMs) {
-      console.warn(`[refresh] slow duration_ms=${lastRefreshDurationMs} threshold_ms=${slowThresholdMs}`);
+      console.warn(
+        `[refresh] slow decisions=${runDecisions} duration_ms=${lastRefreshDurationMs} threshold_ms=${slowThresholdMs}`,
+      );
     }
-    console.log(`[refresh] end duration_ms=${lastRefreshDurationMs}`);
+    console.log(`[refresh] end decisions=${runDecisions} duration_ms=${lastRefreshDurationMs}`);
   }
 }
 
-async function refreshOnce(): Promise<void> {
-  // Serialization prevents overlapping polls from racing the in-memory ledger or broadcasts.
+// A decision requested while another pass is running is coalesced and run immediately after, so
+// a long fact/decision pass can never drop a decision tick entirely.
+let decisionRequested = false;
+
+function runRefresh(decisions: boolean): Promise<void> {
+  if (decisions) decisionRequested = true;
   if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = refreshInternal().finally(() => {
+  const runDecisions = decisionRequested;
+  decisionRequested = false;
+  refreshInFlight = refreshInternal(runDecisions).finally(() => {
     refreshInFlight = null;
+    if (decisionRequested) {
+      void runRefresh(true).catch((err: unknown) => {
+        console.error('queued refresh failed:', err instanceof Error ? err.message : err);
+      });
+    }
   });
   return refreshInFlight;
 }
 
-function scheduleRefresh(): void {
+// Decision refresh used by WS subscribe, REST compute-on-miss, and intervention actions.
+function refreshOnce(): Promise<void> {
+  return runRefresh(true);
+}
+
+function scheduleFactTick(): void {
   const intervalMs = config.refreshIntervalSeconds * 1000;
   setTimeout(() => {
     // Schedule the next tick after this one settles so slow feeds cannot create overlapping loops.
-    refreshOnce()
+    runRefresh(false)
       .catch((err: unknown) => {
-        console.error('refresh failed:', err instanceof Error ? err.message : err);
+        console.error('fact tick failed:', err instanceof Error ? err.message : err);
       })
-      .finally(() => scheduleRefresh());
+      .finally(() => scheduleFactTick());
+  }, intervalMs);
+}
+
+function scheduleDecisionTick(): void {
+  const intervalMs = DECISION_INTERVAL_SECONDS * 1000;
+  setTimeout(() => {
+    runRefresh(true)
+      .catch((err: unknown) => {
+        console.error('decision tick failed:', err instanceof Error ? err.message : err);
+      })
+      .finally(() => scheduleDecisionTick());
   }, intervalMs);
 }
 
@@ -368,10 +476,14 @@ app.use(
     db,
     getConfig: () => config,
     applyConfig: (next) => {
+      const terminalsChanged = !terminalsEqual(config.terminals, next.terminals);
+      const focusChanged = !sameStringSet(config.focusRouteIds ?? [], next.focusRouteIds ?? []);
       config = applyConfig(db, config, next);
-      // An explicit settings write carries the owner's terminals payload, so it overrides
-      // auto-discovery permanently (matching the pre-Phase-1 behavior of any persisted config).
-      setTerminalsSource(db, 'manual');
+      // An explicit terminal-list change is an owner override that disables auto-discovery;
+      // unrelated setting saves keep the current source so runtime focus changes can recompute.
+      if (terminalsChanged) setTerminalsSource(db, 'manual');
+      // A focus change recomputes the auto-discovered terminal list immediately (no restart).
+      if (focusChanged && getTerminalsSource(db) === 'auto') discoverTerminals();
       return config;
     },
     computeTerminal: ensureTerminal,
@@ -391,6 +503,7 @@ app.use(
     getHealth: () => ({
       ok: true,
       tokenRequired: DISPATCH_TOKEN !== undefined,
+      staticStale,
       ready: serverPhase === 'ready' || serverPhase === 'refreshing',
       phase: serverPhase,
       staticLoading: staticLoadInFlight !== null,
@@ -428,7 +541,8 @@ httpServer.listen(PORT, () => {
       console.error('static load failed:', err instanceof Error ? err.message : err);
     })
     .finally(() => {
-      scheduleRefresh();
+      scheduleFactTick();
+      scheduleDecisionTick();
       scheduleStaticCheck();
       void refreshOnce().catch(() => undefined);
     });

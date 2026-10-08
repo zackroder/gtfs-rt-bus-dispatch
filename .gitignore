@@ -3,3 +3,7 @@ dist/
 data/
 .env
 server/src/_diag.ts
+# CI bake artifact (Phase 7a); rebuilt by the deploy workflow, never committed.
+/baked.db
+/baked.db-wal
+/baked.db-shm

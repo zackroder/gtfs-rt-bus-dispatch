@@ -42,6 +42,7 @@ export interface ApiDeps {
   getHealth(): {
     ok: boolean;
     tokenRequired?: boolean;
+    staticStale?: boolean;
     lastRefreshAt: number | null;
     staticLoadedAt: number | null;
     ready?: boolean;

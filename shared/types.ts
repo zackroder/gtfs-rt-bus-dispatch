@@ -265,6 +265,8 @@ export interface AppConfig {
   leadTimeMinutes: number;
   lookaheadMinutes: number;
   terminals: Terminal[];
+  /** Routes the pilot focuses on (menu, facts, recommendations, logs). Empty = all routes. */
+  focusRouteIds?: string[];
   /** Radius (meters) around a terminal stop within which a parked bus is counted as arrived. */
   arrivalRadiusMeters?: number;
   /** Additional meters tolerated while an arrival candidate moves from the inbound stop into the
@@ -315,6 +317,7 @@ export const appConfigSchema = z.object({
   leadTimeMinutes: z.number().int().min(0).max(600),
   lookaheadMinutes: z.number().int().min(5).max(1440),
   terminals: z.array(terminalSchema),
+  focusRouteIds: z.array(z.string().min(1)).optional(),
   arrivalRadiusMeters: z.number().int().min(0).max(5000).optional(),
   terminalMovementMeters: z.number().int().min(0).max(5000).optional(),
   stationaryDisplacementMeters: z.number().int().min(0).max(1000).optional(),
@@ -479,6 +482,9 @@ export const healthSchema = z.object({
   ok: z.boolean(),
   /** True when the server requires `x-dispatch-token` on mutating routes. */
   tokenRequired: z.boolean().optional(),
+  /** True when baked mode is serving static data older than staticRefreshHours and no newer
+   *  baked image is available (awaiting the next scheduled deploy; never downloads). */
+  staticStale: z.boolean().optional(),
   lastRefreshAt: z.number().nullable(),
   staticLoadedAt: z.number().nullable(),
   ready: z.boolean().optional(),

@@ -45,6 +45,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/server/dist ./server/dist
 COPY --from=build /app/web/dist ./web/dist
 
+# The baked static tables are produced by the deploy workflow's bake step before this build.
+# COPY is mandatory: a deploy without baking fails loudly instead of shipping a runtime that
+# would try to parse the GTFS zip (and OOM) on the Fly machine.
+COPY baked.db ./baked.db
+
 # dotenv.config resolves ../../.env relative to server/dist; absent in the image is harmless —
 # Fly injects the real configuration as environment variables.
 EXPOSE 8080
