@@ -4,15 +4,16 @@ Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for r
 reports; the Phase 7 deviations — the baked copy carries both static
 markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
 flips to `manual` only on an actual terminal-list change — are
-owner-approved). **Phase 10 complete on `dev`** (merged `25d06be`,
-awaiting the owner's release PR): chunked decision passes, memoized
-`/api/terminals`, tolerant health check restored, focus field in Settings,
-structural loop fix with watchdog backstop — decision cadence 30 s
-preserved throughout. **Phase 11 added** (owner-approved: basic-auth gate
-over the whole site, `GET /api/health` exempt). Remaining: the owner's
-`dev` → `main` release PR, then Phase 9 (data review) after ~24 h of
-runtime. Decisions are final; do not re-litigate them without the owner.
-Update PROGRESS.md after each phase.
+owner-approved). **Phase 10 complete and released** (`main` at `a4dafae`, deployed).
+**Phase 11 complete on `dev`** (merged `04a3293`, 212 tests, awaiting the
+owner's next release PR): basic-auth gate over the whole site — SPA, all
+`/api` routes, WS handshake — with `GET /api/health` exempt and
+`x-dispatch-token` still accepted. Known follow-up for the next batch:
+the mutating-route gate should also accept basic auth (basic-only browser
+users can read but cannot apply/decline until they set the Settings
+token). Remaining: the owner's `dev` → `main` release PR, then Phase 9
+(data review) after ~24 h of runtime. Decisions are final; do not
+re-litigate them without the owner. Update PROGRESS.md after each phase.
 
 ## Goal
 
