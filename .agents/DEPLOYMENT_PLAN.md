@@ -1,10 +1,12 @@
 # Deployment Plan — Dispatch Pilot
 
-Status: Phases 0–6 complete and merged to `dev` (see PROGRESS.md for the
-run report). Phase 7 was added after that run's findings — it is the
-remaining pre-launch work. Phases 8–9 follow the owner's launch. Decisions
-are final; do not re-litigate them without the owner. Update PROGRESS.md
-after each phase.
+Status: Phases 0–7 complete and merged to `dev` (see PROGRESS.md for run
+reports; the Phase 7 deviations — the baked copy carries both static
+markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
+flips to `manual` only on an actual terminal-list change — are
+owner-approved). Remaining: Phase 8 (owner, via the Fly/GitHub websites)
+and Phase 9 (data review after ~24 h of runtime). Decisions are final; do
+not re-litigate them without the owner. Update PROGRESS.md after each phase.
 
 ## Goal
 
