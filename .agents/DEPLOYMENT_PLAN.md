@@ -741,6 +741,15 @@ With 10a/10b in place: `[[http_service.checks]]` interval 10 s, timeout 25 s
 (covers any residual slice stall), grace 1 m — and return
 `DECISION_INTERVAL_SECONDS` to 30.
 
+### 10d. Focus field in the Settings UI
+
+`focusRouteIds` is runtime-editable but has no Settings-page field (found
+post-launch: the owner had to hand-roll a GET/modify/PUT round-trip). Add a
+comma-separated text field to `web/src/pages/ConfigPage.tsx` that edits it
+like every other knob (string in, trimmed-split array out; render the
+current list as `route1, route2`). Test: edit round-trips through
+`PUT /api/config` and recomputes the terminal list with no restart.
+
 ### Tests
 
 - Chunked pass: with a large active-terminal fixture, interleaved requests
