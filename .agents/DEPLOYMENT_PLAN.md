@@ -669,6 +669,12 @@ WHERE action = 'created' LIMIT 20;
 SELECT terminal_id, route_id, COUNT(*),
        AVG(value_seconds - scheduled_arrival) AS avg_late_s
 FROM run_events WHERE event_type='arrival' GROUP BY 1, 2;
+
+-- Day-part scoping happens HERE, not at collection time: `value_seconds` is
+-- seconds since service-day start, so a WHERE clause on it scopes any query
+-- to dispatcher hours (e.g. AM peak, PM peak, midday base, owl) without the
+-- engine ever gating collection. The un-held baseline across all hours is
+-- the comparison the analysis needs.
 ```
 
 (Pull the volume DB with a one-time `flyctl` install —
@@ -692,6 +698,13 @@ Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
   deploy build context; revisit if deploys feel slow.
 - No hold re-solving after apply; no co-located multi-route views (existing
   known limitations stand).
+- No collection-time day-part windows (quiet overnight, peak-only, etc.):
+  the machine bills flat whether the engine is idle or not, owl rows are few
+  and filterable, and the un-held baseline across all hours is what the
+  Phase 9 analysis compares against. Scope day-parts in the review queries
+  instead (see Phase 9). Revisit only if cost or noise demands it — the
+  lever then is Fly machine stop/start on cron schedules, not engine
+  gating.
 - No logging of config values or API keys beyond the existing redacted
   `config_events`.
 
