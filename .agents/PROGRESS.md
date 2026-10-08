@@ -1011,3 +1011,75 @@ abort froze both tick loops. **The decision cadence stays at 30 s**
 merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
 `dev`→`main` release PR (watch the deploy + first boot), then Phase 9's ~24 h data
 review.
+
+## Deployment Phase 11 — Basic-auth gate over the whole site (complete)
+
+Branch `feat/site-auth-gate` → merge into `dev`. Owner-approved option 1: one gate
+in front of the SPA, every `/api` route, and the WS handshake, so the public pilot
+URL no longer serves reads (schedules, recorded arrivals/departures,
+recommendations) to anyone who guesses the hostname.
+
+### 11a — Server gate middleware
+
+- New `server/src/api/authGate.ts` with the gate plus unit-tested helpers
+  (`constantTimeEquals`, `basicAuthPassword`). Rejects with 401 unless the request
+  carries `Authorization: Basic` with the token as the password (any username,
+  constant-time compare) or the pre-existing `x-dispatch-token` header.
+  `DISPATCH_TOKEN` unset = no-op (local dev). Registered in `index.ts` after the
+  `[http]` log and before `createApi`, `express.static`, and the SPA fallback.
+  Non-`/api` failures send `WWW-Authenticate: Basic realm="dispatch"` (native
+  browser prompt); `/api` failures send plain JSON with no challenge header
+  (fetch/XHR must not open a dialog). `GET /api/health` is the only exempt route.
+  `routes.ts`'s local token compare now imports the shared helper instead of
+  duplicating it.
+
+### 11b — WS handshake gate
+
+- `api/ws.ts` re-applies the identical check via `verifyClient` (Express never sees
+  `upgrade` events): 401 + destroyed socket without credentials; accepts the basic
+  header, `x-dispatch-token`, or `?token=`. `index.ts` passes `DISPATCH_TOKEN`. The
+  heartbeat interval is now cleared when the HTTP server closes (clean test
+  teardown).
+
+### 11c — Web client
+
+- `hooks/useStream.ts` appends `?token=` from `localStorage.dispatchToken` to the WS
+  URL when set. `api.ts` maps any 401 (both request helpers) to a clear
+  "Authentication required — refresh to log in, or set the dispatch token in
+  Settings" error instead of `HTTP 401`. Settings and `.env.example` comments
+  updated to describe the site-wide gate.
+
+### 11d — Docs
+
+- README gains an **Access control** section: the whole site behind basic auth when
+  `DISPATCH_TOKEN` is set, `GET /api/health` exempt, `x-dispatch-token` still
+  accepted, unset = open. The plan's Decisions table already carried the target
+  wording.
+
+### Tests (197 → 212)
+
+- `authGate.test.ts` (9): helper units; 401 without credentials on an API GET, `/`
+  (SPA), and an asset; correct basic password (any username) → 200; wrong password
+  and malformed header → 401; `x-dispatch-token` → 200; `/api/health` 200 with and
+  without credentials; unset token open everywhere.
+- `ws.test.ts` (6): raw `http.request` upgrades — no credentials and a wrong token
+  → 401/closed; `?token=`, basic header, and `x-dispatch-token` complete the
+  handshake; unset token completes with no credentials.
+
+### Acceptance evidence (local, built server)
+
+- `DISPATCH_TOKEN=test-token-123`: `/`, an asset, and `/api/terminals` → 401 without
+  credentials (with `WWW-Authenticate` on the page/asset); `x-dispatch-token` and
+  basic (`-u anything:<token>`) → 200; `/api/health` → 200 both ways; WS no
+  credentials → 401, `?token=` and basic → 101.
+- `DISPATCH_TOKEN` unset: `/`, `/api/terminals`, `/api/health` → 200 and the WS
+  upgrade completes with no credentials (no-op verified).
+- Runtime used the built server with unroutable feed/static URLs to keep the event
+  loop free (no local GTFS cache; the live terminal view + WS data path is
+  unchanged by this phase and covered by the existing suite).
+
+`npm run typecheck`, `npm run lint`, `npm test` (**212 tests**) all green; branch
+merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
+`dev`→`main` release PR (first browser visit prompts once — username anything,
+password the `DISPATCH_TOKEN`; existing scripts unchanged), then Phase 9's ~24 h
+data review.
