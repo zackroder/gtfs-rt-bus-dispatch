@@ -475,6 +475,24 @@ describe('engine triplet dispatch', () => {
     expect(d1.departureSeconds).toBe(svc('08:05'));
   });
 
+  it('fact-only refresh records facts but writes no run_events or interventions', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const count = (table: string) =>
+      (data.db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+
+    // Fact tick: empty wanted set.
+    engine.refresh(stdRt(), nowAt('08:08'), new Set());
+    expect(count('run_facts')).toBeGreaterThan(0);
+    expect(count('run_events')).toBe(0);
+    expect(count('interventions')).toBe(0);
+
+    // Decision tick for the focused terminal writes both.
+    engine.refresh(stdRt(), nowAt('08:09'), new Set(['T']));
+    expect(count('run_events')).toBeGreaterThan(0);
+    expect(count('interventions')).toBeGreaterThan(0);
+  });
+
   it('queues recommendations with decision context for an evaluated active terminal', () => {
     const engine = makeEngine();
     const data = testData(engine);

@@ -271,6 +271,22 @@ export function activeTerminalIds(
   return active;
 }
 
+// Restrict a discovered terminal list to the focused routes: keep each terminal but drop routes
+// outside the focus, and drop terminals that then serve no focused route. An empty focus keeps
+// every route (local dev and pre-focus behavior). The engine's wanted set derives from
+// config.terminals, so scoping discovery here scopes facts, decisions, logs, and the menu.
+export function filterTerminalsByFocus(terminals: Terminal[], focusRouteIds: string[]): Terminal[] {
+  if (focusRouteIds.length === 0) return terminals;
+  const focus = new Set(focusRouteIds);
+  const result: Terminal[] = [];
+  for (const terminal of terminals) {
+    const routeIds = (terminal.routeIds ?? []).filter((routeId) => focus.has(routeId));
+    if (routeIds.length === 0) continue;
+    result.push({ ...terminal, routeIds });
+  }
+  return result;
+}
+
 // Infer terminal candidates from the endpoints of active route/direction schedules.
 export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string>): Terminal[] {
   const serviceList = Array.from(activeServiceIds);

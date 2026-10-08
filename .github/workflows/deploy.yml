@@ -1,18 +1,25 @@
-# Auto-deploy to Fly.io on merge to main.
-# See .agents/DEPLOYMENT_PLAN.md (Phase 6). The first real image build happens here on
-# Fly's remote builder (Windows contributors do not need Docker locally).
+# Auto-deploy to Fly.io on merge to main, plus a daily scheduled deploy that refreshes the
+# baked static GTFS data (Phase 7). See .agents/DEPLOYMENT_PLAN.md.
 #
-# This workflow deliberately does NOT rerun tests: it is gated on the same commit's CI
-# (`ci`) through branch protection on main (require the `ci` status check before merge).
+# flyctl runs inside this Actions runner and the image builds on Fly's remote builder, so
+# neither local flyctl nor Docker is ever needed. The workflow stays inert until the owner's
+# FLY_API_TOKEN secret and the Fly app exist (Phase 8).
+#
+# This workflow deliberately does NOT rerun tests: it is gated on the same commit's CI (`ci`)
+# through branch protection on main (require the `ci` status check before merge).
 name: deploy
 
 on:
   push:
     branches: [main]
+  # Daily refresh of the baked static data (09:00 UTC = 04:00 Chicago). Deploys take ~30-40 min
+  # because the bake's persist dominates; weekly cron is the fallback if Actions minutes matter.
+  schedule:
+    - cron: '0 9 * * *'
   # Manual redeploy of the current main.
   workflow_dispatch:
 
-# Serialize deploys so two merges cannot race the remote builder / machine update.
+# Serialize deploys so two merges (or a merge and the cron) cannot race the builder/machine.
 concurrency:
   group: deploy
   cancel-in-progress: false
@@ -22,9 +29,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Bake the static schedule into baked.db at the repo root. The Dockerfile COPYs it into the
+      # image, so this must run before the deploy. The ~3.5 GB parse is fine on a 16 GB runner.
+      - run: npm ci
+      - run: npx tsx server/scripts/bake-static.ts
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - run: flyctl deploy --remote-only
         env:
-          # Repository secret created by the owner (Phase 7):
+          # Repository secret created by the owner (Phase 8):
           #   fly tokens create deploy -a dispatch-pilot
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

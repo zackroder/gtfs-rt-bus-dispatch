@@ -6,6 +6,7 @@ import {
   activeRoutesAtTerminal,
   autoDiscoverTerminals,
   discoveryServiceIds,
+  filterTerminalsByFocus,
   inboundTrips,
   outboundTrips,
 } from './terminal';
@@ -293,6 +294,19 @@ describe('time-of-day terminal discovery and activity', () => {
     expect(weekIds.has('SVC_WEEKEND')).toBe(true);
     const weekTerminals = autoDiscoverTerminals(db, weekIds);
     expect(weekTerminals.some((t) => t.id === 'W')).toBe(true);
+  });
+
+  it('filters terminals to the focused routes, dropping terminals with no focused route', () => {
+    const terminals = [
+      { id: 'T', name: 'T', stopIds: ['T'], routeIds: ['9', '79'] },
+      { id: 'U', name: 'U', stopIds: ['U'], routeIds: ['79'] },
+      { id: 'V', name: 'V', stopIds: ['V'], routeIds: ['1'] },
+    ];
+    expect(filterTerminalsByFocus(terminals, ['9'])).toEqual([
+      { id: 'T', name: 'T', stopIds: ['T'], routeIds: ['9'] },
+    ]);
+    // An empty focus keeps every route (local dev / pre-focus behavior).
+    expect(filterTerminalsByFocus(terminals, [])).toEqual(terminals);
   });
 
   it('marks terminal endpoints active only inside the current window', () => {

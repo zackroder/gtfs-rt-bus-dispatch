@@ -819,4 +819,101 @@ Owner tasks deferred (per the task scope — not done here): configure branch
 protection on `main`/`dev` (require PR, require the `ci` status check, no force
 push/direct push), set the default branch to `dev`, and create the
 `FLY_API_TOKEN` repository secret. The deploy workflow is inert until the Fly app
-and that secret exist (Phase 7).
+and that secret exist (Phase 8).
+
+## Deployment Phase 7 — Baked static data + refresh cadence (complete)
+
+Branch `feat/baked-static` → merge into `dev`. Fixes the two launch blockers the
+Phase 0–6 report measured: the ~3.5 GB parse OOMs the 1 GB machine, and a
+full-board decision pass (40–60 s) overran the 10 s cadence.
+
+### 7a — Bake script
+
+- `server/scripts/bake-static.ts` (run `npx tsx server/scripts/bake-static.ts`)
+  downloads the public static zip, reuses `parseStatic` + `loadStatic` against a
+  fresh throwaway DB, and writes `baked.db` at the repo root (gitignored). The
+  file carries the full schema with only the static tables filled plus the static
+  markers; operational tables stay empty. No `CTA_API_KEY` needed.
+
+### 7b — Runtime baked mode
+
+- New `server/src/db/bakedStatic.ts` `refreshStaticFromBaked`: `ATTACH`es the
+  baked file, and when its `staticLoadedAt` is newer than the volume's, in one
+  transaction drops/recreates the static tables (shared `STATIC_SCHEMA_SQL` from
+  `schema.ts`) and fills each via `INSERT INTO main.<t> SELECT * FROM baked.<t>` —
+  SQL-level, no JS row materialization. Volume config/operational tables are
+  untouched.
+- `BAKED_STATIC_DB` gates baked mode in `index.ts`. On boot and in the Phase 3
+  hourly check the runtime copies newer baked tables, or reuses the volume; it
+  **never downloads/parses the zip**. When the volume static is older than
+  `staticRefreshHours` and the image is not newer, it logs and surfaces
+  `staticStale: true` on `/api/health` (`bakedStaticIsStale`), awaiting the next
+  scheduled deploy. Local dev (no `BAKED_STATIC_DB`) is unchanged.
+
+### 7c — Route focus + flat decision tick
+
+- New config `focusRouteIds` (optional; empty = all routes), seeded once from env
+  `FOCUS_ROUTES` (`parseFocusRoutes`, backfilled only while never persisted).
+  Discovery filters to focused routes (`filterTerminalsByFocus`), so facts,
+  recommendations, `run_events`, and the menu all scope automatically. A focus
+  change via `PUT /api/config` recomputes the persisted terminal list immediately
+  (`terminalsSource: auto`), no restart.
+- Ticks split: a **fact tick** every `refreshIntervalSeconds` (10 s) runs the
+  global fact pass + expiry only (`engine.refresh(..., new Set())`); a **decision
+  tick** every `DECISION_INTERVAL_SECONDS` (default 30) builds route states,
+  queues recommendations, writes `run_events`, and broadcasts over the focused
+  active terminals ∪ subscriptions. Serialized with coalescing so a decision is
+  never dropped. The slow warning now compares a decision pass to its flat
+  interval.
+
+### 7d — CI wiring (file edits only)
+
+- `deploy.yml`: added the daily `schedule` cron (`0 9 * * *`), Node setup, and the
+  `npm ci` → `npx tsx server/scripts/bake-static.ts` bake step before
+  `flyctl deploy --remote-only`. `.dockerignore` does not exclude `baked.db`.
+- `Dockerfile`: mandatory `COPY baked.db ./baked.db` in the runtime stage (build
+  fails without it).
+- `fly.toml`: env adds `BAKED_STATIC_DB=/app/baked.db` and
+  `DECISION_INTERVAL_SECONDS=30`; `memory = "1gb"` kept (baked mode removes the
+  parse; steady state ~368 MB).
+
+### Measurements (CTA full feed; production bundle)
+
+- Bake: **~8.9 min** total (95 s download+parse, then persist), `baked.db` =
+  636,739,584 bytes (~637 MB).
+- Baked copy on a fresh volume: `[static] ready` **~104 s**, **peak RSS ~346 MB**
+  (well under 1 GB), no download (`[static] baked copy`).
+- Fact ticks: **~80–880 ms**, every 10 s.
+- Decision pass, all routes (229 active terminals): ~12.8 s.
+- Runtime focus (15 routes incl. #9): `/api/terminals` **124 → 15 routes**,
+  **485 → 98 terminals** with no restart; decision passes **~2.2–2.9 s** (42
+  active terminals), **zero slow warnings**.
+- Baked stale (both DBs aged): `staticStale: true`, **0 download attempts**, the
+  hourly check no-ops.
+- Non-baked path (tiny local GTFS over HTTP): `[static] load` → parsed →
+  persisted → ready, cache written — local dev unchanged.
+
+### Deviations / notes
+
+- Baked mode carries `serviceDayStartSeconds` alongside `staticLoadedAt`. The plan
+  said "update only the loadedAt marker", but the CTA feed's detected service-day
+  start is **9600 s (02:40)**, not the 10800 s default; copying stop_times without
+  it would shift every schedule clock by 20 min. Both are static-derived markers
+  (the volume's `appConfig`/operational tables stay untouched), and the unit test
+  asserts the volume config/logs survive.
+- `PUT /api/config` now marks `terminalsSource = 'manual'` only when the submitted
+  terminal list actually changes (not on any write, the Phase 1 interpretation).
+  Required by 7c: a runtime focus edit must keep `auto` and recompute terminals
+  without a restart. This also matches the plan's literal "PUT with a terminals
+  payload" wording.
+- Added `DECISION_INTERVAL_SECONDS`/`FOCUS_ROUTES`/`BAKED_STATIC_DB` to
+  `.env.example`; `baked.db*` added to `.gitignore`.
+
+Acceptance: all of the above verified locally with the real CTA feed.
+`npm run typecheck`, `npm run lint`, `npm test` (**179 tests**) all green.
+
+Remaining owner work: Phase 8 (Fly website — app `dispatch-pilot` in `ord`,
+volume `data` 1 GB created before first deploy, secrets incl. optional
+`FOCUS_ROUTES` seed, deploy token → GitHub `FLY_API_TOKEN`, branch protection,
+default branch `dev`, then the `dev`→`main` release PR) and Phase 9 (~24 h data
+review).

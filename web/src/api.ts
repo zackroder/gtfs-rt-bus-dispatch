@@ -41,6 +41,7 @@ export interface TerminalsResponse {
 export interface Health {
   ok: boolean;
   tokenRequired?: boolean;
+  staticStale?: boolean;
   lastRefreshAt: number | null;
   staticLoadedAt: number | null;
   ready?: boolean;

@@ -1,5 +1,6 @@
 # Fly.io configuration for the dispatch pilot: one always-on collector in Chicago.
-# The owner adopts this file with `fly launch --no-deploy` (Phase 7); no app is created here.
+# The owner creates the app via the Fly website (Phase 8); the first deploy comes from the
+# release PR through GitHub Actions, which adopts this file.
 app = "dispatch-pilot"
 primary_region = "ord"
 
@@ -7,6 +8,11 @@ primary_region = "ord"
 
 [env]
   PORT = "8080"
+  # Baked static mode: copy the image's baked.db into the volume DB instead of parsing the zip
+  # (Phase 7b). The GTFS parse never runs on this machine.
+  BAKED_STATIC_DB = "/app/baked.db"
+  # Flat decision cadence; the global fact pass still runs every 10 s.
+  DECISION_INTERVAL_SECONDS = "30"
 
 [http_service]
   internal_port = 8080
@@ -26,9 +32,9 @@ primary_region = "ord"
     method = "GET"
     path = "/api/health"
 
-# Memory is 1 GB per the plan's fallback for a >400 MB peak. WARNING: the measured peak during
-# a full CTA static parse was ~3.5 GB (see PROGRESS.md), so this machine may OOM at first load.
-# The owner must decide between a larger machine or a streaming-parse refactor (out of scope).
+# 1 GB is sufficient in baked mode: the ~3.5 GB parse happens in CI, and the runtime copies the
+# static tables with SQL-level INSERT ... SELECT (steady-state RSS ~368 MB + the copy). The
+# decision cadence is CPU-bound, not memory-bound, so the faster tick needs no memory change.
 [[vm]]
   size = "shared-cpu-1x"
   memory = "1gb"
