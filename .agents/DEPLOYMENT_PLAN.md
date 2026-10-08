@@ -709,7 +709,17 @@ Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
 
 ## Phase 10 — Post-launch performance fixes (first production-day findings)
 
-Branch: `fix/chunked-decision-pass` → merge into `dev`, release to `main`.
+Branch: `fix/post-launch-perf` → merge into `dev`, release to `main`.
+**Owner requirement: the decision cadence stays at 30 s** (`DECISION_INTERVAL_SECONDS`
+in `fly.toml` is back at 30; do not slow the tick — if passes outgrow it, report).
+
+State: the interim health-check removal is deployed; `DECISION_INTERVAL_SECONDS`
+is restored to 30 on `dev` with this phase. Shipped same-day on `dev` (the
+worker continues from these starting points): the emergency liveness
+watchdog (`server/src/watchdog.ts` + test, wired in `index.ts`,
+`WATCHDOG_STALE_SECONDS`, default 180) is complete, and
+`server/src/refreshLoop.ts` — the 10e loop module — is written but unwired
+and untested; finishing it is 10e's work.
 
 Found on the first production day: the decision pass is single-threaded SQLite
 work measuring **~10–18 s per pass on shared-cpu-1x** (vs ~2–3 s on the dev
@@ -717,7 +727,7 @@ machine). While a pass runs, every concurrent request queues (`/api/terminals`
 served in 12–20 s), and Fly's HTTP health check (5 s timeout) marked the
 machine unhealthy, which **unrouted the app at the edge** — the intermittent
 browser 503s. Interim mitigations already shipped: the health check removed
-and `DECISION_INTERVAL_SECONDS=60`.
+and `DECISION_INTERVAL_SECONDS=60` (now superseded — 30 s restored).
 
 ### 10a. Chunked decision pass
 
@@ -740,6 +750,29 @@ Sub-second p95 thereafter, even during a pass.
 With 10a/10b in place: `[[http_service.checks]]` interval 10 s, timeout 25 s
 (covers any residual slice stall), grace 1 m — and return
 `DECISION_INTERVAL_SECONDS` to 30.
+
+### 10e. Structural fix for the wedged tick loops (watchdog is the stopgap)
+
+The 2026-10-08 production wedge: a refresh hung inside `provider.fetch()` past
+the 15 s AbortController (the abort signal cannot interrupt a fetch stuck in
+DNS/connect resolution), and because every tick coalesces onto the in-flight
+promise (`runRefresh`) and each loop reschedules only in that promise's
+`.finally`, one hung refresh froze both loops at zero CPU until a manual
+restart. The emergency liveness watchdog (exits after `WATCHDOG_STALE_SECONDS`,
+default 180, without a completed tick) shipped as the stopgap; this is the
+structural fix:
+
+- Reschedule the tick loops on unconditional timers rather than in the
+  refresh promise's `.finally` — a hung promise can never stop a loop again.
+- Race each refresh against a hard outer timeout (~25 s: above the fetch
+  timeout, below the watchdog). A losing refresh is abandoned — clear
+  `refreshInFlight` and write `lastRefreshAt` only through a generation guard,
+  so a late-settling zombie cannot clobber live state.
+- Keep the watchdog as belt-and-braces.
+
+Tests: a never-settling refresh cannot stop the loop (the next tick still
+runs); the abandoned generation never clears the new in-flight flag or updates
+`lastRefreshAt`; the watchdog still fires if both layers somehow fail.
 
 ### 10d. Focus field in the Settings UI
 

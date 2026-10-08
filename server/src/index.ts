@@ -22,6 +22,7 @@ import {
 import { createApi } from './api/routes';
 import { setupWs } from './api/ws';
 import { InterventionStore } from './db/interventions';
+import { createWatchdog, type Watchdog } from './watchdog';
 import {
   activeServiceDate,
   activeServiceIds,
@@ -53,6 +54,13 @@ const parsedDecisionSeconds = Number(process.env.DECISION_INTERVAL_SECONDS);
 // Flat decision cadence (recommendations/run_events/snapshots); facts tick at refreshIntervalSeconds.
 const DECISION_INTERVAL_SECONDS =
   Number.isFinite(parsedDecisionSeconds) && parsedDecisionSeconds > 0 ? parsedDecisionSeconds : 30;
+const parsedWatchdogSeconds = Number(process.env.WATCHDOG_STALE_SECONDS);
+// Emergency self-heal: a refresh that never settles (e.g. a fetch hung past its abort) wedges
+// both tick loops, because every tick coalesces onto the in-flight promise. After this many
+// seconds without a completed tick the process exits so the platform restart brings the
+// collector back. The structural fix is plan Phase 10e; this is the stopgap.
+const WATCHDOG_STALE_SECONDS =
+  Number.isFinite(parsedWatchdogSeconds) && parsedWatchdogSeconds > 0 ? parsedWatchdogSeconds : 180;
 
 const db = createDatabase(DB_PATH);
 try {
@@ -70,6 +78,9 @@ let latestRt: RealtimeSnapshot | null = null;
 const snapshots = new Map<string, TerminalSnapshot>();
 const subscriptions = new Map<string, number>();
 let lastRefreshAt: number | null = null;
+// Touched by every completed refresh cycle (fact or decision) and armed at boot after the
+// static load settles; see WATCHDOG_STALE_SECONDS for why this exists.
+let tickWatchdog: Watchdog | null = null;
 let staticLoadedAt: number | null = getStaticLoadedAt(db);
 let broadcaster: { broadcast(snapshots: TerminalSnapshot[]): void } | null = null;
 let refreshInFlight: Promise<void> | null = null;
@@ -397,6 +408,9 @@ async function refreshInternal(runDecisions: boolean): Promise<void> {
       );
     }
     console.log(`[refresh] end decisions=${runDecisions} duration_ms=${lastRefreshDurationMs}`);
+    // A cycle that completed (even with an error) proves the loops are alive; a cycle that
+    // never settles is exactly the wedge the watchdog exists to recover from.
+    tickWatchdog?.touch();
   }
 }
 
@@ -541,6 +555,20 @@ httpServer.listen(PORT, () => {
       console.error('static load failed:', err instanceof Error ? err.message : err);
     })
     .finally(() => {
+      // Armed here (after static settles) so a slow boot cannot trip it; the interval matches
+      // the fastest loop so a hung cycle is detected within one watchdog window + the stale
+      // threshold. Every completed cycle touches it in refreshInternal's finally.
+      tickWatchdog = createWatchdog({
+        intervalMs: Math.min(config.refreshIntervalSeconds, DECISION_INTERVAL_SECONDS) * 1000,
+        staleMs: WATCHDOG_STALE_SECONDS * 1000,
+        onStale: (staleSeconds) => {
+          console.error(
+            `[watchdog] no completed tick for ${staleSeconds}s — a refresh hung ` +
+              '(see plan Phase 10e); exiting so the platform restarts the collector',
+          );
+          process.exit(1);
+        },
+      });
       scheduleFactTick();
       scheduleDecisionTick();
       scheduleStaticCheck();

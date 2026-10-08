@@ -11,12 +11,12 @@ primary_region = "ord"
   # Baked static mode: copy the image's baked.db into the volume DB instead of parsing the zip
   # (Phase 7b). The GTFS parse never runs on this machine.
   BAKED_STATIC_DB = "/app/baked.db"
-  # Flat decision cadence; the global fact pass still runs every 10 s. Interim 60 s: the
-  # decision pass is single-threaded SQLite work that measured ~10-18 s per pass on
-  # shared-cpu-1x in production (vs ~2-3 s on the dev machine), so a 30 s cadence stalls
-  # every concurrent request for that long. The chunked-pass fix (plan Phase 10) lets this
-  # return to 30 s without blocking the event loop.
-  DECISION_INTERVAL_SECONDS = "60"
+  # Flat decision cadence — 30 s is a fixed owner requirement: hold recommendations must be
+  # within ~30 s of becoming actionable. The interim 60 s is superseded (owner call); the
+  # Phase 10 chunked pass (plan 10a) keeps a 30 s cadence from blocking the event loop.
+  # With the current 3-route focus a pass is ~1-4 s on shared-cpu-1x; if passes outgrow the
+  # cadence, report it — do not slow the tick.
+  DECISION_INTERVAL_SECONDS = "30"
 
 [http_service]
   internal_port = 8080
