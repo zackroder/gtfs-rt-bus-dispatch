@@ -1,12 +1,15 @@
 # Deployment Plan — Dispatch Pilot
 
-Status: Phases 0–7 complete and merged to `dev` (see PROGRESS.md for run
-reports; the Phase 7 deviations — the baked copy carries both static
+Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for
+run reports; the Phase 7 deviations — the baked copy carries both static
 markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
 flips to `manual` only on an actual terminal-list change — are
-owner-approved). Remaining: Phase 8 (owner, via the Fly/GitHub websites)
-and Phase 9 (data review after ~24 h of runtime). Decisions are final; do
-not re-litigate them without the owner. Update PROGRESS.md after each phase.
+owner-approved). First production day surfaced the decision-pass stall
+(10–18 s single-threaded passes on shared-cpu-1x, health-check unrouting) —
+interim mitigations shipped (health check removed, 60 s cadence), real fix
+is Phase 10; Phase 9 (data review) still pending ~24 h of runtime.
+Decisions are final; do not re-litigate them without the owner. Update
+PROGRESS.md after each phase.
 
 ## Goal
 
@@ -703,6 +706,52 @@ plan's scope. Dashboard Monitoring works in a browser for the log checks.)
 
 Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
 (dashboard logs' `[refresh] complete` lines), any anomalies.
+
+## Phase 10 — Post-launch performance fixes (first production-day findings)
+
+Branch: `fix/chunked-decision-pass` → merge into `dev`, release to `main`.
+
+Found on the first production day: the decision pass is single-threaded SQLite
+work measuring **~10–18 s per pass on shared-cpu-1x** (vs ~2–3 s on the dev
+machine). While a pass runs, every concurrent request queues (`/api/terminals`
+served in 12–20 s), and Fly's HTTP health check (5 s timeout) marked the
+machine unhealthy, which **unrouted the app at the edge** — the intermittent
+browser 503s. Interim mitigations already shipped: the health check removed
+and `DECISION_INTERVAL_SECONDS=60`.
+
+### 10a. Chunked decision pass
+
+`server/src/index.ts` + `engine.ts`: run the decision pass in slices —
+evaluate a bounded set of terminals, yield to the event loop
+(`await setImmediate()` or a ~250 ms work budget per slice), repeat. A pass
+may take the same wall time, but no request ever waits past a slice boundary.
+Cadence semantics: the interval measures pass *ends*; skip a tick if the
+previous pass is still running. Fact ticks are unchanged (sub-second).
+
+### 10b. Memoize GET /api/terminals
+
+The batched activity query measured 0.9–2.4 s per request in production, the
+UI polls it every 60 s, and the response changes slowly — memoize the
+computed response for ~30 s; invalidate on config change and static refresh.
+Sub-second p95 thereafter, even during a pass.
+
+### 10c. Re-add a tolerant health check
+
+With 10a/10b in place: `[[http_service.checks]]` interval 10 s, timeout 25 s
+(covers any residual slice stall), grace 1 m — and return
+`DECISION_INTERVAL_SECONDS` to 30.
+
+### Tests
+
+- Chunked pass: with a large active-terminal fixture, interleaved requests
+  are served while the pass runs; pass output identical to the unchunked
+  engine result; a slow pass skips the next tick rather than piling.
+- Memoization: a second call within the window serves the cached body; a
+  config change invalidates it.
+
+**Acceptance:** in production, `/api/terminals` p95 < 1 s even during a
+decision pass; no health-check flapping with the check re-added; 30 s decision
+cadence restored.
 
 ## Non-goals (explicitly out of scope — do not build)
 

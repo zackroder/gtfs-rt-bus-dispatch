@@ -11,8 +11,12 @@ primary_region = "ord"
   # Baked static mode: copy the image's baked.db into the volume DB instead of parsing the zip
   # (Phase 7b). The GTFS parse never runs on this machine.
   BAKED_STATIC_DB = "/app/baked.db"
-  # Flat decision cadence; the global fact pass still runs every 10 s.
-  DECISION_INTERVAL_SECONDS = "30"
+  # Flat decision cadence; the global fact pass still runs every 10 s. Interim 60 s: the
+  # decision pass is single-threaded SQLite work that measured ~10-18 s per pass on
+  # shared-cpu-1x in production (vs ~2-3 s on the dev machine), so a 30 s cadence stalls
+  # every concurrent request for that long. The chunked-pass fix (plan Phase 10) lets this
+  # return to 30 s without blocking the event loop.
+  DECISION_INTERVAL_SECONDS = "60"
 
 [http_service]
   internal_port = 8080
@@ -23,18 +27,12 @@ primary_region = "ord"
   auto_start_machines = true
   min_machines_running = 1
 
-  # /api/health returns 200 once the app is ready. At boot the baked-static copy runs
-  # synchronously on the main thread (~104 s measured, likely 1–3 min on shared-cpu), during
-  # which /api/health cannot respond — and Fly caps check grace at 1 minute. So every deploy
-  # boot will show the machine unhealthy for ~1–3 min before it flips healthy. That is
-  # expected: deploys do not wait on checks (no --wait), the copy is the freeze window
-  # anyway, and post-deploy verification waits for ready.
-  [[http_service.checks]]
-    interval = "10s"
-    timeout = "5s"
-    grace_period = "1m"
-    method = "GET"
-    path = "/api/health"
+  # No HTTP health check — deliberate, first production-day finding: the decision pass
+  # blocks the single-threaded event loop for 10-18 s, and Fly's check (5 s timeout) then
+  # marked the machine unhealthy and UNROUTED it at the edge — intermittent browser 503s.
+  # A busy loop is not a dead app; routing follows machine state. Monitoring stays with
+  # /api/health and the logs. Re-add a tolerant check (interval 10s, timeout 25s) only
+  # after the chunked-pass fix (plan Phase 10) lands.
 
 # 1 GB is sufficient in baked mode: the ~3.5 GB parse happens in CI, and the runtime copies the
 # static tables with SQL-level INSERT ... SELECT (steady-state RSS ~368 MB + the copy). The
