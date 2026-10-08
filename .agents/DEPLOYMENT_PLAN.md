@@ -1,8 +1,10 @@
 # Deployment Plan — Dispatch Pilot
 
-Status: approved plan, ready for execution. Decisions are final; do not
-re-litigate them without the owner. Work phase by phase in order; each phase
-lands as its own PR (see "Git flow"). Update PROGRESS.md after each phase.
+Status: Phases 0–6 complete and merged to `dev` (see PROGRESS.md for the
+run report). Phase 7 was added after that run's findings — it is the
+remaining pre-launch work. Phases 8–9 follow the owner's launch. Decisions
+are final; do not re-litigate them without the owner. Update PROGRESS.md
+after each phase.
 
 ## Goal
 
@@ -27,11 +29,15 @@ Secondary goals shipped alongside, because they block the two above:
 
 | Decision | Choice |
 | --- | --- |
-| Host | Fly.io, single app, `ord` region, 512 MB machine, 1 GB volume (first 10 GB free) |
+| Host | Fly.io, single app, `ord` region, **1 GB machine** (512 MB measured too thin for the baked-table copy; downsize later if metrics allow), 1 GB volume (first 10 GB free) |
 | Environments | One production instance only; `dev` branch runs CI, does not deploy |
-| Deploy trigger | Push to `main` (merged PR) → CI → auto `fly deploy` |
+| Deploy trigger | Push to `main` (merged PR) → CI → bake + auto `fly deploy`; **plus a scheduled daily cron deploy** that refreshes the baked static data |
 | Access control | Optional `DISPATCH_TOKEN` env: mutating routes require `x-dispatch-token`; all reads stay open |
-| Cost target | ~$2–4/month total |
+| Static data | **Baked into the image by CI** — the GTFS parse (~3.5 GB peak) never runs on the Fly machine; runtime copies the baked static tables into the volume DB when the image is newer |
+| Route focus | `focusRouteIds` config (env `FOCUS_ROUTES` seed, default = all routes): the pilot tracks a subset of routes end-to-end — menu, facts, recommendations, logs — runtime-adjustable, no restart |
+| Refresh ticks | Facts at 10 s; decisions flat every 30 s (`DECISION_INTERVAL_SECONDS`) over the focused active terminals |
+| Branch protection | `main`: PR + `ci` check, no direct push. `dev`: stays open to direct merges (matches how agents integrate; retroactive PRs unnecessary) |
+| Cost target | ~$6.40/month total (1 GB machine; volume free) |
 
 ## Verified baseline findings (do not re-research)
 
@@ -86,7 +92,10 @@ commits, no direct pushes to `main`/`dev`).
 - Feature/fix work: branch off `dev` (`feat/terminal-time-variants`,
   `feat/global-recommendations`, `fix/static-auto-refresh`,
   `feat/dispatch-token-gate`, `chore/docker-fly-packaging`,
-  `chore/github-ci`), PR into `dev`.
+  `chore/github-ci`, `feat/baked-static`), PR into `dev`. Direct `--no-ff`
+  merges into `dev` are acceptable when no PR tooling is available (the
+  Phase 0–6 precedent); `main` stays PR-gated after the owner sets
+  protection.
 - Release: PR `dev` → `main`. Merge = CI + auto-deploy.
 - CI runs on every PR (to `dev` or `main`) and on every push to `dev`.
 - Deploy workflow runs on push to `main` only.
@@ -366,7 +375,7 @@ Branch: `chore/docker-fly-packaging` → PR into `dev`.
     `CTA_API_KEY=… node server/dist/index.js` → `/api/health` ready after
     static load, WS connects, a terminal snapshot renders. This proves every
     step the Dockerfile encodes, without building the image.
-  - Remote (Phase 7): Fly's remote builder performs the actual first image
+  - Remote (Phase 8): Fly's remote builder performs the actual first image
     build at `fly launch`/first deploy — watch that build; Dockerfile errors
     surface there, not before. Record the deferral in PROGRESS.md.
 
@@ -392,7 +401,7 @@ Branch: `chore/docker-fly-packaging` → PR into `dev`.
 command sequence runs green locally (the substitute for an image build, since
 the dev machine has no Docker); PROGRESS.md records that the image build
 itself is deferred to Fly's remote builder. Serving over TLS, volume
-persistence, and `[static] reuse` are verified at first deploy (Phase 7).
+persistence, and `[static] reuse` are verified at first deploy (Phase 8).
 
 ## Phase 6 — GitHub CI/CD
 
@@ -415,7 +424,7 @@ fly.toml to be merged first; the deploy workflow is inert until the app and
 - Steps: checkout → `superfly/flyctl-actions@master` setup →
   `flyctl deploy --remote-only` (remote builder; Windows contributors don't
   need Docker).
-- Secrets: `FLY_API_TOKEN` (repo secret, created by owner — see Phase 7).
+- Secrets: `FLY_API_TOKEN` (repo secret, created by owner — see Phase 8).
 - `concurrency: group: deploy, cancel-in-progress: false` (serialize deploys).
 - Deploy does **not** rerun tests — it is gated on the same commit's CI via
   branch protection on `main` (require `ci` check before merge). Note this in
@@ -430,45 +439,208 @@ installed on the dev machine)
 - Set default branch to `dev` (new PRs target `dev` automatically).
 
 **Acceptance:** a PR into `dev` shows CI checks and blocks merge on failure;
-a merged PR `dev`→`main` auto-deploys (verify after Phase 7).
+a merged PR `dev`→`main` auto-deploys (verify after Phase 8).
 
-## Phase 7 — First deploy (owner-assisted)
+## Phase 7 — Baked static data + refresh cadence (pre-launch)
 
-Owner-only steps (account/billing/secrets — do not attempt these without the
-owner): create the Fly account, register a card (pay-as-you-go; total spend
-capped by the 512 MB + 1 GB volume sizing), then:
+Added after the Phase 0–6 report; supersedes Phase 5's machine-sizing note.
+Branch: `feat/baked-static` → merge into `dev`. Fixes the two launch blockers
+the report measured:
 
-1. `fly auth login`, `fly launch --no-deploy --name dispatch-pilot --region
-   ord` (adopts the repo's `fly.toml` + Dockerfile).
-2. `fly volumes create data --size 1 --region ord`.
-3. `fly secrets set CTA_API_KEY=<from local .env>
-   AGENCY_TIMEZONE=America/Chicago DISPATCH_TOKEN=<generated random>` —
-   never commit these; `.env` is already gitignored and stays that way.
-4. `fly tokens create deploy -a dispatch-pilot` → add as GitHub repo secret
-   `FLY_API_TOKEN`.
-5. Merge `dev` → `main` via PR → watch the deploy workflow.
+- Static load peak RSS ~3.5 GB (parse) / ~2.6 GB (persist) on 96 k trips /
+  5.9 M stop_times — the 1 GB machine OOMs at first load; persist alone
+  took ~27 min on a dev machine.
+- Full refresh with ~290 active terminals takes 40–60 s per cycle — over the
+  10 s cadence (slow warning every cycle), and it delays arrival/departure
+  detection (confirm pings are poll-counted).
+- Steady-state RSS after a reuse boot: ~368 MB (informs machine sizing).
 
-Verify (worker, ~15 min after deploy):
+Design: **the GTFS parse never runs on the Fly machine.** CI bakes a
+static-only SQLite file during the deploy build; at runtime the server
+copies the baked static tables into the volume DB when the image carries
+newer data than the volume. Static refreshes arrive via the scheduled daily
+deploy (seconds of downtime; volume data survives).
+
+### 7a. Bake script
+
+`server/scripts/bake-static.ts`, run with `npx tsx` in CI (no server start):
+download the static zip (public URL — no `CTA_API_KEY` needed), reuse the
+existing parse + `loadStatic` against a throwaway DB path, producing
+`baked.db` at the repo root (gitignored). It must contain only the static
+tables (`stops`, `routes`, `trips`, `stop_times`, `calendar`,
+`calendar_dates`, `block_trips`) plus the static `loadedAt` marker
+(`createDatabase` + `loadStatic` produce the schema; operational tables
+stay empty). The ~3.5 GB peak is fine on a GitHub runner (~16 GB).
+
+### 7b. Runtime baked mode (env `BAKED_STATIC_DB`)
+
+`server/src/index.ts` + a small `db/` helper. If the baked file exists →
+baked mode; local dev without it keeps the existing download path unchanged.
+
+- On boot and in the Phase 3 hourly check, compare the baked `loadedAt`
+  against the volume DB's. Baked newer → refresh: `ATTACH` the baked file
+  read-only, and in one transaction drop/recreate the static tables in the
+  volume DB (schema.ts definitions) and fill each via
+  `INSERT INTO main.<t> SELECT * FROM baked.<t>`, update only the volume's
+  static `loadedAt` marker, then run the existing post-load steps
+  (`engine.invalidateStaticCaches()`, `cancelForStaticReload`,
+  re-discovery, WAL checkpoint). Copy strictly the static tables — never
+  the baked `settings` or other operational tables (the volume's config and
+  logs live there). SQL-level copy, no JS row materialization: memory stays
+  near steady state; target < 5 min on shared-cpu-1x.
+- In baked mode the runtime must **never** download/parse the zip: if both
+  DBs are older than `staticRefreshHours`, log it and surface
+  `staticStale: true` on `/api/health` (awaiting the next scheduled deploy).
+  Without this gate the Phase 3 hourly check would OOM-loop the machine the
+  first day the volume data aged past `staticRefreshHours`.
+
+### 7c. Route focus + flat decision tick
+
+Simplified at the owner's call from an earlier tiered/staggered design.
+With ~290 active terminals a flat 30 s pass cannot fit one shared vCPU (a
+full pass measured 40–60 s, single-threaded — extra cores or memory would
+not shrink a serial pass). Instead of scheduling complexity, shrink the
+scope: the pilot focuses on a configurable subset of routes, and facts,
+recommendations, logging, and the terminal menu all run globally on those
+routes at a flat 30 s.
+
+The focus is principled, not a cop-out: the triplet rule needs three
+consecutive departures close together, which happens on high-frequency
+corridors — infrequent routes rarely form triplets and produce almost no
+recommendations — so full coverage spends most of its CPU on terminals
+that log nothing useful. Focus gives denser data where the rule bites, and
+the dataset is cleanly "complete for focused routes."
+
+- New config `focusRouteIds: string[]` (default empty = all routes, local
+  dev and today's behavior unchanged; seeded once from optional env
+  `FOCUS_ROUTES`, comma-separated). Runtime-editable via `PUT /api/config`
+  like every other key. When set (with `terminalsSource: auto`), discovery
+  produces terminals for focused routes only, and `applyConfig` recomputes
+  the persisted terminal list on change — no restart (the volume DB
+  already holds an all-routes terminal list from earlier runs; setting the
+  focus must recompute it, not just filter future discovery). Scoping
+  discovery scopes everything downstream automatically: facts, decisions,
+  `run_events`, interventions, `/api/terminals`. Manual terminal config
+  still wins as today.
+- Fact tick at `refreshIntervalSeconds` (10 s): global fact pass over the
+  focused terminals (arrivals/departures → ledger, `run_facts`, fact
+  events) + cheap intervention expiry.
+- Decision tick at `DECISION_INTERVAL_SECONDS` (default 30, flat):
+  `buildRouteStates` for focused active terminals ∪ subscriptions
+  (recommendations, `run_events`, snapshots/broadcast). At ~10–20 focused
+  routes (≈20–60 terminals) a pass is ~3–12 s — comfortably inside 30 s.
+  Keep the slow-cycle warning when a decision pass exceeds the interval:
+  that is the signal the focus list has outgrown the machine (ceiling
+  ≈ 75–100 terminals ≈ 35–45 routes on shared-cpu-1x).
+- Picking the list (owner, runtime-adjustable): start with ~10
+  high-frequency corridors (include the #9); after Phase 9, the
+  `run_events`/interventions counts show which focused routes never
+  produce recommendations — swap them for denser ones.
+
+Deferred (do not build now): if coverage ever needs to exceed ~40 routes,
+the answer is the tiered/staggered scheduler previously drafted here (hot
+set by imminent EDT + rotating warm buckets + fact-triggered evaluation)
+or cheaper per-terminal evaluation — decide then, with the data.
+
+Add `FOCUS_ROUTES` and `DECISION_INTERVAL_SECONDS` to `.env.example`.
+
+### 7d. CI wiring (deploy.yml + Dockerfile + fly.toml)
+
+- `deploy.yml`: add `schedule:` (daily, e.g. `0 9 * * *` UTC = 04:00
+  Chicago) alongside push-to-`main`; the job gains a bake step before
+  `flyctl deploy --remote-only` (`npm ci` → `npx tsx
+  server/scripts/bake-static.ts`). These are file edits only — `flyctl`
+  runs inside the Actions runner and the image builds on Fly's remote
+  builder, so neither local `flyctl` nor Docker is ever needed; the
+  workflow stays inert until the owner's Phase 8 secrets exist.
+  `baked.db` rides the build context —
+  make sure `.dockerignore` does not exclude it. Deploys now take ~30–40
+  min (the bake's persist dominates) — acceptable for cron + merges. If
+  the repo is private, watch Actions minutes (~40 min/day ≈ 1 200/mo of
+  the 2 000 free); weekly cron is the fallback.
+- Dockerfile: `COPY baked.db` mandatory — fail the build when missing, so a
+  deploy without baking fails loudly instead of shipping a parse-capable
+  runtime.
+- fly.toml: env adds `BAKED_STATIC_DB=/app/baked.db` and
+  `DECISION_INTERVAL_SECONDS=30`; keep `memory = "1gb"` (decision cadence is
+  CPU-bound, not memory-bound — no memory change for the faster tick).
+
+### Tests
+
+- Baked-refresh helper with fixture DBs: baked newer → static tables
+  replaced, `loadedAt` updated, engine-invalidation path invoked, volume
+  `settings` untouched; volume newer → no-op; both stale → `staticStale`
+  surfaced and no download attempted (mock the provider and assert).
+- Tick split + focus: focus filters discovery, the persisted terminal
+  list, and the engine's wanted set; a fact-only refresh records facts but
+  writes no `run_events`/interventions, a decision refresh does both;
+  empty focus keeps all routes (back-compat).
+
+**Acceptance:** local boot with a newer `baked.db` copies the tables with
+logged peak RSS well under 1 GB; fact ticks (~10 s) complete in seconds; a
+full decision pass over the focused active terminals completes well inside
+30 s without the interval warning; setting `focusRouteIds` at runtime
+filters the menu and the engine without a restart; with no `baked.db` the
+download path still works (local dev); lint/typecheck/test green.
+
+## Phase 8 — First deploy (owner, via the Fly website)
+
+The dev machine has neither `flyctl` nor Docker, and none are required: the
+deploy workflow runs flyctl inside the GitHub Actions runner and builds
+remotely on Fly's builder. The owner configures everything through the Fly
+dashboard (CLI equivalents in parentheses; a one-time `flyctl` install —
+`irm https://fly.io/install.ps1 | iex` — is optional, needed only if the
+website cannot mint a deploy token).
+
+Owner-only steps (account/billing — workers do not attempt these):
+
+1. Create the Fly account, register a card (pay-as-you-go; spend capped by
+   the 1 GB machine + free ≤10 GB volume).
+2. Create the app (dashboard → create app): name `dispatch-pilot`, region
+   `ord` — do **not** deploy from the dashboard; the first deploy comes
+   from the release PR via GitHub Actions, which adopts the repo's
+   `fly.toml` (port 8080, HTTPS forced, 1 GB machine, `/data` mount).
+3. Create the volume **before** the first deploy (app → Volumes → new):
+   name `data`, 1 GB, region `ord` — the `fly.toml` mount requires it.
+   (`fly volumes create data --size 1 --region ord`.)
+4. Set secrets (app → Secrets): `CTA_API_KEY=<from local .env>`,
+   `AGENCY_TIMEZONE=America/Chicago`, `DISPATCH_TOKEN=<generated random>`.
+   Never commit these; `.env` stays gitignored. (Optional:
+   `FOCUS_ROUTES=9,79,…` seeds the route focus on the volume's first boot —
+   otherwise set it after launch via `PUT /api/config`.)
+5. Mint a deploy token (account → access tokens; CLI:
+   `fly tokens create deploy -a dispatch-pilot`) → add it as the GitHub
+   repo secret `FLY_API_TOKEN` (repo Settings → Secrets and variables →
+   Actions).
+6. Complete the Phase 6 owner tasks if not done: branch protection on
+   `main` (PR + `ci` check, no direct push), default branch = `dev`
+   (GitHub web UI — `gh` is not installed).
+7. Merge `dev` → `main` via PR → watch the Actions deploy run.
+
+Verify (worker, ~15 min after deploy — all doable in a browser):
 
 - The first deploy is also the **first image build** (no local Docker — see
-  Phase 5): watch the remote-builder output (in the deploy workflow log or
-  `fly deploy` stream). On failure the fix is almost certainly in the
-  Dockerfile (prod install with workspaces, runtime-stage file copies) —
-  fix, PR into `dev`, and redeploy.
+  Phase 5): watch the remote-builder output in the GitHub Actions run log.
+  On failure the fix is almost certainly in the Dockerfile (prod install
+  with workspaces, runtime-stage file copies) — fix, merge into `dev`, and
+  redeploy.
 - `https://dispatch-pilot.fly.dev/api/health` → `ready`.
-- `fly logs` shows `[static] ready`, `[refresh] complete snapshots=N` with
-  N > 0 even though nobody is watching (Phase 2 working).
+- Dashboard → Monitoring shows `[static] ready`, `[refresh] complete
+  snapshots=N` with N > 0 even though nobody is watching (Phase 2 working).
 - Browser: WS live-updates on a terminal view; token field in Settings
   unlocks apply/decline.
 - `GET /api/terminals` reflects time-of-day: 104 Vincelles vs 95 Beverly at
   the appropriate clock times (spot-check morning vs midday).
-- Restart the machine (`fly machine restart`): boots straight to `[static]
-  reuse` — volume persistence confirmed.
-- Within `staticRefreshHours` + the check interval of runtime, `fly logs`
-  shows a scheduled `[static] load` with a fresh download (not `reuse`) —
-  Phase 3 working on the always-on machine.
+- Restart the machine (dashboard → machine → restart): boots straight to
+  `[static] reuse` — volume persistence confirmed.
+- First deploy runs the CI bake step (~30–40 min total) and the logs show
+  the baked refresh (`[static]` copy path, not a download/parse) — Phase 7
+  working; `/api/health` shows no `staticStale`.
+- Within `staticRefreshHours` + the check interval of runtime, the scheduled
+  daily deploy keeps `/api/health` `staticStale` absent; if the cron breaks,
+  `staticStale: true` is the signal.
 
-## Phase 8 — T+24 h data review (the actual point)
+## Phase 9 — T+24 h data review (the actual point)
 
 After ~24 h of runtime, pull the data and confirm the two datasets:
 
@@ -497,12 +669,13 @@ SELECT terminal_id, route_id, COUNT(*),
 FROM run_events WHERE event_type='arrival' GROUP BY 1, 2;
 ```
 
-(`sqlite3` CLI via `fly ssh console`, or copy `data/dispatch.db` out with
-`fly ssh sftp`. Alternatively add read-only JSON endpoints later — **not** in
-this plan's scope.)
+(Pull the volume DB with a one-time `flyctl` install —
+`irm https://fly.io/install.ps1 | iex`, `fly auth login`, then
+`fly ssh sftp` — or add read-only JSON endpoints later, **not** in this
+plan's scope. Dashboard Monitoring works in a browser for the log checks.)
 
 Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
-(`fly logs` `[refresh] complete` lines), any anomalies.
+(dashboard logs' `[refresh] complete` lines), any anomalies.
 
 ## Non-goals (explicitly out of scope — do not build)
 
@@ -513,6 +686,8 @@ Record findings in PROGRESS.md: row counts, refresh wall-time on the machine
   testing.
 - No staging instance, no multi-machine, no Postgres, no Litestream backups
   (Fly snapshots volumes on deploy; revisit if the data becomes precious).
+- No prebuilt-image registry split (GHCR) yet — the baked.db rides the
+  deploy build context; revisit if deploys feel slow.
 - No hold re-solving after apply; no co-located multi-route views (existing
   known limitations stand).
 - No logging of config values or API keys beyond the existing redacted
