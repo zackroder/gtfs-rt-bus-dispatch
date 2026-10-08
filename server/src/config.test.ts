@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './db/schema';
-import { applyConfig, loadConfig, setSetting, GEOMETRY_DEFAULTS } from './config';
+import { applyConfig, loadConfig, parseFocusRoutes, setSetting, GEOMETRY_DEFAULTS } from './config';
 import type { AppConfig } from '../../shared/types';
 
 // Geometry knobs are optional in the schema so persisted configs from before the
@@ -72,5 +72,26 @@ describe('config geometry knobs', () => {
     expect(saved.scheduleArmGraceSeconds).toBe(90);
     expect(saved.terminals[0]!.radiusMeters).toBe(250);
     expect(saved.realtime.apiKey).toBe('sekrit');
+  });
+});
+
+describe('route focus config', () => {
+  it('parses the FOCUS_ROUTES seed and applies it on first run', () => {
+    expect(parseFocusRoutes('9, 79 ,9,')).toEqual(['9', '79']);
+    const db = createDatabase(':memory:');
+    const config = loadConfig(db, { FOCUS_ROUTES: '9,79' });
+    expect(config.focusRouteIds).toEqual(['9', '79']);
+  });
+
+  it('backfills focusRouteIds from the env only while it was never persisted', () => {
+    const db = createDatabase(':memory:');
+    setSetting(db, 'appConfig', { ...minimalConfig });
+    const seeded = loadConfig(db, { FOCUS_ROUTES: '49' });
+    expect(seeded.focusRouteIds).toEqual(['49']);
+
+    // An explicit runtime choice (including clearing it) is never overwritten by the env.
+    const cleared = createDatabase(':memory:');
+    setSetting(cleared, 'appConfig', { ...minimalConfig, focusRouteIds: [] });
+    expect(loadConfig(cleared, { FOCUS_ROUTES: '49' }).focusRouteIds).toEqual([]);
   });
 });

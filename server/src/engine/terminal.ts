@@ -1,6 +1,16 @@
 import type { Database } from 'better-sqlite3';
 import type { Terminal } from '../../../shared/types';
 import { prepared } from '../db/prepare';
+import { activeServiceIds } from '../gtfs/time';
+
+// A route/direction endpoint must be served by at least this many trips to become a terminal.
+// Filters one-off deadheads and short-turns while keeping scheduled time-of-day variants (e.g.
+// the #9 southbound 104 Vincennes morning vs. 95 Beverly midday split).
+export const DISCOVERY_MIN_TRIPS = 2;
+
+// Terminal activity looks back this far so a bus that just left keeps its terminal on the board
+// at the current moment; the forward edge is the configured lookahead.
+export const ACTIVITY_LOOKBACK_SECONDS = 30 * 60;
 
 // Terminal queries separate the first stop of outbound service from the last stop of
 // inbound service. This lets one configured terminal represent both arriving and departing buses.
@@ -146,118 +156,227 @@ export function routeShortName(db: Database, routeId: string): string {
   return routeStyle(db, routeId).shortName;
 }
 
-// Infer terminal candidates from the modal endpoints of active route/direction schedules.
+// Advance a YYYYMMDD key by whole days using UTC arithmetic so month/year boundaries are exact.
+function shiftDateKey(dateKey: string, days: number): string {
+  const year = Number(dateKey.slice(0, 4));
+  const month = Number(dateKey.slice(4, 6));
+  const day = Number(dateKey.slice(6, 8));
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${y}${m}${d}`;
+}
+
+// Union active service IDs across `days` service dates starting at `startDate`. Discovery uses a
+// week so day-of-week-only variants (e.g. weekend terminals) are found, not just today's services.
+export function discoveryServiceIds(db: Database, startDate: string, days: number): Set<string> {
+  const union = new Set<string>();
+  for (let offset = 0; offset < days; offset++) {
+    for (const id of activeServiceIds(db, shiftDateKey(startDate, offset))) union.add(id);
+  }
+  return union;
+}
+
+// Routes with a scheduled endpoint event at any of `stopIds` inside the window, keyed by stop id.
+// A route is active at a stop when a trip departs as its first stop (pickup_type != 1) or arrives
+// as its last stop (drop_off_type != 1); the inbound-arrival side is what makes a terminal that
+// currently only receives buses (e.g. a midday layover variant) show as active. Batched over all
+// stops so the home endpoint issues one query rather than one per terminal.
+export function activeRoutesByStop(
+  db: Database,
+  stopIds: string[],
+  activeServiceIds: Set<string>,
+  fromSvc: number,
+  toSvc: number,
+): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  const serviceList = Array.from(activeServiceIds);
+  if (serviceList.length === 0 || stopIds.length === 0) return result;
+  // A per-row correlated MIN/MAX over stop_times is O(candidate rows × lookups) and made the
+  // all-terminal home query take tens of seconds. Bounding every trip once in a CTE is a single
+  // grouped pass (the whole-table bound beats a candidate-trip prefilter on this feed).
+  const rows = prepared(
+    db,
+    `
+      WITH trip_bounds AS (
+        SELECT trip_id, MIN(stop_sequence) AS first_seq, MAX(stop_sequence) AS last_seq
+        FROM stop_times GROUP BY trip_id
+      )
+      SELECT DISTINCT st.stop_id, t.route_id
+      FROM stop_times st
+      JOIN trip_bounds b ON b.trip_id = st.trip_id
+      JOIN trips t ON t.trip_id = st.trip_id AND t.service_id IN (${placeholders(serviceList.length)})
+      WHERE st.stop_id IN (${placeholders(stopIds.length)})
+        AND (
+          (st.pickup_type != 1 AND st.stop_sequence = b.first_seq
+             AND st.departure_time >= ? AND st.departure_time <= ?)
+          OR
+          (st.drop_off_type != 1 AND st.stop_sequence = b.last_seq
+             AND st.arrival_time >= ? AND st.arrival_time <= ?)
+        )
+      `,
+  ).all(...serviceList, ...stopIds, fromSvc, toSvc, fromSvc, toSvc) as Array<{
+    stop_id: string;
+    route_id: string;
+  }>;
+  for (const row of rows) {
+    let routes = result.get(row.stop_id);
+    if (!routes) {
+      routes = new Set();
+      result.set(row.stop_id, routes);
+    }
+    routes.add(row.route_id);
+  }
+  return result;
+}
+
+// Union the per-stop activity for one terminal's stop list into a sorted route list.
+export function activeRoutesAtTerminal(
+  db: Database,
+  stopIds: string[],
+  activeServiceIds: Set<string>,
+  fromSvc: number,
+  toSvc: number,
+): string[] {
+  const byStop = activeRoutesByStop(db, stopIds, activeServiceIds, fromSvc, toSvc);
+  const routes = new Set<string>();
+  for (const stopId of stopIds) {
+    for (const routeId of byStop.get(stopId) ?? []) routes.add(routeId);
+  }
+  return Array.from(routes).sort();
+}
+
+// Terminal ids with at least one route endpoint event in the window. Used to evaluate the whole
+// active board every refresh (not just viewed terminals) so recommendations and run facts are
+// recorded even when nobody has the app open.
+export function activeTerminalIds(
+  db: Database,
+  terminals: Terminal[],
+  activeServiceIds: Set<string>,
+  fromSvc: number,
+  toSvc: number,
+): Set<string> {
+  const allStopIds = Array.from(new Set(terminals.flatMap((terminal) => terminal.stopIds)));
+  const byStop = activeRoutesByStop(db, allStopIds, activeServiceIds, fromSvc, toSvc);
+  const active = new Set<string>();
+  for (const terminal of terminals) {
+    for (const stopId of terminal.stopIds) {
+      if ((byStop.get(stopId)?.size ?? 0) > 0) {
+        active.add(terminal.id);
+        break;
+      }
+    }
+  }
+  return active;
+}
+
+// Restrict a discovered terminal list to the focused routes: keep each terminal but drop routes
+// outside the focus, and drop terminals that then serve no focused route. An empty focus keeps
+// every route (local dev and pre-focus behavior). The engine's wanted set derives from
+// config.terminals, so scoping discovery here scopes facts, decisions, logs, and the menu.
+export function filterTerminalsByFocus(terminals: Terminal[], focusRouteIds: string[]): Terminal[] {
+  if (focusRouteIds.length === 0) return terminals;
+  const focus = new Set(focusRouteIds);
+  const result: Terminal[] = [];
+  for (const terminal of terminals) {
+    const routeIds = (terminal.routeIds ?? []).filter((routeId) => focus.has(routeId));
+    if (routeIds.length === 0) continue;
+    result.push({ ...terminal, routeIds });
+  }
+  return result;
+}
+
+// Infer terminal candidates from the endpoints of active route/direction schedules.
 export function autoDiscoverTerminals(db: Database, activeServiceIds: Set<string>): Terminal[] {
   const serviceList = Array.from(activeServiceIds);
   if (serviceList.length === 0) return [];
+  // Bounding each trip once (instead of returning every stop_time) keeps discovery fast on a
+  // full agency feed: only the first and last stop of each active trip are needed.
   const rows = db
     .prepare(
       `
-      SELECT t.route_id, t.direction_id, t.trip_id, st.stop_id, st.stop_sequence, s.stop_name, s.lat, s.lon
-      FROM trips t
-      JOIN stop_times st ON st.trip_id = t.trip_id
-      JOIN stops s ON s.stop_id = st.stop_id
-      WHERE t.service_id IN (${placeholders(serviceList.length)})
+      SELECT t.route_id, t.direction_id, e.trip_id, f.stop_id AS first_stop, l.stop_id AS last_stop
+      FROM (
+        SELECT trip_id, MIN(stop_sequence) AS min_seq, MAX(stop_sequence) AS max_seq
+        FROM stop_times GROUP BY trip_id
+      ) e
+      JOIN trips t ON t.trip_id = e.trip_id AND t.service_id IN (${placeholders(serviceList.length)})
+      JOIN stop_times f ON f.trip_id = e.trip_id AND f.stop_sequence = e.min_seq
+      JOIN stop_times l ON l.trip_id = e.trip_id AND l.stop_sequence = e.max_seq
       `,
     )
     .all(...serviceList) as Array<{
     route_id: string;
     direction_id: number | null;
     trip_id: string;
-    stop_id: string;
-    stop_sequence: number;
-    stop_name: string;
-    lat: number;
-    lon: number;
+    first_stop: string;
+    last_stop: string;
   }>;
 
-  const stopMeta = new Map<string, { name: string; lat: number; lon: number }>();
-  // A modal first/last stop per route and direction is more robust than assuming every trip
-  // uses the same endpoint, especially when schedules contain short turns or variants.
-  const tripFirstStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
-  const tripLastStop = new Map<string, { stopId: string; routeId: string; dir: string; seq: number }>();
+  // Count trips per route/direction endpoint. First and last are counted separately so a
+  // single-stop trip cannot satisfy the threshold twice on its own.
+  const countEndpoint = (target: Map<string, Map<string, number>>, key: string, stopId: string) => {
+    let byStop = target.get(key);
+    if (!byStop) {
+      byStop = new Map();
+      target.set(key, byStop);
+    }
+    byStop.set(stopId, (byStop.get(stopId) ?? 0) + 1);
+  };
+  const firstCounts = new Map<string, Map<string, number>>();
+  const lastCounts = new Map<string, Map<string, number>>();
   for (const row of rows) {
-    if (!stopMeta.has(row.stop_id)) {
-      stopMeta.set(row.stop_id, { name: row.stop_name, lat: row.lat, lon: row.lon });
-    }
     const dir = row.direction_id === null ? '' : String(row.direction_id);
-    const current = tripFirstStop.get(row.trip_id);
-    if (!current || row.stop_sequence < current.seq) {
-      tripFirstStop.set(row.trip_id, {
-        stopId: row.stop_id,
-        routeId: row.route_id,
-        dir,
-        seq: row.stop_sequence,
-      });
-    }
-    const last = tripLastStop.get(row.trip_id);
-    if (!last || row.stop_sequence > last.seq) {
-      tripLastStop.set(row.trip_id, {
-        stopId: row.stop_id,
-        routeId: row.route_id,
-        dir,
-        seq: row.stop_sequence,
-      });
-    }
+    const key = `${row.route_id}:${dir}`;
+    countEndpoint(firstCounts, key, row.first_stop);
+    countEndpoint(lastCounts, key, row.last_stop);
   }
 
-  function countByKey(stops: Map<string, { stopId: string; routeId: string; dir: string; seq: number }>) {
-    const counts = new Map<string, Map<string, number>>();
-    for (const s of stops.values()) {
-      const key = `${s.routeId}:${s.dir}`;
-      let byStop = counts.get(key);
-      if (!byStop) {
-        byStop = new Map();
-        counts.set(key, byStop);
-      }
-      byStop.set(s.stopId, (byStop.get(s.stopId) ?? 0) + 1);
-    }
-    return counts;
-  }
-
-  function modal(counts: Map<string, Map<string, number>>): Map<string, string | undefined> {
-    // Select the most common endpoint for each route/direction, with query order providing
-    // a stable tie result for otherwise equivalent candidates.
-    const result = new Map<string, string | undefined>();
+  function endpointsAtLeast(counts: Map<string, Map<string, number>>): Map<string, Set<string>> {
+    // Keep every distinct endpoint served by enough trips, not just the modal one, so a minority
+    // time-of-day terminal variant survives discovery. Below-threshold endpoints are deadheads.
+    const result = new Map<string, Set<string>>();
     for (const [key, byStop] of counts) {
-      let best: string | undefined;
-      let bestCount = -1;
+      const kept = new Set<string>();
       for (const [stopId, count] of byStop) {
-        if (count > bestCount) {
-          bestCount = count;
-          best = stopId;
-        }
+        if (count >= DISCOVERY_MIN_TRIPS) kept.add(stopId);
       }
-      result.set(key, best);
+      if (kept.size > 0) result.set(key, kept);
     }
     return result;
   }
 
-  const firstCounts = countByKey(tripFirstStop);
-  const lastCounts = countByKey(tripLastStop);
-  const modalFirst = modal(firstCounts);
-  const modalLast = modal(lastCounts);
+  // Stop names/coordinates are a small table; load them once rather than joining every stop_time.
+  const stopMeta = new Map<string, { name: string; lat: number; lon: number }>();
+  for (const row of db.prepare('SELECT stop_id, stop_name, lat, lon FROM stops').all() as Array<{
+    stop_id: string;
+    stop_name: string;
+    lat: number;
+    lon: number;
+  }>) {
+    stopMeta.set(row.stop_id, { name: row.stop_name, lat: row.lat, lon: row.lon });
+  }
+
+  const firstEndpoints = endpointsAtLeast(firstCounts);
+  const lastEndpoints = endpointsAtLeast(lastCounts);
 
   const stopsByRoute = new Map<string, Set<string>>();
-  for (const [key, stopId] of modalFirst) {
+  const addEndpoint = (key: string, stopId: string) => {
     const routeId = key.slice(0, key.lastIndexOf(':'));
-    if (!stopId || routeId === '') continue;
+    if (routeId === '') return;
     let stops = stopsByRoute.get(routeId);
     if (!stops) {
       stops = new Set();
       stopsByRoute.set(routeId, stops);
     }
     stops.add(stopId);
+  };
+  for (const [key, stopIds] of firstEndpoints) {
+    for (const stopId of stopIds) addEndpoint(key, stopId);
   }
-  for (const [key, stopId] of modalLast) {
-    const routeId = key.slice(0, key.lastIndexOf(':'));
-    if (!stopId || routeId === '') continue;
-    let stops = stopsByRoute.get(routeId);
-    if (!stops) {
-      stops = new Set();
-      stopsByRoute.set(routeId, stops);
-    }
-    stops.add(stopId);
+  for (const [key, stopIds] of lastEndpoints) {
+    for (const stopId of stopIds) addEndpoint(key, stopId);
   }
 
   const candidates = new Map<string, { name: string; lat: number; lon: number; routeIds: Set<string> }>();

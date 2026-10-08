@@ -32,12 +32,16 @@ export interface TerminalsResponse {
     color?: string;
     textColor?: string;
     terminalIds: string[];
+    /** Terminals serving the route that are off duty at the current moment. */
+    inactiveTerminalIds: string[];
   }>;
 }
 
 /** Health timestamps are nullable until the corresponding server work runs. */
 export interface Health {
   ok: boolean;
+  tokenRequired?: boolean;
+  staticStale?: boolean;
   lastRefreshAt: number | null;
   staticLoadedAt: number | null;
   ready?: boolean;
@@ -69,6 +73,17 @@ async function request<T>(url: string, parser: Parser<T>, init?: RequestInit): P
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+// Attach the operator token to mutating requests only. Reads and the WS stream never send it,
+// and an unset token leaves the header off entirely (dev parity).
+function mutatingInit(init: RequestInit): RequestInit {
+  const token = window.localStorage.getItem('dispatchToken');
+  if (!token) return init;
+  return {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), 'x-dispatch-token': token },
+  };
 }
 
 // Like request, but a 404 resolves to null so callers can treat "no live data for this run" as
@@ -132,16 +147,36 @@ export function getConfig(): Promise<AppConfig> {
 
 /** Persists a configuration that has already been represented by the shared type. */
 export function putConfig(config: AppConfig): Promise<AppConfig> {
-  return request('/api/config', appConfigSchema, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
-  });
+  return request(
+    '/api/config',
+    appConfigSchema,
+    mutatingInit({
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    }),
+  );
 }
 
 /** Requests an asynchronous refresh of the cached static GTFS dataset. */
 export function reloadStatic(): Promise<{ ok: boolean }> {
-  return request('/api/static/reload', staticReloadSchema, { method: 'POST' });
+  return request('/api/static/reload', staticReloadSchema, mutatingInit({ method: 'POST' }));
+}
+
+/**
+ * Probe the stored token against a mutating route without side effects. A nonexistent
+ * intervention id is rejected by the handler (409) once the token passes the gate, or 401 when
+ * it does not, so the status distinguishes a valid token from a missing/wrong one.
+ */
+export async function testDispatchToken(): Promise<'ok' | 'unauthorized' | 'error'> {
+  const res = await fetch(
+    '/api/interventions/__token-test__/view',
+    mutatingInit({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
+  );
+  if (res.status === 401) return 'unauthorized';
+  // 409 (unknown intervention) means the request cleared the token gate.
+  if (res.status === 409 || res.status === 404) return 'ok';
+  return 'error';
 }
 
 // These named methods keep UI intent explicit while sharing one action endpoint.
@@ -166,9 +201,13 @@ function interventionAction(
   action: 'view' | 'apply' | 'decline' | 'cancel',
 ): Promise<Intervention> {
   // The server records this actor value in its intervention audit trail.
-  return request(`/api/interventions/${encodeURIComponent(id)}/${action}`, interventionSchema, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actorId: 'anonymous' }),
-  });
+  return request(
+    `/api/interventions/${encodeURIComponent(id)}/${action}`,
+    interventionSchema,
+    mutatingInit({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actorId: 'anonymous' }),
+    }),
+  );
 }

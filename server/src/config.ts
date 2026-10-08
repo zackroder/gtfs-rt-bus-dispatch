@@ -17,6 +17,39 @@ export function setSetting(db: Database, key: string, value: unknown): void {
   ).run(key, JSON.stringify(value));
 }
 
+// Whether terminals are managed by auto-discovery or frozen by an explicit owner override.
+export type TerminalsSource = 'auto' | 'manual';
+
+// Terminal-discovery mode is persisted separately from the config object so the settings API can
+// flag an owner override without letting the internal discovery path flip itself to manual.
+export function getTerminalsSource(db: Database): TerminalsSource {
+  const raw = getSetting(db, 'terminalsSource');
+  if (raw === null) return 'auto';
+  try {
+    // Absent (or malformed) means auto: the only way terminals were populated historically is
+    // discovery, so existing deployments keep being re-discovered after this change.
+    return JSON.parse(raw) === 'manual' ? 'manual' : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function setTerminalsSource(db: Database, source: TerminalsSource): void {
+  setSetting(db, 'terminalsSource', source);
+}
+
+// Parse the optional FOCUS_ROUTES env seed (comma-separated route ids) into a clean, de-duped
+// list. Empty/absent yields an empty list, which means "all routes".
+export function parseFocusRoutes(value: string | undefined): string[] {
+  if (!value) return [];
+  const seen = new Set<string>();
+  for (const part of value.split(',')) {
+    const routeId = part.trim();
+    if (routeId !== '') seen.add(routeId);
+  }
+  return Array.from(seen);
+}
+
 const DEFAULT_URLS = {
   tripUpdatesUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/TripUpdates.pb',
   vehiclePositionsUrl: 'https://transitdata.transitchicago.com/GtfsRealtime/VehiclePositions.pb',
@@ -73,6 +106,8 @@ function defaultsFromEnv(env: NodeJS.ProcessEnv): AppConfig {
     leadTimeMinutes: 5,
     lookaheadMinutes: 90,
     terminals: [],
+    // Optional first-boot route focus; empty means all routes (local dev unchanged).
+    focusRouteIds: parseFocusRoutes(env.FOCUS_ROUTES),
   };
   return withGeometryDefaults(config);
 }
@@ -92,6 +127,12 @@ export function loadConfig(db: Database, env: NodeJS.ProcessEnv): AppConfig {
   const raw = parsed as AppConfig;
   if (raw.agencyTimezone === undefined) {
     raw.agencyTimezone = env.AGENCY_TIMEZONE || 'America/Chicago';
+    mutated = true;
+  }
+  // Seed the route focus from the environment once, only while it has never been persisted, so
+  // an explicit runtime choice (including clearing it) is never overwritten by the env.
+  if (raw.focusRouteIds === undefined && env.FOCUS_ROUTES !== undefined) {
+    raw.focusRouteIds = parseFocusRoutes(env.FOCUS_ROUTES);
     mutated = true;
   }
   const config = appConfigSchema.parse(withGeometryDefaults(raw));

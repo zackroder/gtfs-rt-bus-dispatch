@@ -4,6 +4,7 @@ import { loadStatic } from '../db/staticLoader';
 import { Engine } from './engine';
 import { InterventionStore } from '../db/interventions';
 import { syntheticGtfs } from '../test/fixtures';
+import { activeServiceDate, getServiceDayStart } from '../gtfs/time';
 import type { TripSpec } from '../test/fixtures';
 import type { RealtimeSnapshot } from '../providers/types';
 import type { AppConfig, TripUpdateInfo, VehiclePositionInfo } from '../../../shared/types';
@@ -472,6 +473,81 @@ describe('engine triplet dispatch', () => {
     const route = route1(snapshot);
     const d1 = route.departed.find((d) => d.tripId === 'D1')!;
     expect(d1.departureSeconds).toBe(svc('08:05'));
+  });
+
+  it('fact-only refresh records facts but writes no run_events or interventions', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const count = (table: string) =>
+      (data.db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+
+    // Fact tick: empty wanted set.
+    engine.refresh(stdRt(), nowAt('08:08'), new Set());
+    expect(count('run_facts')).toBeGreaterThan(0);
+    expect(count('run_events')).toBe(0);
+    expect(count('interventions')).toBe(0);
+
+    // Decision tick for the focused terminal writes both.
+    engine.refresh(stdRt(), nowAt('08:09'), new Set(['T']));
+    expect(count('run_events')).toBeGreaterThan(0);
+    expect(count('interventions')).toBeGreaterThan(0);
+  });
+
+  it('queues recommendations with decision context for an evaluated active terminal', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    // The active set is passed explicitly, mirroring the refresh loop's global evaluation; no
+    // subscriber exists for T in this test.
+    const fresh = engine.refresh(stdRt(), nowAt('08:08'), new Set(['T']));
+    expect(fresh.map((s) => s.terminalId)).toEqual(['T']);
+
+    const created = data.db
+      .prepare(`SELECT metadata_json FROM intervention_events WHERE action = 'created'`)
+      .get() as { metadata_json: string | null } | undefined;
+    expect(created).toBeDefined();
+    const context = JSON.parse(created!.metadata_json!) as Record<string, number>;
+    expect(context.backwardHeadwaySeconds).toBeTypeOf('number');
+    expect(context.forwardHeadwaySeconds).toBeTypeOf('number');
+    expect(context.centerEdt).toBeTypeOf('number');
+    expect(context.maxHoldSeconds).toBe(600);
+    expect(context.leadTimeSeconds).toBe(300);
+
+    const facts = data.db
+      .prepare(`SELECT COUNT(*) AS c FROM run_events WHERE terminal_id = 'T'`)
+      .get() as { c: number };
+    expect(facts.c).toBeGreaterThan(0);
+  });
+
+  it('keeps a queued intervention route visible even without departures in the window', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    // Route 2 is configured on the terminal but has no static schedule, so it is dropped from the
+    // snapshot until a durable recommendation gives operators something to resolve.
+    data.config.terminals[0]!.routeIds = ['1', '2'];
+    const serviceDate = activeServiceDate(nowAt('08:08'), getServiceDayStart(data.db), 'UTC');
+
+    const before = engine.refresh(stdRt(), nowAt('08:08')).find((s) => s.terminalId === 'T')!;
+    expect(before.routes.some((r) => r.routeId === '2')).toBe(false);
+
+    data.store.createSuggestion({
+      id: `hold:${serviceDate}:T:2:DX`,
+      serviceDate,
+      terminalId: 'T',
+      routeId: '2',
+      rule: 'hold',
+      tripId: 'DX',
+      holdSeconds: 60,
+      reason: 'queued',
+      until: 0,
+      generatedAt: unixAt('08:08'),
+      expiresAt: unixAt('08:08') + 3600,
+    });
+
+    const after = engine.refresh(stdRt(), nowAt('08:08')).find((s) => s.terminalId === 'T')!;
+    const route2 = after.routes.find((r) => r.routeId === '2')!;
+    expect(route2).toBeDefined();
+    expect(route2.interventions).toHaveLength(1);
+    expect(route2.layovers).toHaveLength(0);
   });
 
   it('restores observed run facts after an engine restart', () => {

@@ -543,3 +543,377 @@ feed fetch, never `engine.refresh`).
    `/api/diagnostics/vp` (`dist_to_terminal_m`, parked/armed/flip reasons).
 2. Add browser-level tests for queue actions and WebSocket reconnect behavior.
 3. Add co-located multi-route terminal view improvements.
+
+---
+
+# Deployment plan execution
+
+Tracks execution of `.agents/DEPLOYMENT_PLAN.md` (phases 0–6). Each phase lands
+as its own focused PR into `dev`; the owner handles the Phase 6 owner tasks
+(branch protection, default branch, `FLY_API_TOKEN`) and Phases 7–8.
+
+## Deployment Phase 0 — Hygiene (complete)
+
+- Removed the untracked scratch file `server/src/_vpStatus.ts` (unreferenced
+  duplicate of the `gtfs/realtime.ts` decode logic; it also failed lint). No
+  tracked files changed.
+- Baseline verified on `dev`: `npm run typecheck`, `npm run lint`, and
+  `npm test` (162 tests) all green; working tree clean of untracked files.
+
+## Deployment Phase 1 — Time-of-day terminal discovery + active-only display (complete)
+
+Branch `feat/terminal-time-variants` → PR into `dev`.
+
+- Discovery (`engine/terminal.ts`) now keeps **every** distinct first/last stop
+  served by ≥ `DISCOVERY_MIN_TRIPS` (2) trips per `route:direction` instead of
+  only the modal endpoint, so minority time-of-day variants survive; one-off
+  deadheads/short-turns are filtered.
+- Discovery unions `activeServiceIds` over the next 7 service dates
+  (`discoveryServiceIds`), so weekend-only variants are found.
+- `config.ts` persists `terminalsSource: 'auto' | 'manual'` (absent → auto).
+  `discoverTerminals()` re-runs on every static load in auto mode and replaces
+  `config.terminals` only when it changes; a successful `PUT /api/config` marks
+  the terminals manual and discovery never touches them again.
+- New windowed activity query `activeRoutesByStop` / `activeRoutesAtTerminal`:
+  a route is active at a terminal when it has an endpoint event (first-stop
+  departure or last-stop arrival) in `[now − 30 min, now + lookahead]`. The
+  inbound-arrival side makes a terminal that currently only receives buses show
+  as active.
+- `GET /api/terminals` splits each route's `terminalIds` (active) from
+  `inactiveTerminalIds` (off-duty); the shared Zod schema and `web/src/api.ts`
+  DTO carry the new field.
+- `web/src/pages/Terminals.tsx` renders active links, tucks inactive ones into a
+  collapsed `<details>` "Off-duty" disclosure, polls every 60 s, and refetches on
+  `visibilitychange`.
+- `engine.ts` intersects an auto terminal's whole-day `routeIds` with the
+  windowed route list (union with queued intervention routes unchanged), so a
+  route with no departures in the window produces no empty route state while
+  queued work stays visible.
+- README "Terminals are auto-discovered…" paragraph updated for variants, 7-day
+  scope, and re-discovery.
+
+Measurements (CTA full feed: 10,695 stops, 100k trips, 6.0M stop_times; 485
+discovered terminals):
+
+- `GET /api/terminals` wall time: **~1.4 s** (after optimization).
+- Static **reuse** boot (discovery included): **~4.4 s** (was ~18.6 s).
+
+Deviations / notes:
+
+- The plan's per-terminal `activeRoutesAtTerminal` SQL (correlated `MIN`/`MAX`
+  subqueries) made `/api/terminals` take **~66 s** on the full feed. Replaced the
+  endpoint's batch path with a single `trip_bounds` CTE query
+  (`activeRoutesByStop`), reducing it to ~1.4 s. `activeRoutesAtTerminal` now
+  delegates to it (tests unchanged in intent).
+- The engine route intersection uses `now − 30 min … now + lookahead` (the same
+  window `buildDepartures` uses), not `now … now + lookahead`; otherwise active
+  layovers and recently-departed routes dropped out of the snapshot and broke
+  the vehicle-detail projection.
+- `autoDiscoverTerminals` was rewritten to return only each active trip's
+  first/last stop (bounds CTE) rather than every `stop_time`; the original query
+  with the new 7-day union took ~18.6 s per static load.
+- `PUT /api/config` marks `terminalsSource = 'manual'` on any successful write
+  (the config schema always carries a `terminals` array), matching the
+  pre-Phase-1 behavior where any persisted terminal list disabled discovery.
+
+Acceptance: both #9 southbound variants (`Vincennes & 104th Street` and
+`Ashland & 95th Street`) are discovered and present in config `terminals`, and
+the live `/api/terminals` response splits route 9 into active vs off-duty
+terminals; the exact 07:00/midday flip is covered by unit tests against a fixed
+window. `npm run typecheck`, `npm run lint`, `npm test` (167 tests) all green.
+
+## Deployment Phase 2 — Recommendations + logging for every active terminal (complete)
+
+Branch `feat/global-recommendations` → PR into `dev`.
+
+- `refreshInternal` now evaluates `wanted = active terminals ∪ subscriptions`
+  every poll, so recommendations (`interventions`), run facts, and `run_events`
+  are produced for the whole active board with no viewer. The active set comes
+  from the Phase 1 windowed activity query (`activeTerminalIds`).
+- Broadcast stays viewer-scoped: only snapshots for terminals in `subscriptions`
+  are pushed over WS; snapshots for every active terminal are still cached for
+  REST reads.
+- The `[refresh]` finally block now warns when a cycle exceeds
+  `refreshIntervalSeconds / 2` (5 s at the 10 s default).
+- `TripletDecision` carries `centerEdt`/`leaderEdt`/`followerEdt` and
+  `forward`/`backwardHeadwaySeconds`; the engine threads these plus
+  `maxHoldSeconds`/`leadTimeSeconds` into `refreshSuggestion`, which writes them
+  to `intervention_events.metadata_json` on `created` and `updated` events.
+- Audit pass: recommendations resolve through the existing
+  `expirePending`/`completeTrip` paths; no per-poll VP/snapshot logging was
+  added. README "Known limitations" now documents that `run_events` is
+  dispatch-window-bound (roughly now − 30 min … now + 90 min) while covering all
+  active terminals.
+
+Measurements (CTA full feed, fresh static: 96,025 trips, 5.9 M stop_times;
+288–296 active terminals; ~1,950 TU / ~1,440 VP per poll):
+
+- Full all-terminal refresh wall time: **~2.8–3.5 s** steady state while the
+  loaded static did not match the live feed (trip join short-circuits), but
+  **~40–60 s** once the live feed matched static and the engine did real
+  per-terminal work (all active terminals). The slow-cycle warning fires every
+  cycle in that state.
+- Accumulation with no browser open (~10 min): `run_events` 1,063 rows across
+  220 terminals for the service date; `interventions` 237 rows across 96
+  terminals (19 pending); `intervention_events.metadata_json` populated on 101
+  `created` + 56 `updated` events.
+- Sample decision context:
+  `{"forwardHeadwaySeconds":656,"backwardHeadwaySeconds":1830,"leaderEdt":48994,"followerEdt":51480,"centerEdt":49650,"maxHoldSeconds":600,"leadTimeSeconds":300}`.
+
+Risk / deviation (reported, not re-architected, per the plan):
+
+- The 40–60 s refresh exceeds the plan's ~2–3 s expectation. Per the plan's
+  Phase 2a instruction ("do not re-architect — report the measurement and
+  proceed"), no engine rework was done; the hotspot is the per-terminal
+  schedule/route work now run for every active terminal (`outboundRoutesAtTerminal`
+  plus `buildDepartures`). This is the main thing to watch at first deploy
+  (Phase 7); the 10 s cadence cannot keep up on a machine of this speed.
+- The local cached `gtfs.zip` was ~27 days stale and the pre-Phase-3 stale-reload
+  path reused it, so the live feed's trip IDs matched nothing until a manual
+  `POST /api/static/reload` fetched fresh static. This is exactly the Phase 3
+  bug; it also explains the "fast" ~3 s refreshes before the reload (no facts
+  were being recorded).
+
+Acceptance: with the app running and no browser open, `run_events` and
+`interventions` accumulated across hundreds of terminals, and decision context is
+machine-readable. `npm run typecheck`, `npm run lint`, `npm test` (169 tests) all
+green.
+
+## Deployment Phase 3 — Scheduled static GTFS refresh (complete)
+
+Branch `fix/static-auto-refresh` → PR into `dev`.
+
+- `downloadStatic(url, cachePath, opts?)` gained `opts.force`: a forced load skips
+  the cache read but still writes the freshly downloaded bytes back, so a
+  persistent volume no longer freezes on the day-0 artifact. Non-force behavior
+  is unchanged.
+- `GtfsStaticProvider.load()` passes `cachePath` + `force` for forced loads
+  (manual reloads now refresh the cache instead of downloading with no cache).
+- `ensureStaticLoadedInternal` computes `refreshCache = force || stale`, so the
+  stale branch re-downloads with force semantics (the cached bytes are what is
+  stale); the fresh-reuse branch is byte-identical.
+- New self-scheduling `scheduleStaticCheck()` runs alongside `scheduleRefresh()`
+  and calls `ensureStaticLoaded(false)` every `STATIC_CHECK_SECONDS` (default
+  3600, env-tunable and documented in `.env.example`). The call no-ops unless
+  `staticRefreshHours` has elapsed.
+- New `server/src/gtfs/static.test.ts` (mocked `fetch`, temp cache dir): a valid
+  cache short-circuits non-force; force fetches and replaces the cache bytes;
+  a missing cache downloads and writes.
+
+Acceptance evidence (with `STATIC_CHECK_SECONDS=60` and `staticLoadedAt` aged in
+the DB, since `staticRefreshHours` is integer-only so the plan's `0.02` cannot be
+set through `PUT /api/config`):
+
+- Logs: `[static] inspect … stale=true` → `[static] load … force=true`.
+- Cached `gtfs.zip` replaced: 99,567,748 bytes (Aug 14) → 68,738,293 bytes
+  (fresh, mtime advanced).
+- Pending interventions dropped from 51 to 0 on the reload and were re-created
+  afterward (30 `canceled` events for the service date).
+
+Deviations / measurements:
+
+- Raised the static download timeout (`fetchZip`) from 30 s to 120 s: the CTA zip
+  exceeded 30 s on this network, so every scheduled refresh aborted
+  (`error=This operation was aborted`). The realtime feeds keep their own short
+  timeouts.
+- Static reload on this dev machine was very slow: **persist ~27 min**,
+  **total ~35 min**, with **peak RSS ~2.2–2.5 GB** during parse/persist (likely
+  memory pressure/swap). This is a strong signal that the plan's 512 MB (even
+  1 GB) machine is undersized for the static-load step — flagged for Phase 5's
+  memory measurement and first deploy.
+- The acceptance used DB aging rather than `staticRefreshHours=0.02` because the
+  config schema requires integer hours; the stale code path is identical.
+
+`npm run typecheck`, `npm run lint`, `npm test` (171 tests) all green.
+
+## Deployment Phase 4 — Dispatch token gate (complete)
+
+Branch `feat/dispatch-token-gate` → PR into `dev`.
+
+- New env `DISPATCH_TOKEN` (documented in `.env.example`). Unset → behavior
+  identical to before (friction-free local dev).
+- A `requireToken` middleware guards every mutating route: the four intervention
+  POSTs (`view|apply|decline|cancel`), `PUT /api/config`, and
+  `POST /api/static/reload`. A missing/wrong `x-dispatch-token` → `401`
+  `{"error":"token required"}`; comparison is constant-time
+  (`crypto.timingSafeEqual`).
+- `GET /api/health` now includes `tokenRequired: boolean` (schema updated).
+- Web: `web/src/api.ts` attaches `x-dispatch-token` from
+  `localStorage.dispatchToken` to mutating requests only (reads and WS never send
+  it); `testDispatchToken()` probes a mutating route with no side effects.
+  `ConfigPage` gains an Operator-token field with Save/Test/Clear.
+- `routes.test.ts`: with `dispatchToken` set, mutating routes 401 without the
+  header and succeed with it; reads stay open. Without the token, the whole
+  suite passes unchanged.
+
+Acceptance evidence (local server with `DISPATCH_TOKEN=test-token-123`):
+
+- `GET /api/health` → `tokenRequired: true`; reads `/api/run-events`,
+  `/api/terminals`, `/api/config` all 200; WS `/api/ws` connects.
+- `POST /api/static/reload` and `POST /api/interventions/__token-test__/view`
+  and `PUT /api/config` → `401` without the header; the intervention probe
+  returns `409` (unknown id, i.e. it cleared the gate) with the header.
+
+`npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.
+
+## Deployment Phase 5 — Docker + Fly packaging (complete, with a sizing blocker)
+
+Branch `chore/docker-fly-packaging` → PR into `dev`.
+
+- `Dockerfile` (repo root, multi-stage): `node:22-slim` + `build-essential`
+  + `python3` builder runs `npm ci` → `npm run build` (typecheck + web +
+  server bundle) → `npm ci --omit=dev`; the runtime stage copies the prod
+  `node_modules`, `server/dist`, `web/dist`, and the workspace manifests.
+  `ENV PORT=8080 DB_PATH=/data/dispatch.db STATIC_GTFS_PATH=/data/gtfs.zip`;
+  `CMD ["node", "server/dist/index.js"]`.
+- `fly.toml` (repo root): `app = "dispatch-pilot"`, `primary_region = "ord"`,
+  `internal_port = 8080`, `force_https = true`, `min_machines_running = 1`
+  (never autostop), `[[mounts]] data → /data`, an `/api/health` HTTP check
+  (10 s / 5 s), `kill_timeout = 30`, `[[vm]] shared-cpu-1x`.
+- `.dockerignore` added so the build context excludes `node_modules`, `data/`,
+  `.env`, and `.git` (the Dockerfile copies explicit paths, but the daemon would
+  otherwise upload the 736 MB local DB and secrets).
+
+Verification (no Docker Desktop — the image build is deferred to Fly's remote
+builder at first deploy; the plan's substitute is the fresh-clone sequence):
+
+- Fresh `git clone` of `dev` → `npm ci` → `npm run build` → `npm ci --omit=dev`
+  all green; `require('better-sqlite3')` loads and queries.
+- `node server/dist/index.js` (production bundle) boots; `/api/health` → `ready`;
+  `/api/ws` connects; `GET /api/terminals/:id` returns a snapshot; `/` serves the
+  built web index.
+
+**Memory measurement (blocker):**
+
+- Full CTA static load on the production bundle: **peak RSS ~3.5 GB during
+  parse**, ~2.6 GB during persist (96,025 trips / 5.9 M stop_times). Steady-state
+  after a `[static] reuse` boot: **~368 MB RSS**.
+- The plan's rule is ">400 MB → 1 GB", so `fly.toml` is set to `memory = "1gb"`,
+  but the measured peak is ~3.5 GB — the 1 GB (indeed 512 MB) machine will very
+  likely OOM on the first static load. Fixing this needs either a larger machine
+  (breaks the $2–4/mo target) or a streaming/memory-efficient GTFS parse, which
+  is a re-architecture outside this plan. **Flagged for the owner before Phase 7.**
+- The image build itself (Dockerfile correctness under the remote builder) is
+  deferred to Phase 7, as the plan specifies.
+
+`npm run typecheck`, `npm run lint`, `npm test` (172 tests) all green.
+
+## Deployment Phase 6 — GitHub CI/CD (complete; owner tasks remain)
+
+Branch `chore/github-ci` → PR into `dev`.
+
+- `.github/workflows/ci.yml`: triggers on `pull_request` (dev, main) and `push`
+  (dev); one `ci` job on `ubuntu-latest`, Node 22 via `actions/setup-node@v4`
+  (`cache: npm`), running `npm ci` → `npm run lint` → `npm run typecheck` →
+  `npm run build` → `npm test`. The job is named `ci` so branch protection can
+  require that exact check.
+- `.github/workflows/deploy.yml`: triggers on `push` (main) and
+  `workflow_dispatch`; checkout → `superfly/flyctl-actions/setup-flyctl@master`
+  → `flyctl deploy --remote-only` (remote builder). Uses the `FLY_API_TOKEN`
+  repo secret; `concurrency: group: deploy, cancel-in-progress: false`. A header
+  comment notes it intentionally does not rerun tests — it is gated on the same
+  commit's `ci` check via branch protection.
+- Both files validated as parseable YAML.
+
+Owner tasks deferred (per the task scope — not done here): configure branch
+protection on `main`/`dev` (require PR, require the `ci` status check, no force
+push/direct push), set the default branch to `dev`, and create the
+`FLY_API_TOKEN` repository secret. The deploy workflow is inert until the Fly app
+and that secret exist (Phase 8).
+
+## Deployment Phase 7 — Baked static data + refresh cadence (complete)
+
+Branch `feat/baked-static` → merge into `dev`. Fixes the two launch blockers the
+Phase 0–6 report measured: the ~3.5 GB parse OOMs the 1 GB machine, and a
+full-board decision pass (40–60 s) overran the 10 s cadence.
+
+### 7a — Bake script
+
+- `server/scripts/bake-static.ts` (run `npx tsx server/scripts/bake-static.ts`)
+  downloads the public static zip, reuses `parseStatic` + `loadStatic` against a
+  fresh throwaway DB, and writes `baked.db` at the repo root (gitignored). The
+  file carries the full schema with only the static tables filled plus the static
+  markers; operational tables stay empty. No `CTA_API_KEY` needed.
+
+### 7b — Runtime baked mode
+
+- New `server/src/db/bakedStatic.ts` `refreshStaticFromBaked`: `ATTACH`es the
+  baked file, and when its `staticLoadedAt` is newer than the volume's, in one
+  transaction drops/recreates the static tables (shared `STATIC_SCHEMA_SQL` from
+  `schema.ts`) and fills each via `INSERT INTO main.<t> SELECT * FROM baked.<t>` —
+  SQL-level, no JS row materialization. Volume config/operational tables are
+  untouched.
+- `BAKED_STATIC_DB` gates baked mode in `index.ts`. On boot and in the Phase 3
+  hourly check the runtime copies newer baked tables, or reuses the volume; it
+  **never downloads/parses the zip**. When the volume static is older than
+  `staticRefreshHours` and the image is not newer, it logs and surfaces
+  `staticStale: true` on `/api/health` (`bakedStaticIsStale`), awaiting the next
+  scheduled deploy. Local dev (no `BAKED_STATIC_DB`) is unchanged.
+
+### 7c — Route focus + flat decision tick
+
+- New config `focusRouteIds` (optional; empty = all routes), seeded once from env
+  `FOCUS_ROUTES` (`parseFocusRoutes`, backfilled only while never persisted).
+  Discovery filters to focused routes (`filterTerminalsByFocus`), so facts,
+  recommendations, `run_events`, and the menu all scope automatically. A focus
+  change via `PUT /api/config` recomputes the persisted terminal list immediately
+  (`terminalsSource: auto`), no restart.
+- Ticks split: a **fact tick** every `refreshIntervalSeconds` (10 s) runs the
+  global fact pass + expiry only (`engine.refresh(..., new Set())`); a **decision
+  tick** every `DECISION_INTERVAL_SECONDS` (default 30) builds route states,
+  queues recommendations, writes `run_events`, and broadcasts over the focused
+  active terminals ∪ subscriptions. Serialized with coalescing so a decision is
+  never dropped. The slow warning now compares a decision pass to its flat
+  interval.
+
+### 7d — CI wiring (file edits only)
+
+- `deploy.yml`: added the daily `schedule` cron (`0 9 * * *`), Node setup, and the
+  `npm ci` → `npx tsx server/scripts/bake-static.ts` bake step before
+  `flyctl deploy --remote-only`. `.dockerignore` does not exclude `baked.db`.
+- `Dockerfile`: mandatory `COPY baked.db ./baked.db` in the runtime stage (build
+  fails without it).
+- `fly.toml`: env adds `BAKED_STATIC_DB=/app/baked.db` and
+  `DECISION_INTERVAL_SECONDS=30`; `memory = "1gb"` kept (baked mode removes the
+  parse; steady state ~368 MB).
+
+### Measurements (CTA full feed; production bundle)
+
+- Bake: **~8.9 min** total (95 s download+parse, then persist), `baked.db` =
+  636,739,584 bytes (~637 MB).
+- Baked copy on a fresh volume: `[static] ready` **~104 s**, **peak RSS ~346 MB**
+  (well under 1 GB), no download (`[static] baked copy`).
+- Fact ticks: **~80–880 ms**, every 10 s.
+- Decision pass, all routes (229 active terminals): ~12.8 s.
+- Runtime focus (15 routes incl. #9): `/api/terminals` **124 → 15 routes**,
+  **485 → 98 terminals** with no restart; decision passes **~2.2–2.9 s** (42
+  active terminals), **zero slow warnings**.
+- Baked stale (both DBs aged): `staticStale: true`, **0 download attempts**, the
+  hourly check no-ops.
+- Non-baked path (tiny local GTFS over HTTP): `[static] load` → parsed →
+  persisted → ready, cache written — local dev unchanged.
+
+### Deviations / notes
+
+- Baked mode carries `serviceDayStartSeconds` alongside `staticLoadedAt`. The plan
+  said "update only the loadedAt marker", but the CTA feed's detected service-day
+  start is **9600 s (02:40)**, not the 10800 s default; copying stop_times without
+  it would shift every schedule clock by 20 min. Both are static-derived markers
+  (the volume's `appConfig`/operational tables stay untouched), and the unit test
+  asserts the volume config/logs survive.
+- `PUT /api/config` now marks `terminalsSource = 'manual'` only when the submitted
+  terminal list actually changes (not on any write, the Phase 1 interpretation).
+  Required by 7c: a runtime focus edit must keep `auto` and recompute terminals
+  without a restart. This also matches the plan's literal "PUT with a terminals
+  payload" wording.
+- Added `DECISION_INTERVAL_SECONDS`/`FOCUS_ROUTES`/`BAKED_STATIC_DB` to
+  `.env.example`; `baked.db*` added to `.gitignore`.
+
+Acceptance: all of the above verified locally with the real CTA feed.
+`npm run typecheck`, `npm run lint`, `npm test` (**179 tests**) all green.
+
+Remaining owner work: Phase 8 (Fly website — app `dispatch-pilot` in `ord`,
+volume `data` 1 GB created before first deploy, secrets incl. optional
+`FOCUS_ROUTES` seed, deploy token → GitHub `FLY_API_TOKEN`, branch protection,
+default branch `dev`, then the `dev`→`main` release PR) and Phase 9 (~24 h data
+review).

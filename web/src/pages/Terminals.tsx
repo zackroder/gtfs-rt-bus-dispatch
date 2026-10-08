@@ -11,15 +11,27 @@ export default function Terminals() {
   useEffect(() => {
     // Ignore a response after navigation so an old request cannot overwrite this page.
     let disposed = false;
-    getTerminals()
-      .then((response) => {
-        if (!disposed) setData(response);
-      })
-      .catch((err: unknown) => {
-        if (!disposed) setError(err instanceof Error ? err.message : String(err));
-      });
+    const refresh = () => {
+      getTerminals()
+        .then((response) => {
+          if (!disposed) setData(response);
+        })
+        .catch((err: unknown) => {
+          if (!disposed) setError(err instanceof Error ? err.message : String(err));
+        });
+    };
+    refresh();
+    // "The current moment" changes as routes go on and off duty, so poll once a minute and
+    // refetch when the tab becomes visible again after a phone has been asleep.
+    const interval = window.setInterval(refresh, 60000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       disposed = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
 
@@ -38,6 +50,17 @@ export default function Terminals() {
     );
   }
 
+  // A stale route index entry should not produce a broken link, so unknown ids render nothing.
+  const renderTerminalLink = (terminalId: string) => {
+    const terminal = data.terminals.find((t) => t.id === terminalId);
+    if (!terminal) return null;
+    return (
+      <Link key={terminalId} className="terminal-link" to={`/terminal/${terminalId}`}>
+        {terminal.name} <small>{terminal.id}</small>
+      </Link>
+    );
+  };
+
   return (
     <div className="terminals-page">
       <h1>Terminals</h1>
@@ -52,16 +75,14 @@ export default function Terminals() {
             />
             {route.longName && <span className="route-name">{route.longName}</span>}
           </h2>
-          {route.terminalIds.map((terminalId) => {
-            // A stale route index entry should not produce a broken link.
-            const terminal = data.terminals.find((t) => t.id === terminalId);
-            if (!terminal) return null;
-            return (
-              <Link key={terminalId} className="terminal-link" to={`/terminal/${terminalId}`}>
-                {terminal.name} <small>{terminal.id}</small>
-              </Link>
-            );
-          })}
+          {route.terminalIds.map(renderTerminalLink)}
+          {route.inactiveTerminalIds.length > 0 && (
+            // Off-duty terminals stay reachable via deep links but are tucked away by default.
+            <details className="off-duty">
+              <summary>Off-duty ({route.inactiveTerminalIds.length})</summary>
+              {route.inactiveTerminalIds.map(renderTerminalLink)}
+            </details>
+          )}
         </div>
       ))}
       <Link className="config-link" to="/config">

@@ -41,6 +41,12 @@ npm test           # vitest
   commands such as `git reset --hard` or `git checkout --` to discard them.
 - Keep each branch focused. Do not mix unrelated cleanup, generated files,
   secrets, local databases, or environment files into a feature change.
+- Delete branches after they are integrated: `git branch -d <name>` locally
+  and `git push origin --delete <name>` if it was pushed. Merged branches
+  are redundant pointers — the merge commit preserves the history — and
+  GitHub's auto-delete only fires on PR merges, not on direct merges.
+  Verify with `git branch --merged dev` before deleting; `-d` refuses
+  unmerged branches.
 - Before committing, inspect `git status`, `git diff`, `git diff --cached`, and
   `git log --oneline -10`; stage only the intended files and verify no secrets
   are included.
