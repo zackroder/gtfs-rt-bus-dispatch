@@ -33,6 +33,9 @@ export interface ApiDeps {
   db: Database;
   getConfig(): AppConfig;
   applyConfig(next: AppConfig): AppConfig;
+  /** Monotonic version bumped on config writes and completed static loads; invalidates the
+   *  memoized GET /api/terminals response (plan Phase 10b). */
+  getTerminalsVersion(): number;
   // Resolves on demand (compute-on-miss) so REST reads work without a WS subscriber; a known
   // terminal always resolves once a realtime snapshot exists, and rejects on engine failure.
   computeTerminal(terminalId: string): Promise<TerminalSnapshot | undefined>;
@@ -96,6 +99,13 @@ function routeIdsForTerminal(db: Database, stopIds: string[]): string[] {
 // Build the API router around injectable stores and engine callbacks for production and tests.
 export function createApi(deps: ApiDeps): Router {
   const router = Router();
+
+  // Memoize the computed /api/terminals listing for a short window (plan Phase 10b): the batched
+  // activity query measured 0.9-2.4 s per request on the production machine while the UI polls it
+  // every 60 s and the response changes slowly. Keyed on the deps' version so a config write or a
+  // completed static load invalidates it immediately rather than waiting out the window.
+  const TERMINALS_CACHE_MS = 30_000;
+  let terminalsCache: { version: number; at: number; body: unknown } | null = null;
 
   // Optional token gate for mutating routes. Unset DISPATCH_TOKEN leaves local/dev behavior
   // identical to before; reads and the WS stream are never gated.
@@ -232,6 +242,16 @@ export function createApi(deps: ApiDeps): Router {
   });
 
   router.get('/terminals', (_req, res) => {
+    const version = deps.getTerminalsVersion();
+    const requestedAt = Date.now();
+    if (
+      terminalsCache &&
+      terminalsCache.version === version &&
+      requestedAt - terminalsCache.at < TERMINALS_CACHE_MS
+    ) {
+      sendJson(res, 200, terminalsCache.body);
+      return;
+    }
     const config = deps.getConfig();
     const serviceDayStart = getServiceDayStart(deps.db);
     const now = new Date();
@@ -295,7 +315,9 @@ export function createApi(deps: ApiDeps): Router {
       inactiveTerminalIds: entry.inactiveTerminalIds,
     }));
     entries.sort(byRouteName);
-    sendJson(res, 200, { terminals: config.terminals, routes: entries });
+    const body = { terminals: config.terminals, routes: entries };
+    terminalsCache = { version, at: requestedAt, body };
+    sendJson(res, 200, body);
   });
 
   router.get('/terminals/:id', async (req, res) => {

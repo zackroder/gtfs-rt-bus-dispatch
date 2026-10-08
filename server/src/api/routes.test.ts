@@ -5,6 +5,7 @@ import express from 'express';
 import { createDatabase } from '../db/schema';
 import { createApi, type ApiDeps } from './routes';
 import { InterventionStore } from '../db/interventions';
+import { filterTerminalsByFocus } from '../engine/terminal';
 import { activeServiceDate, getServiceDayStart, nowServiceSeconds } from '../gtfs/time';
 import type { AppConfig, BlockTimeline, TerminalMapSnapshot, TerminalSnapshot, VehicleDetail } from '../../../shared/types';
 
@@ -44,6 +45,7 @@ function makeDeps(overrides: Partial<ApiDeps> = {}): ApiDeps {
       config = { ...next, realtime: { ...next.realtime, apiKey: next.realtime.apiKey ?? config.realtime.apiKey } };
       return config;
     },
+    getTerminalsVersion: () => 0,
     computeTerminal: async (id) =>
       id === 'T1'
         ? ({
@@ -454,5 +456,72 @@ describe('api routes', () => {
     const base = await startServer(makeDeps());
     const res = await fetch(`${base}/blocks/NOPE`);
     expect(res.status).toBe(404);
+  });
+
+  it('memoizes /api/terminals within the window and recomputes after the version changes', async () => {
+    let version = 0;
+    const deps = makeDeps({ getTerminalsVersion: () => version });
+    const db = deps.db;
+    const serviceDayStart = getServiceDayStart(db);
+    const serviceDate = activeServiceDate(new Date(), serviceDayStart, 'UTC');
+    const nowSvc = nowServiceSeconds(new Date(), serviceDayStart, 'UTC');
+    // Schedule a departure at T1's stop exactly now so route 1 has an active terminal.
+    db.prepare(`INSERT INTO calendar_dates (service_id, date, exception_type) VALUES (?, ?, 1)`)
+      .run('SVCX', serviceDate);
+    db.prepare(`INSERT INTO stops (stop_id, stop_code, stop_name, parent_station, lat, lon) VALUES (?,?,?,?,?,?)`)
+      .run('S1', 'S1', 'Terminal 1', null, 41.8, -87.6);
+    db.prepare(`INSERT INTO trips (trip_id, route_id, service_id, block_id, direction_id, headsign) VALUES (?,?,?,?,?,?)`)
+      .run('ACT', '1', 'SVCX', null, 1, null);
+    db.prepare(`INSERT INTO stop_times (trip_id, stop_sequence, stop_id, arrival_time, departure_time, pickup_type, drop_off_type) VALUES (?,?,?,?,?,?,?)`)
+      .run('ACT', 0, 'S1', nowSvc, nowSvc, 0, 0);
+
+    const base = await startServer(deps);
+    type Body = { routes: Array<{ routeId: string; terminalIds: string[]; inactiveTerminalIds: string[] }> };
+    const first = (await (await fetch(`${base}/terminals`)).json()) as Body;
+    expect(first.routes.find((r) => r.routeId === '1')!.terminalIds).toEqual(['T1']);
+
+    // Inside the window the cached body is served, so a schedule mutation is not reflected.
+    db.prepare(`DELETE FROM stop_times WHERE trip_id = 'ACT'`).run();
+    const cached = (await (await fetch(`${base}/terminals`)).json()) as Body;
+    expect(cached.routes.find((r) => r.routeId === '1')!.terminalIds).toEqual(['T1']);
+
+    // A config write or completed static load bumps the version and invalidates immediately.
+    version++;
+    const refreshed = (await (await fetch(`${base}/terminals`)).json()) as Body;
+    expect(refreshed.routes.find((r) => r.routeId === '1')!.terminalIds).toEqual([]);
+    expect(refreshed.routes.find((r) => r.routeId === '1')!.inactiveTerminalIds).toEqual(['T1']);
+  });
+
+  it('round-trips focusRouteIds through PUT /config and recomputes terminals with no restart', async () => {
+    let version = 0;
+    // Mirror index.ts's runtime applyConfig: a focus change recomputes the auto-discovered terminal
+    // list in place (filterTerminalsByFocus) and bumps the /api/terminals cache version.
+    let config: AppConfig = { ...baseConfig, focusRouteIds: [] };
+    const deps = makeDeps({
+      getConfig: () => config,
+      getTerminalsVersion: () => version,
+      applyConfig: (next) => {
+        const focus = next.focusRouteIds ?? [];
+        config = {
+          ...next,
+          realtime: { ...next.realtime, apiKey: next.realtime.apiKey ?? config.realtime.apiKey },
+          terminals: filterTerminalsByFocus(baseConfig.terminals, focus),
+        };
+        version++;
+        return config;
+      },
+    });
+    const base = await startServer(deps);
+    const res = await fetch(`${base}/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...baseConfig, focusRouteIds: ['2'] }),
+    });
+    expect(res.status).toBe(200);
+    const saved = (await res.json()) as AppConfig;
+    expect(saved.focusRouteIds).toEqual(['2']);
+
+    const terms = (await (await fetch(`${base}/terminals`)).json()) as { terminals: Array<{ id: string }> };
+    expect(terms.terminals.map((t) => t.id)).toEqual(['T2']);
   });
 });

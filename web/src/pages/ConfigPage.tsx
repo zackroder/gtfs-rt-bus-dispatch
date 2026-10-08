@@ -2,11 +2,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getConfig, putConfig, reloadStatic, testDispatchToken } from '../api';
+import { formatFocusRoutes, parseFocusRoutes } from '../focus';
 import { appConfigSchema, type AppConfig } from '../../../shared/types';
 
 export default function ConfigPage() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [terminalsJson, setTerminalsJson] = useState('');
+  const [focusText, setFocusText] = useState('');
   const [token, setToken] = useState('');
   const [tokenMessage, setTokenMessage] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
@@ -17,6 +19,8 @@ export default function ConfigPage() {
       .then((cfg) => {
         setConfig(cfg);
         setTerminalsJson(JSON.stringify(cfg.terminals, null, 2));
+        // Route focus is edited as a comma-separated list like every other knob.
+        setFocusText(formatFocusRoutes(cfg.focusRouteIds));
       })
       .catch((err: unknown) =>
         setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) }),
@@ -49,7 +53,12 @@ export default function ConfigPage() {
       } catch {
         throw new Error('Terminals JSON is not valid');
       }
-      const candidate = appConfigSchema.parse({ ...config, terminals });
+      const candidate = appConfigSchema.parse({
+        ...config,
+        terminals,
+        // Comma-separated text in, trimmed/deduped array out; empty means all routes.
+        focusRouteIds: parseFocusRoutes(focusText),
+      });
       // Client validation gives immediate feedback; the server validates again at its boundary.
       const saved = await putConfig(candidate);
       setConfig(saved);
@@ -139,6 +148,22 @@ export default function ConfigPage() {
             />
           </div>
         ))}
+      </section>
+
+      <section className="route-group">
+        <h2>Route focus</h2>
+        {/* Comma-separated route ids, saved like every other knob; empty means all routes. A focus
+            change recomputes the auto-discovered terminal list server-side with no restart. */}
+        <div className="form-row">
+          <label htmlFor="focusRouteIds">Focus routes</label>
+          <input
+            id="focusRouteIds"
+            type="text"
+            placeholder="all routes"
+            value={focusText}
+            onChange={(e) => setFocusText(e.target.value)}
+          />
+        </div>
       </section>
 
       <section className="route-group">
