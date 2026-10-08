@@ -1,15 +1,16 @@
 # Deployment Plan — Dispatch Pilot
 
-Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for
-run reports; the Phase 7 deviations — the baked copy carries both static
+Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for run
+reports; the Phase 7 deviations — the baked copy carries both static
 markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
 flips to `manual` only on an actual terminal-list change — are
-owner-approved). First production day surfaced the decision-pass stall
-(10–18 s single-threaded passes on shared-cpu-1x, health-check unrouting) —
-interim mitigations shipped (health check removed, 60 s cadence), real fix
-is Phase 10; Phase 9 (data review) still pending ~24 h of runtime.
-Decisions are final; do not re-litigate them without the owner. Update
-PROGRESS.md after each phase.
+owner-approved). **Phase 10 complete on `dev`** (merged `25d06be`,
+awaiting the owner's release PR): chunked decision passes, memoized
+`/api/terminals`, tolerant health check restored, focus field in Settings,
+structural loop fix with watchdog backstop — decision cadence 30 s
+preserved throughout. Remaining: the owner's `dev` → `main` release PR,
+then Phase 9 (data review) after ~24 h of runtime. Decisions are final; do
+not re-litigate them without the owner. Update PROGRESS.md after each phase.
 
 ## Goal
 
