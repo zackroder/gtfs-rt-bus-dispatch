@@ -133,6 +133,10 @@ interface VehicleTrack {
   lat?: number;
   lon?: number;
   observedAtSvc?: number;
+  // Session baseline (Phase 12a): true once the vehicle has had its first fresh observation since
+  // boot / the service-day rollover. The first observation only establishes posture; facts may not
+  // be fabricated from a transition that happened before we were watching.
+  baselineDone?: boolean;
   // VP timestamps are monotonic per vehicle. Refresh cadence and provider caching must not
   // turn one observation into multiple dwell or departure samples.
   lastVpTimestamp?: number;
@@ -432,6 +436,7 @@ export class Engine {
     generatedAt: number,
     serviceDate: string,
     vehicleId?: string,
+    terminalId?: string,
   ): boolean {
     const record = this.ledger.get(tripId) ?? {};
     if (record.arrivalSource === 'vp') {
@@ -453,6 +458,7 @@ export class Engine {
     record.arrivalSeconds = at;
     record.arrivalSource = source;
     record.arrivalEvidence = evidence;
+    record.arrivalTerminalId = terminalId;
     this.ledger.set(tripId, record);
     this.persistRunFact(serviceDate, tripId, record, generatedAt);
     this.recordFactEvent({ action: 'arrival', tripId, vehicleId, at, generatedAt, source, evidence });
@@ -467,6 +473,7 @@ export class Engine {
     generatedAt: number,
     serviceDate: string,
     vehicleId?: string,
+    terminalId?: string,
   ): boolean {
     const record = this.ledger.get(tripId) ?? {};
     if (record.departureSource === 'vp') {
@@ -486,6 +493,7 @@ export class Engine {
     record.departureSeconds = at;
     record.departureSource = source;
     record.departureEvidence = evidence;
+    record.departureTerminalId = terminalId;
     this.ledger.set(tripId, record);
     this.persistRunFact(serviceDate, tripId, record, generatedAt);
     this.interventions.completeTrip(serviceDate, tripId, generatedAt);
@@ -519,7 +527,13 @@ export class Engine {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const createdAt = Math.floor(Date.now() / 1000);
-    if (departure.terminalArrival !== undefined && record?.arrivalSource !== undefined) {
+    // Phase 12c: only audit a fact at the terminal it physically occurred at. Legacy records
+    // (no terminal id) stay unscoped so pre-migration behavior is preserved.
+    const arrivalMatchesTerminal =
+      record?.arrivalTerminalId === undefined || record.arrivalTerminalId === terminalId;
+    const departureMatchesTerminal =
+      record?.departureTerminalId === undefined || record.departureTerminalId === terminalId;
+    if (departure.terminalArrival !== undefined && record?.arrivalSource !== undefined && arrivalMatchesTerminal) {
       insert.run(
         ctx.serviceDate, 'arrival', departure.tripId, departure.vehicleId ?? null,
         terminalId, routeId, record.arrivalSource, record.arrivalEvidence ?? null, departure.terminalArrival,
@@ -527,7 +541,7 @@ export class Engine {
         departure.scheduledDeparture, departure.scheduledArrival, createdAt,
       );
     }
-    if (departure.departedSeconds !== undefined && record?.departureSource !== undefined) {
+    if (departure.departedSeconds !== undefined && record?.departureSource !== undefined && departureMatchesTerminal) {
       insert.run(
         ctx.serviceDate, 'departure', departure.tripId, departure.vehicleId ?? null,
         terminalId, routeId, record.departureSource, record.departureEvidence ?? null, departure.departedSeconds,
@@ -540,23 +554,29 @@ export class Engine {
   private loadRunFacts(serviceDate: string): void {
     const rows = this.db
       .prepare(
-        `SELECT trip_id, arrival_seconds, departure_seconds
+        `SELECT trip_id, arrival_seconds, departure_seconds,
+                arrival_terminal_id, departure_terminal_id
          FROM run_facts WHERE service_date = ?`,
       )
       .all(serviceDate) as Array<{
       trip_id: string;
       arrival_seconds: number | null;
       departure_seconds: number | null;
+      arrival_terminal_id: string | null;
+      departure_terminal_id: string | null;
     }>;
     for (const row of rows) {
       // Persisted facts originate from VP observations, so restored records retain that authority.
+      // Rows written before the 12c terminal columns carry NULL ids and read back as unscoped.
       this.ledger.set(row.trip_id, {
         arrivalSeconds: row.arrival_seconds ?? undefined,
         arrivalSource: row.arrival_seconds !== null ? 'vp' : undefined,
         arrivalEvidence: row.arrival_seconds !== null ? 'restored_vp' : undefined,
+        arrivalTerminalId: row.arrival_terminal_id ?? undefined,
         departureSeconds: row.departure_seconds ?? undefined,
         departureSource: row.departure_seconds !== null ? 'vp' : undefined,
         departureEvidence: row.departure_seconds !== null ? 'restored_vp' : undefined,
+        departureTerminalId: row.departure_terminal_id ?? undefined,
       });
     }
   }
@@ -565,14 +585,25 @@ export class Engine {
     this.db
       .prepare(
         `INSERT INTO run_facts
-         (service_date, trip_id, arrival_seconds, departure_seconds, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+         (service_date, trip_id, arrival_seconds, departure_seconds,
+          arrival_terminal_id, departure_terminal_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(service_date, trip_id) DO UPDATE SET
            arrival_seconds = excluded.arrival_seconds,
            departure_seconds = excluded.departure_seconds,
+           arrival_terminal_id = excluded.arrival_terminal_id,
+           departure_terminal_id = excluded.departure_terminal_id,
            updated_at = excluded.updated_at`,
       )
-      .run(serviceDate, tripId, record.arrivalSeconds ?? null, record.departureSeconds ?? null, updatedAt);
+      .run(
+        serviceDate,
+        tripId,
+        record.arrivalSeconds ?? null,
+        record.departureSeconds ?? null,
+        record.arrivalTerminalId ?? null,
+        record.departureTerminalId ?? null,
+        updatedAt,
+      );
   }
 
   // Return the outbound trip a parked vehicle should be forming: its own trip when that
@@ -645,6 +676,13 @@ export class Engine {
       const freshObservation = rt.vehiclePositionsFromCache !== true &&
         observationAge <= maxVpAgeSeconds &&
         (track.lastVpTimestamp === undefined || vp.timestamp > track.lastVpTimestamp);
+      // Phase 12a: the first fresh observation of a vehicle each session establishes posture only.
+      // Facts may not be fabricated from a transition that happened before we were watching, so the
+      // baseline observation records nothing; from the next fresh observation the state machine runs
+      // unchanged and every recorded fact is, by construction, an observed transition. `baselineDone`
+      // is only consumed on a matched static trip (below), so a deadhead sighting does not waste it.
+      const isBaselineObservation = freshObservation && track.baselineDone !== true;
+      const factEligible = freshObservation && !isBaselineObservation;
       const point = vp.lat !== undefined && vp.lon !== undefined ? { lat: vp.lat, lon: vp.lon } : undefined;
       const displacementM =
         point && track.lat !== undefined && track.lon !== undefined
@@ -701,6 +739,7 @@ export class Engine {
             armTripId: track.armTripId,
             layoverTripId: track.layoverTripId,
             departurePending: track.layoverTripId !== undefined && track.departStreak > 0,
+            baseline: isBaselineObservation && diagnostic.inTerminalBuffer,
           });
         }
         // Keep the last accepted sample as the displacement baseline. A duplicate or older
@@ -723,6 +762,9 @@ export class Engine {
       diagnostic.lastStopId = end.lastStopId;
       diagnostic.lastStopSequence = end.lastStopSequence;
 
+      // Consume the session baseline now that the observation resolves to a static trip.
+      if (freshObservation) track.baselineDone = true;
+
       // --- Stop-status primary signal ---
       // CTA's feed now reliably carries stop_id + current_status. STOPPED_AT at a terminal stop is
       // an immediate observed arrival; INCOMING_AT arms the arrival posture (committed by the
@@ -744,7 +786,7 @@ export class Engine {
           if (target) {
             if (status === 'STOPPED_AT') {
               const alreadyArrived = this.ledger.get(target)?.arrivalSeconds !== undefined;
-              if (!alreadyArrived && freshObservation) {
+              if (!alreadyArrived && factEligible) {
                 diagnostic.arrivalCandidateTripId = target;
                 // The STOPPED_AT sample is the physical stop time, so the committed arrival is the
                 // observed stop instant, NOT the earlier INCOMING_AT arm time. Using the arm time
@@ -758,6 +800,7 @@ export class Engine {
                   generatedAt,
                   serviceDate,
                   vp.vehicleId,
+                  statusTerminal.id,
                 );
                 diagnostic.reasons.push('stopped_at_arrival');
                 track.layoverTripId = target;
@@ -765,10 +808,17 @@ export class Engine {
                 track.parkedStreak = 0;
                 track.armTripId = undefined;
                 track.armSource = undefined;
+              } else if (!alreadyArrived && isBaselineObservation) {
+                // First sight: already stopped here. Establish the layover posture only — no fact
+                // and no run_event, so the missed arrival stays blank (EDT keeps to schedule).
+                diagnostic.arrivalCandidateTripId = target;
+                diagnostic.reasons.push('session_baseline');
+                track.layoverTripId = target;
+                track.layoverAnchorStopId = this.tripEnds().get(target)?.firstStopId;
               } else {
                 diagnostic.reasons.push(alreadyArrived ? 'arrival_already_recorded' : 'stopped_at_not_fresh');
               }
-            } else if (status === 'INCOMING_AT' && freshObservation) {
+            } else if (status === 'INCOMING_AT' && factEligible) {
               // Arm the arrival posture; the earliest arm time becomes the committed event time.
               if (track.armTripId !== undefined && track.armTripId !== target) {
                 track.parkedStreak = 0;
@@ -793,7 +843,8 @@ export class Engine {
           // The entity is on an outbound trip whose first stop is this terminal and reports a
           // non-terminal stop: it has pulled away from the bay. Any status value beyond the
           // terminal counts (IN_TRANSIT_TO / INCOMING_AT / STOPPED_AT en route).
-          if (freshObservation) {
+          const outboundTerminal = terminals.find((candidate) => candidate.stopIds.includes(end.firstStopId));
+          if (factEligible) {
             diagnostic.departureCandidateTripId = vp.tripId;
             diagnostic.recordedDeparture = this.recordDeparture(
               vp.tripId,
@@ -803,6 +854,7 @@ export class Engine {
               generatedAt,
               serviceDate,
               vp.vehicleId,
+              outboundTerminal?.id,
             ) || diagnostic.recordedDeparture;
             diagnostic.reasons.push('outbound_reported_stop_departure');
             if (track.layoverTripId === vp.tripId) {
@@ -812,6 +864,8 @@ export class Engine {
               track.departAtSvc = undefined;
             }
           }
+          // On the session-baseline observation the departure is deliberately left blank: the bus
+          // was already past the terminal at first sight, so no boot-time departure is stamped.
         }
       }
 
@@ -820,6 +874,7 @@ export class Engine {
       // feed can change trips while the bus is still laying over at the terminal.
       if (tripChanged && track.tripId) {
         if (end.firstStopId && terminalStopIds.has(end.firstStopId)) {
+          const flipTerminal = terminals.find((candidate) => candidate.stopIds.includes(end.firstStopId));
           diagnostic.arrivalCandidateTripId = vp.tripId;
           diagnostic.recordedArrival = this.recordArrival(
             vp.tripId,
@@ -831,6 +886,7 @@ export class Engine {
             generatedAt,
             serviceDate,
             vp.vehicleId,
+            flipTerminal?.id,
           );
           diagnostic.reasons.push('flip_in_arrival');
         }
@@ -874,7 +930,7 @@ export class Engine {
         const target = terminal ? this.arrivalTargetFor(vp.tripId, vp.vehicleId, rt, chains, terminal) : undefined;
         if (target) {
           const alreadyArrived = this.ledger.get(target)?.arrivalSeconds !== undefined;
-          if (!alreadyArrived && freshObservation) {
+          if (!alreadyArrived && factEligible) {
             if (track.armTripId !== undefined && track.armTripId !== target) {
               track.parkedStreak = 0;
               track.armAtSvc = undefined;
@@ -904,6 +960,7 @@ export class Engine {
                 generatedAt,
                 serviceDate,
                 vp.vehicleId,
+                terminal.id,
               );
               track.layoverTripId = target;
               track.layoverAnchorStopId = this.tripEnds().get(target)?.firstStopId;
@@ -913,6 +970,13 @@ export class Engine {
             } else {
               diagnostic.reasons.push(stationaryInHoldZone ? 'arrival_armed' : 'arrival_waiting_dwell');
             }
+          } else if (!alreadyArrived && isBaselineObservation) {
+            // First sight: already inside the terminal buffer. Establish the layover posture only —
+            // the dwell happened before the session, so no arrival fact is fabricated from it.
+            diagnostic.arrivalCandidateTripId = target;
+            diagnostic.reasons.push('session_baseline');
+            track.layoverTripId = target;
+            track.layoverAnchorStopId = this.tripEnds().get(target)?.firstStopId;
           } else {
             diagnostic.reasons.push('arrival_already_recorded');
           }
@@ -940,8 +1004,11 @@ export class Engine {
       // Position-based fallback: a vehicle first seen on an outbound trip beyond the tight
       // departure trigger is already away from the terminal, so recover the missed departure.
       // Once a layover is committed, the motion-confirmation path below owns this transition.
-      if (end.firstStopId && terminalStopIds.has(end.firstStopId) && point && freshObservation) {
+      // On the session-baseline observation factEligible is false, so a bus already beyond the
+      // trigger at first sight keeps a blank departure instead of a fabricated boot-time one.
+      if (end.firstStopId && terminalStopIds.has(end.firstStopId) && point && factEligible) {
         const outDist = distanceToStopMeters(this.stopCoords(), end.firstStopId, point);
+        const outboundTerminal = terminals.find((candidate) => candidate.stopIds.includes(end.firstStopId));
         if (outDist > departureTriggerMeters && track.layoverTripId !== vp.tripId) {
           diagnostic.departureCandidateTripId = vp.tripId;
           diagnostic.recordedDeparture = this.recordDeparture(
@@ -952,6 +1019,7 @@ export class Engine {
             generatedAt,
             serviceDate,
             vp.vehicleId,
+            outboundTerminal?.id,
           ) || diagnostic.recordedDeparture;
           diagnostic.reasons.push('outbound_out_of_buffer');
           if (track.layoverTripId === vp.tripId) {
@@ -966,7 +1034,8 @@ export class Engine {
       // Layover departure by motion: a committed layover that moves beyond the outbound first-stop
       // trigger for departPings consecutive fresh pings is pulling out. The first qualifying ping
       // timestamps the fact; the pending state is exposed while confirmation is in progress.
-      if (track.layoverTripId && track.layoverAnchorStopId && point && freshObservation) {
+      if (track.layoverTripId && track.layoverAnchorStopId && point && factEligible) {
+        const layoverTerminal = terminals.find((candidate) => candidate.stopIds.includes(track.layoverAnchorStopId!));
         const layoverDist = distanceToStopMeters(this.stopCoords(), track.layoverAnchorStopId, point);
         const beyondDepartureTrigger = layoverDist > departureTriggerMeters;
         const moving = displacementM !== undefined && displacementM >= stationaryMeters;
@@ -983,6 +1052,7 @@ export class Engine {
               generatedAt,
               serviceDate,
               vp.vehicleId,
+              layoverTerminal?.id,
             ) || diagnostic.recordedDeparture;
             track.layoverTripId = undefined;
             track.layoverAnchorStopId = undefined;
@@ -1022,6 +1092,7 @@ export class Engine {
           armTripId: track.armTripId,
           layoverTripId: track.layoverTripId,
           departurePending: track.layoverTripId !== undefined && track.departStreak > 0,
+          baseline: isBaselineObservation && diagnostic.inTerminalBuffer,
         });
       }
 
@@ -1038,6 +1109,7 @@ export class Engine {
           armTripId: track.armTripId,
           layoverTripId: track.layoverTripId,
           departurePending: track.layoverTripId !== undefined && track.departStreak > 0,
+          baseline: isBaselineObservation,
         });
       }
 
