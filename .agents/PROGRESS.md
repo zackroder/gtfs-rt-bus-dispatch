@@ -1011,3 +1011,155 @@ abort froze both tick loops. **The decision cadence stays at 30 s**
 merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
 `dev`→`main` release PR (watch the deploy + first boot), then Phase 9's ~24 h data
 review.
+
+## Deployment Phase 11 — Basic-auth gate over the whole site (complete)
+
+Branch `feat/site-auth-gate` → merge into `dev`. Owner-approved option 1: one gate
+in front of the SPA, every `/api` route, and the WS handshake, so the public pilot
+URL no longer serves reads (schedules, recorded arrivals/departures,
+recommendations) to anyone who guesses the hostname.
+
+### 11a — Server gate middleware
+
+- New `server/src/api/authGate.ts` with the gate plus unit-tested helpers
+  (`constantTimeEquals`, `basicAuthPassword`). Rejects with 401 unless the request
+  carries `Authorization: Basic` with the token as the password (any username,
+  constant-time compare) or the pre-existing `x-dispatch-token` header.
+  `DISPATCH_TOKEN` unset = no-op (local dev). Registered in `index.ts` after the
+  `[http]` log and before `createApi`, `express.static`, and the SPA fallback.
+  Non-`/api` failures send `WWW-Authenticate: Basic realm="dispatch"` (native
+  browser prompt); `/api` failures send plain JSON with no challenge header
+  (fetch/XHR must not open a dialog). `GET /api/health` is the only exempt route.
+  `routes.ts`'s local token compare now imports the shared helper instead of
+  duplicating it.
+
+### 11b — WS handshake gate
+
+- `api/ws.ts` re-applies the identical check via `verifyClient` (Express never sees
+  `upgrade` events): 401 + destroyed socket without credentials; accepts the basic
+  header, `x-dispatch-token`, or `?token=`. `index.ts` passes `DISPATCH_TOKEN`. The
+  heartbeat interval is now cleared when the HTTP server closes (clean test
+  teardown).
+
+### 11c — Web client
+
+- `hooks/useStream.ts` appends `?token=` from `localStorage.dispatchToken` to the WS
+  URL when set. `api.ts` maps any 401 (both request helpers) to a clear
+  "Authentication required — refresh to log in, or set the dispatch token in
+  Settings" error instead of `HTTP 401`. Settings and `.env.example` comments
+  updated to describe the site-wide gate.
+
+### 11d — Docs
+
+- README gains an **Access control** section: the whole site behind basic auth when
+  `DISPATCH_TOKEN` is set, `GET /api/health` exempt, `x-dispatch-token` still
+  accepted, unset = open. The plan's Decisions table already carried the target
+  wording.
+
+### Tests (197 → 212)
+
+- `authGate.test.ts` (9): helper units; 401 without credentials on an API GET, `/`
+  (SPA), and an asset; correct basic password (any username) → 200; wrong password
+  and malformed header → 401; `x-dispatch-token` → 200; `/api/health` 200 with and
+  without credentials; unset token open everywhere.
+- `ws.test.ts` (6): raw `http.request` upgrades — no credentials and a wrong token
+  → 401/closed; `?token=`, basic header, and `x-dispatch-token` complete the
+  handshake; unset token completes with no credentials.
+
+### Acceptance evidence (local, built server)
+
+- `DISPATCH_TOKEN=test-token-123`: `/`, an asset, and `/api/terminals` → 401 without
+  credentials (with `WWW-Authenticate` on the page/asset); `x-dispatch-token` and
+  basic (`-u anything:<token>`) → 200; `/api/health` → 200 both ways; WS no
+  credentials → 401, `?token=` and basic → 101.
+- `DISPATCH_TOKEN` unset: `/`, `/api/terminals`, `/api/health` → 200 and the WS
+  upgrade completes with no credentials (no-op verified).
+- Runtime used the built server with unroutable feed/static URLs to keep the event
+  loop free (no local GTFS cache; the live terminal view + WS data path is
+  unchanged by this phase and covered by the existing suite).
+
+`npm run typecheck`, `npm run lint`, `npm test` (**212 tests**) all green; branch
+merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
+`dev`→`main` release PR (first browser visit prompts once — username anything,
+password the `DISPATCH_TOKEN`; existing scripts unchanged), then Phase 9's ~24 h
+data review.
+
+## Deployment Phase 12 — Fact fidelity fixes (complete)
+
+Branch `fix/fact-baseline-and-flip-geometry` → merge into `dev`. Two owner-reported
+production quirks plus one related defect, root-caused in the plan.
+
+### 12a — Session-baseline facts (quirk 1: boot fabrications)
+
+- `engine.ts` `recordFacts`: a per-vehicle `VehicleTrack.baselineDone` flag marks the
+  first fresh observation of each vehicle since boot / the service-day rollover.
+  That observation establishes posture only — `factEligible` is false, so no
+  `recordArrival`/`recordDeparture`, arm, or confirmation fires from it. From the
+  second fresh observation the state machine runs unchanged, so every recorded fact
+  is an observed in-session transition. A parked bus keeps a blank (unobserved)
+  arrival; a mid-trip bus keeps a blank departure. `baselineDone` is consumed only on
+  a matched static trip, so a deadhead sighting does not waste the baseline.
+- Baseline posture still classifies honestly: the STOPPED_AT/geometry branches set
+  `track.layoverTripId` (posture, no fact), and `VehicleTerminalState.baseline` tells
+  `buildDepartures` the arrival time is unobservable, so EDT falls back to schedule
+  per the existing EDT rule (an unknown arrival must not delay it). Restored
+  `run_facts` are unaffected: the ledger `arrivalSeconds` checks still gate
+  re-recording.
+
+### 12b — Geometric corroboration for the early trip flip (quirk 2)
+
+- `headway.ts` `buildDepartures`: `onOutboundLeg` now contributes to
+  `arrivedAtTerminal` only when corroborated at THIS terminal — the vehicle is in T's
+  buffer (`terminalState.inBuffer`) or holds a T-scoped posture for the trip
+  (`hasPostureForTrip`). An ob-assigned vehicle elsewhere (CTA's early flip onto an
+  outbound run while the bus is still at the far terminal) falls through to the
+  existing ambiguous-posture `incoming` catch-all instead of rendering as a phantom
+  "65 minutes to departure" layover.
+
+### 12c — Terminal-scoped ledger facts (hardening)
+
+- `RunRecord` (headway.ts) gains `arrivalTerminalId`/`departureTerminalId`, persisted
+  via additive `run_facts.arrival_terminal_id`/`departure_terminal_id` columns using
+  the existing `ensureColumn` migration pattern (no destructive migration). Every
+  `recordArrival`/`recordDeparture` call site threads the physical terminal id.
+- Reads are scoped: `buildDepartures`' `terminalArrival`/`arrivedAtTerminal`/
+  `departed` and `recordRunEvents`' audit inserts require the fact's terminal to
+  match the terminal being rendered. Legacy rows written before the columns existed
+  carry `NULL` and are treated as **unscoped** (they match every terminal), so
+  pre-migration behavior is unchanged; documented in the schema and read paths.
+
+### Tests (212 → 222)
+
+- New 12a tests (6): first-observation STOPPED_AT → blank arrival, EDT on schedule,
+  no `run_events`/`run_facts`; mid-trip first observation → no departure; live
+  arrival and departure transitions after the baseline record normally; geometric
+  arm/confirm still records after its baseline; service-day rollover re-baselines.
+- New 12b tests (2): early flip at the far terminal → `incoming` with the
+  predecessor's prediction; the same flip inside T's buffer → `layover`.
+- New 12c tests (2): a far-terminal arrival fact read at T is ignored (no layover,
+  no cross-terminal `run_events` row); the same fact scoped to T reads normally.
+- **No existing test expectation was changed.** The first refresh of a fresh engine
+  is now a baseline, so the existing tests that assert a fact were given a one-line
+  `primeBaseline(...)` warm-up (an earlier-timestamped copy of the same feed); the
+  assertion refresh then runs the unchanged state machine and records at the feed's
+  own times. This preserves the covered behaviors rather than rewriting them.
+
+### Acceptance evidence (local, live CTA feed, baked static)
+
+- Booted the server against the live feed mid-service in baked-static mode
+  (`BAKED_STATIC_DB=../baked.db`, `FOCUS_ROUTES=9`, fresh volume DB). Static copy
+  `[static] baked copy loaded_at=…` in ~60–90 s, then `[static] ready`.
+- `GET /api/run-events` stayed at **0 rows through the entire boot decision pass**
+  (polled every second for the first ~15 s; the boot `[refresh] complete snapshots=5`
+  decision pass had already run). A later decision pass (~40 s) produced **10 rows,
+  all genuine transitions** — `stopped_at` arrivals and `in_transit_to`/
+  `out_of_buffer` departures at the poll-time service seconds, never a boot-time
+  value. The mass boot fabrication (one row per already-parked / already-mid-trip
+  bus) is gone.
+- The wrong-terminal "65-minute layover" class is deterministic-fixture-tested (12b)
+  rather than reliably reproducible from a single live snapshot.
+
+`npm run typecheck`, `npm run lint`, `npm test` (**222 tests**) all green; branch
+merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
+`dev`→`main` release PR (which also ships Phase 11's auth gate), then Phase 9's data
+review.

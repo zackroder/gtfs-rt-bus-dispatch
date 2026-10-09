@@ -82,7 +82,12 @@ export function useStream(terminalId: string, route?: string): StreamState {
     const connectWs = () => {
       if (disposed) return;
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws`);
+      // The site gate covers the WS upgrade too; when the operator has saved the dispatch token,
+      // append it as a query parameter (the browser also attaches cached basic credentials, and
+      // the query param is the reliable fallback). No token saved => no parameter.
+      const token = window.localStorage.getItem('dispatchToken');
+      const query = token ? `?token=${encodeURIComponent(token)}` : '';
+      const ws = new WebSocket(`${protocol}://${window.location.host}/api/ws${query}`);
       wsRef.current = ws;
       ws.onopen = () => {
         if (disposed) return;

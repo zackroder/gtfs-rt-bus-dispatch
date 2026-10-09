@@ -30,6 +30,11 @@ function unixAt(hhmm: string): number {
   return Math.floor(Date.UTC(2026, 7, 13, h!, m!, 0) / 1000);
 }
 
+function unixAtDate(day: number, hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return Math.floor(Date.UTC(2026, 7, day, h!, m!, 0) / 1000);
+}
+
 function arrUpdate(tripId: string, vehicleId: string): TripUpdateInfo {
   return {
     tripId,
@@ -249,11 +254,28 @@ function route1(snapshot: ReturnType<Engine['refresh']>[number]) {
   return snapshot.routes.find((r) => r.routeId === '1')!;
 }
 
+// Phase 12a: a vehicle's first fresh observation each session is a posture baseline and records no
+// fact. Tests that assert an observed fact prime that baseline with an earlier-timestamped copy of
+// the same feed, so the following refresh runs the unchanged state machine and records the
+// transition at the feed's own (unshifted) times. The baseline posture is identical to the real
+// snapshot, so only the freshness gate differs.
+function primeBaseline(engine: Engine, rt: RealtimeSnapshot, now: Date): void {
+  const shift = 60;
+  const primed: RealtimeSnapshot = {
+    ...rt,
+    timestamp: rt.timestamp - shift,
+    vehiclePositions: rt.vehiclePositions.map((vp) => ({ ...vp, timestamp: vp.timestamp - shift })),
+    tripUpdates: rt.tripUpdates.map((tu) => ({ ...tu, timestamp: tu.timestamp - shift })),
+  };
+  engine.refresh(primed, new Date(now.getTime() - shift * 1000));
+}
+
 describe('engine triplet dispatch', () => {
   // These tests verify orchestration and persistence around the pure dispatch rule.
   it('queues the center suggestion and applies it only after approval', () => {
     const engine = makeEngine();
     const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
 
     const first = engine.refresh(rt, nowAt('08:08'))[0]!;
     const routeA = route1(first);
@@ -288,7 +310,9 @@ describe('engine triplet dispatch', () => {
     const engine = makeEngine();
     const rt = stdRt();
 
-    // The first refresh records the observed terminal arrival from the fresh VP sample.
+    // Prime the session baseline, then the first real refresh records the observed terminal
+    // arrival from the fresh VP sample.
+    primeBaseline(engine, rt, nowAt('08:08'));
     engine.refresh(rt, nowAt('08:08'));
     // D2's EDT is 08:12 (observed arrival 08:07 + 5 min rest); with no departure fact it is
     // still laying over 8 minutes later, so it is overdue against its genuine EDT.
@@ -319,6 +343,7 @@ describe('engine triplet dispatch', () => {
         vpAtStop('V4', 'P4', 'MID', '08:27'),
       ],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const hold = route1(snapshot).interventions[0]!;
     expect(hold.holdSeconds).toBe(180);
@@ -365,11 +390,13 @@ describe('engine triplet dispatch', () => {
 
   it('counts down to the effective held departure', () => {
     const engine = makeEngine();
-    const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
     const suggestion = route.interventions[0]!;
     testData(engine).store.apply(suggestion.id, { actorId: 'test' }, unixAt('08:08'));
-    const applied = route1(engine.refresh(stdRt(), nowAt('08:08'))[0]!);
+    const applied = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = applied.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.countdownSeconds).toBe(svc('08:14') - svc('08:08'));
   });
@@ -377,8 +404,10 @@ describe('engine triplet dispatch', () => {
   it('appends observed run events with terminal/route context and dispatch state', () => {
     const engine = makeEngine();
     const db = testData(engine).db;
-    engine.refresh(stdRt(), nowAt('08:08'));
-    engine.refresh(stdRt(), nowAt('08:09'));
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:09'));
     const rows = db
       .prepare(`SELECT event_type, trip_id, vehicle_id, terminal_id, route_id, source, value_seconds, classification, edt_seconds FROM run_events ORDER BY id`)
       .all() as Array<{
@@ -468,6 +497,7 @@ describe('engine triplet dispatch', () => {
   it('records departures globally so recently-departed survives unviewed gaps', () => {
     const engine = makeEngine();
     const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
     engine.refresh(rt, nowAt('08:08'), new Set());
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
@@ -481,14 +511,16 @@ describe('engine triplet dispatch', () => {
     const count = (table: string) =>
       (data.db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
 
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
     // Fact tick: empty wanted set.
-    engine.refresh(stdRt(), nowAt('08:08'), new Set());
+    engine.refresh(rt, nowAt('08:08'), new Set());
     expect(count('run_facts')).toBeGreaterThan(0);
     expect(count('run_events')).toBe(0);
     expect(count('interventions')).toBe(0);
 
     // Decision tick for the focused terminal writes both.
-    engine.refresh(stdRt(), nowAt('08:09'), new Set(['T']));
+    engine.refresh(rt, nowAt('08:09'), new Set(['T']));
     expect(count('run_events')).toBeGreaterThan(0);
     expect(count('interventions')).toBeGreaterThan(0);
   });
@@ -498,7 +530,9 @@ describe('engine triplet dispatch', () => {
     const data = testData(engine);
     // The active set is passed explicitly, mirroring the refresh loop's global evaluation; no
     // subscriber exists for T in this test.
-    const fresh = engine.refresh(stdRt(), nowAt('08:08'), new Set(['T']));
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    const fresh = engine.refresh(rt, nowAt('08:08'), new Set(['T']));
     expect(fresh.map((s) => s.terminalId)).toEqual(['T']);
 
     const created = data.db
@@ -552,7 +586,9 @@ describe('engine triplet dispatch', () => {
 
   it('restores observed run facts after an engine restart', () => {
     const first = makeEngine();
-    first.refresh(stdRt(), nowAt('08:08'));
+    const rt = stdRt();
+    primeBaseline(first, rt, nowAt('08:08'));
+    first.refresh(rt, nowAt('08:08'));
     const firstData = testData(first);
     const restarted = new Engine(firstData.db, () => firstData.config, firstData.store);
     const route = route1(restarted.refresh({ timestamp: unixAt('08:09'), tripUpdates: [], vehiclePositions: [] }, nowAt('08:09'))[0]!);
@@ -562,7 +598,9 @@ describe('engine triplet dispatch', () => {
 
   it('lists recently departed buses with their recorded departure time', () => {
     const engine = makeEngine();
-    const snapshot = engine.refresh(stdRt(), nowAt('08:08'))[0]!;
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
     const d1 = route.departed.find((d) => d.tripId === 'D1')!;
     expect(d1.departureSeconds).toBe(svc('08:05'));
@@ -575,6 +613,7 @@ describe('engine triplet dispatch', () => {
   it('marks a departed bus as held when it left under a locked hold', () => {
     const engine = makeEngine();
     const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
     engine.refresh(rt, nowAt('08:08'));
     const suggestion = route1(engine.refresh(rt, nowAt('08:08'))[0]!).interventions[0]!;
     testData(engine).store.apply(suggestion.id, { actorId: 'test' }, unixAt('08:08'));
@@ -601,6 +640,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [depUpdate('D1', 'V1', '08:05')],
       vehiclePositions: [vpAtStop('V1', 'D1', 'B', '08:20', 1)],
     };
+    primeBaseline(engine, rt, nowAt('08:20'));
     const snapshot = engine.refresh(rt, nowAt('08:20'))[0]!;
     const d1 = route1(snapshot).departed.find((d) => d.tripId === 'D1')!;
     expect(d1.currentStop).toBe('Far Stop');
@@ -608,7 +648,9 @@ describe('engine triplet dispatch', () => {
 
   it('exposes VP transition diagnostics alongside recorded fact events', () => {
     const engine = makeEngine();
-    engine.refresh(stdRt(), nowAt('08:08'));
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:08'));
     const observations = engine.getVehiclePositionDiagnostics();
     const leader = observations.find((observation) => observation.vehicleId === 'V1')!;
     const layover = observations.find((observation) => observation.vehicleId === 'V2')!;
@@ -653,6 +695,7 @@ describe('engine triplet dispatch', () => {
         arrUpdate('P4', 'V4'),
       ],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const d2 = route1(engine.refresh(rt, nowAt('08:08'))[0]!).layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.expectedDeparture).toBe(svc('08:12'));
   });
@@ -733,6 +776,7 @@ describe('engine triplet dispatch', () => {
       ],
       vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:19', 1)],
     };
+    primeBaseline(fresh, withVp, nowAt('08:19'));
     const snapshot = fresh.refresh(withVp, nowAt('08:19'))[0]!;
     const d3 = route1(snapshot).layovers.find((l) => l.tripId === 'D3')!;
     expect(d3.terminalArrival).toBe(svc('08:19'));
@@ -748,6 +792,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [],
       vehiclePositions: [vpAtStop('V4', 'P4', 'T', '08:26', 1)],
     };
+    primeBaseline(engine, rt, nowAt('08:26'));
     const snapshot = engine.refresh(rt, nowAt('08:26'))[0]!;
     const d4 = route1(snapshot).layovers.find((l) => l.tripId === 'D4')!;
     expect(d4.terminalArrival).toBe(svc('08:26'));
@@ -800,6 +845,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [],
       vehiclePositions: [vpAtStop('V4', 'P4', 'T', '08:31', 1)],
     };
+    primeBaseline(engine, rt, nowAt('08:26'));
     const snapshot = engine.refresh(rt, nowAt('08:26'))[0]!;
     const d4 = route1(snapshot).layovers.find((l) => l.tripId === 'D4')!;
     expect(d4.terminalArrival).toBe(svc('08:26'));
@@ -816,6 +862,7 @@ describe('engine triplet dispatch', () => {
     // Force the production two-ping default for this scenario.
     testData(engine).config.confirmPings = 2;
     testData(engine).config.departPings = 2;
+    primeBaseline(engine, parked, nowAt('08:08'));
 
     const first = route1(engine.refresh(parked, nowAt('08:08'))[0]!);
     // Armed but not committed: the bus shows as layover (parked in buffer) but has no fact yet.
@@ -842,6 +889,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [{ tripId: 'P2', vehicleId: 'V2', stopTimeUpdates: [], timestamp: unixAt('08:08') }],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
     };
+    primeBaseline(engine, parked, nowAt('08:08'));
     const first = route1(engine.refresh(parked, nowAt('08:08'))[0]!);
     expect(first.layovers.find((l) => l.tripId === 'D2')?.arrivalPending).toBe(true);
 
@@ -870,6 +918,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [{ tripId: 'P2', vehicleId: 'V2', stopTimeUpdates: [], timestamp: unixAt('08:08') }],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
     };
+    primeBaseline(engine, candidate, nowAt('08:08'));
     engine.refresh(candidate, nowAt('08:08'));
 
     const flipped: RealtimeSnapshot = {
@@ -928,6 +977,7 @@ describe('engine triplet dispatch', () => {
         },
       ],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const d2 = route1(snapshot).layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -943,6 +993,7 @@ describe('engine triplet dispatch', () => {
       // bus stayed "incoming" forever; geometric posture must move it to layover immediately.
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = engine.refresh(rt, nowAt('08:08'))[0]!;
     const route = route1(snapshot);
     expect(route.incoming.some((i) => i.tripId === 'P2')).toBe(false);
@@ -983,6 +1034,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [],
       vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:20')],
     };
+    primeBaseline(engine, first, nowAt('08:20'));
     engine.refresh(first, nowAt('08:20'));
     // Second ping: still inside the hold zone (≈55m from T) but moving (>20m displacement from
     // the first ping). Hold-zone dwell tolerates this inching, so the arm latches to observed on
@@ -1215,6 +1267,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [arrUpdate('P2', 'V2')],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -1231,6 +1284,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [arrUpdate('P2', 'V2')],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'INCOMING_AT')],
     };
+    primeBaseline(engine, incoming, nowAt('08:08'));
     const first = route1(engine.refresh(incoming, nowAt('08:08'))[0]!);
     const d2First = first.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2First.arrivalPending).toBe(true);
@@ -1255,11 +1309,13 @@ describe('engine triplet dispatch', () => {
     testData(engine).config.confirmPings = 2;
     testData(engine).config.departPings = 2;
     // Establish the layover first: V2 arrives on P2 (STOPPED_AT at the terminal).
-    engine.refresh({
+    const arrivalRt: RealtimeSnapshot = {
       timestamp: unixAt('08:08'),
       tripUpdates: [arrUpdate('P2', 'V2')],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
-    }, nowAt('08:08'));
+    };
+    primeBaseline(engine, arrivalRt, nowAt('08:08'));
+    engine.refresh(arrivalRt, nowAt('08:08'));
     // The outbound entity now reports a non-terminal stop: the bus has pulled out.
     const enRoute: RealtimeSnapshot = {
       timestamp: unixAt('08:12'),
@@ -1288,6 +1344,7 @@ describe('engine triplet dispatch', () => {
       ],
       vehiclePositions: [vpAtStop('V2', 'D2', 'T', '08:08', 0, 'STOPPED_AT')],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -1303,6 +1360,7 @@ describe('engine triplet dispatch', () => {
       tripUpdates: [arrUpdate('P2', 'V2')],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -1352,6 +1410,7 @@ describe('engine triplet dispatch', () => {
         timestamp: unixAt('08:05'),
       }],
     };
+    primeBaseline(engine, rt, nowAt('08:05'));
     const snapshot = engine.refresh(rt, nowAt('08:05'))[0]!;
     const route = snapshot.routes.find((r) => r.routeId === '1')!;
     const d1 = route.layovers.find((l) => l.tripId === 'D1')!;
@@ -1374,6 +1433,7 @@ describe('engine triplet dispatch', () => {
         timestamp: unixAt('08:08'),
       }],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -1419,6 +1479,7 @@ describe('engine triplet dispatch', () => {
         },
       ],
     };
+    primeBaseline(engine, rt, nowAt('08:08'));
     const snapshot = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
     const d2 = snapshot.layovers.find((l) => l.tripId === 'D2')!;
     expect(d2.terminalArrival).toBe(svc('08:08'));
@@ -1431,11 +1492,13 @@ describe('engine triplet dispatch', () => {
     // Establish the layover, then emit a stale terminal remnant and a newer en-route entity in the
     // same poll. The newer outbound observation must win so the departure is not masked by the
     // older STOPPED_AT duplicate.
-    engine.refresh({
+    const arrivalRt: RealtimeSnapshot = {
       timestamp: unixAt('08:08'),
       tripUpdates: [arrUpdate('P2', 'V2')],
       vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
-    }, nowAt('08:08'));
+    };
+    primeBaseline(engine, arrivalRt, nowAt('08:08'));
+    engine.refresh(arrivalRt, nowAt('08:08'));
     const rt: RealtimeSnapshot = {
       timestamp: unixAt('08:12'),
       tripUpdates: [arrUpdate('P2', 'V2')],
@@ -1454,5 +1517,219 @@ describe('engine triplet dispatch', () => {
     const d2 = snapshot.departed.find((d) => d.tripId === 'D2')!;
     expect(d2.departureSeconds).toBe(svc('08:12'));
     expect(engine.getFactEventDiagnostics().at(-1)?.evidence).toBe('in_transit_to');
+  });
+
+  // --- Phase 12a: session-baseline facts ---
+
+  it('leaves a first-observation STOPPED_AT arrival blank with EDT on schedule (12a)', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    // The vehicle is already stopped at the terminal on the very first observation this session.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    };
+    const route = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    // No fabricated event time: the arrival stays blank and EDT falls back to the schedule
+    // (D2's 08:11 departure), because an unobserved arrival must not delay it.
+    expect(d2.terminalArrival).toBeUndefined();
+    expect(d2.terminalArrivalSource).toBe('estimated');
+    expect(d2.expectedDeparture).toBe(svc('08:11'));
+    expect(data.db.prepare(`SELECT COUNT(*) AS c FROM run_events WHERE event_type='arrival'`).get()).toEqual({ c: 0 });
+    expect(data.db.prepare(`SELECT COUNT(*) AS c FROM run_facts`).get()).toEqual({ c: 0 });
+  });
+
+  it('does not fabricate a departure for a mid-trip first observation (12a)', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [depUpdate('D1', 'V1', '08:05')],
+      vehiclePositions: [vpAtStop('V1', 'D1', 'B', '08:08', 1)],
+    };
+    const route = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    expect(route.departed.some((d) => d.tripId === 'D1')).toBe(false);
+    expect(data.db.prepare(`SELECT COUNT(*) AS c FROM run_events WHERE event_type='departure'`).get()).toEqual({ c: 0 });
+  });
+
+  it('records a live arrival transition after the session baseline (12a)', () => {
+    const engine = makeEngine();
+    // Baseline: V2 is first seen mid-route on its inbound leg, so nothing is recorded.
+    engine.refresh({
+      timestamp: unixAt('08:00'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'MID', '08:00')],
+    }, nowAt('08:00'));
+    // A genuine live transition: the feed now reports it stopped at the terminal.
+    const stopped: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08', 1, 'STOPPED_AT')],
+    };
+    const d2 = route1(engine.refresh(stopped, nowAt('08:08'))[0]!).layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:08'));
+    expect(d2.terminalArrivalSource).toBe('observed');
+  });
+
+  it('records a live departure transition after the session baseline (12a)', () => {
+    const engine = makeEngine();
+    // Baseline: the bus is already parked at T at first sight (no arrival fabricated).
+    engine.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V2', 'P2', 'T', '08:08')],
+    }, nowAt('08:08'));
+    // It then pulls out on the outbound trip: a genuine observed departure.
+    const left: RealtimeSnapshot = {
+      timestamp: unixAt('08:12'),
+      tripUpdates: [],
+      vehiclePositions: [{ vehicleId: 'V2', tripId: 'D2', lat: 41.72, lon: -87.69, timestamp: unixAt('08:12') }],
+    };
+    const d2 = route1(engine.refresh(left, nowAt('08:12'))[0]!).departed.find((d) => d.tripId === 'D2')!;
+    expect(d2.departureSeconds).toBe(svc('08:12'));
+  });
+
+  it('still records a geometric arm/confirm arrival after the baseline (12a)', () => {
+    const engine = makeEngine();
+    testData(engine).config.confirmPings = 2;
+    // Baseline: V3 is first seen mid-route, away from the terminal.
+    engine.refresh({
+      timestamp: unixAt('08:00'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V3', 'P3', 'MID', '08:00')],
+    }, nowAt('08:00'));
+    // It enters the buffer (arms), then a second still ping confirms the arrival.
+    engine.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:08')],
+    }, nowAt('08:08'));
+    engine.refresh({
+      timestamp: unixAt('08:09'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:09')],
+    }, nowAt('08:09'));
+    const d3 = route1(engine.refresh({
+      timestamp: unixAt('08:10'),
+      tripUpdates: [],
+      vehiclePositions: [vpAtStop('V3', 'P3', 'T', '08:10')],
+    }, nowAt('08:10'))[0]!).layovers.find((l) => l.tripId === 'D3')!;
+    expect(d3.terminalArrival).toBe(svc('08:08'));
+    expect(d3.terminalArrivalSource).toBe('observed');
+  });
+
+  it('re-baselines facts after a service-day rollover (12a)', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const rt = stdRt();
+    primeBaseline(engine, rt, nowAt('08:08'));
+    engine.refresh(rt, nowAt('08:08'));
+    const day1 = data.db
+      .prepare(`SELECT COUNT(*) AS c FROM run_events WHERE event_type='arrival' AND trip_id='D2'`)
+      .get() as { c: number };
+    expect(day1.c).toBe(1);
+
+    // Cross onto the next service date (the fixture boundary is 08:00). The engine clears the
+    // in-memory ledger and vehicleTracks, so the first observation on the new date is a baseline.
+    const day2Now = new Date(Date.UTC(2026, 7, 14, 8, 8, 0));
+    const day2Ts = unixAtDate(14, '08:08');
+    const day2: RealtimeSnapshot = {
+      timestamp: day2Ts,
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [{ ...vpAtStop('V2', 'P2', 'T', '08:08'), timestamp: day2Ts }],
+    };
+    const d2 = route1(engine.refresh(day2, day2Now)[0]!).layovers.find((l) => l.tripId === 'D2');
+    expect(d2?.terminalArrival).toBeUndefined();
+    const day2Date = activeServiceDate(day2Now, getServiceDayStart(data.db), 'UTC');
+    const day2Count = data.db
+      .prepare(`SELECT COUNT(*) AS c FROM run_events WHERE event_type='arrival' AND trip_id='D2' AND service_date=?`)
+      .get(day2Date) as { c: number };
+    expect(day2Count.c).toBe(0);
+  });
+
+  // --- Phase 12b: geometric corroboration for the early trip flip ---
+
+  it('renders an early outbound flip at the far terminal as incoming, not layover (12b)', () => {
+    const engine = makeEngine();
+    // V2's VP says it operates outbound D2 (which starts at T), but it is physically at the far
+    // stop B. Without geometric corroboration at T it must fall through to incoming with the
+    // predecessor P2's prediction, never a phantom layover at T.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'B', '08:08')],
+    };
+    const route = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const incoming = route.incoming.find((i) => i.nextTripId === 'D2')!;
+    expect(incoming.vehicleId).toBe('V2');
+    expect(incoming.predictedArrival).toBe(svc('08:07'));
+  });
+
+  it('keeps the early flip as layover when the vehicle is corroborated inside T (12b)', () => {
+    const engine = makeEngine();
+    // Same flip, but the vehicle is STOPPED_AT the terminal: geometric corroboration keeps the
+    // existing layover behavior with the outbound EDT.
+    const rt: RealtimeSnapshot = {
+      timestamp: unixAt('08:08'),
+      tripUpdates: [arrUpdate('P2', 'V2')],
+      vehiclePositions: [vpAtStop('V2', 'D2', 'T', '08:08', 0, 'STOPPED_AT')],
+    };
+    const route = route1(engine.refresh(rt, nowAt('08:08'))[0]!);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.vehicleId).toBe('V2');
+    expect(d2.scheduledDeparture).toBe(svc('08:11'));
+  });
+
+  // --- Phase 12c: terminal-scoped ledger facts ---
+
+  it('ignores a far-terminal arrival fact when rendering the outbound terminal (12c)', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const serviceDate = activeServiceDate(nowAt('08:08'), getServiceDayStart(data.db), 'UTC');
+    // D2's arrival fact was recorded at the terminal where the trip ends ('F'), not at T. A
+    // restarted engine restores it from run_facts; rendering D2 at T must not read it as arrived.
+    data.db
+      .prepare(
+        `INSERT INTO run_facts (service_date, trip_id, arrival_seconds, departure_seconds,
+                                arrival_terminal_id, departure_terminal_id, updated_at)
+         VALUES (?, 'D2', ?, NULL, 'F', NULL, ?)`,
+      )
+      .run(serviceDate, svc('08:07'), unixAt('08:07'));
+    const restarted = new Engine(data.db, () => data.config, data.store);
+    const route = route1(restarted.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [],
+    }, nowAt('08:08'))[0]!);
+    expect(route.layovers.some((l) => l.tripId === 'D2')).toBe(false);
+    const rows = data.db
+      .prepare(`SELECT COUNT(*) AS c FROM run_events WHERE event_type='arrival' AND trip_id='D2' AND terminal_id='T'`)
+      .get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  it('reads a fact recorded at this terminal (12c)', () => {
+    const engine = makeEngine();
+    const data = testData(engine);
+    const serviceDate = activeServiceDate(nowAt('08:08'), getServiceDayStart(data.db), 'UTC');
+    // Positive control: the same fact scoped to T is read normally, so D2 renders as layover.
+    data.db
+      .prepare(
+        `INSERT INTO run_facts (service_date, trip_id, arrival_seconds, departure_seconds,
+                                arrival_terminal_id, departure_terminal_id, updated_at)
+         VALUES (?, 'D2', ?, NULL, 'T', NULL, ?)`,
+      )
+      .run(serviceDate, svc('08:07'), unixAt('08:07'));
+    const restarted = new Engine(data.db, () => data.config, data.store);
+    const route = route1(restarted.refresh({
+      timestamp: unixAt('08:08'),
+      tripUpdates: [],
+      vehiclePositions: [],
+    }, nowAt('08:08'))[0]!);
+    const d2 = route.layovers.find((l) => l.tripId === 'D2')!;
+    expect(d2.terminalArrival).toBe(svc('08:07'));
   });
 });

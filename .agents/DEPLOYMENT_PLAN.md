@@ -4,13 +4,19 @@ Status: Phases 0–8 complete — **deployed 2026-10-08** (see PROGRESS.md for r
 reports; the Phase 7 deviations — the baked copy carries both static
 markers (`serviceDayStartSeconds` + `loadedAt`), and `terminalsSource`
 flips to `manual` only on an actual terminal-list change — are
-owner-approved). **Phase 10 complete on `dev`** (merged `25d06be`,
-awaiting the owner's release PR): chunked decision passes, memoized
-`/api/terminals`, tolerant health check restored, focus field in Settings,
-structural loop fix with watchdog backstop — decision cadence 30 s
-preserved throughout. Remaining: the owner's `dev` → `main` release PR,
-then Phase 9 (data review) after ~24 h of runtime. Decisions are final; do
-not re-litigate them without the owner. Update PROGRESS.md after each phase.
+owner-approved). **Phase 10 complete and released** (`main` at `a4dafae`, deployed).
+**Phase 11 complete on `dev`** (merged `04a3293`, 212 tests, awaiting the
+owner's next release PR): basic-auth gate over the whole site — SPA, all
+`/api` routes, WS handshake — with `GET /api/health` exempt and
+`x-dispatch-token` still accepted. Known follow-up for the next batch:
+the mutating-route gate should also accept basic auth (basic-only browser
+users can read but cannot apply/decline until they set the Settings
+token). **Phase 12 complete on `dev`** (merged, 222 tests, awaiting the
+owner's next release PR): session-baseline facts, flip-geometry
+corroboration, terminal-scoped ledger facts. Remaining: the owner's
+`dev` → `main` release PR, then Phase 9 (data review) after ~24 h of runtime.
+Decisions are final; do not re-litigate them without the owner. Update
+PROGRESS.md after each phase.
 
 ## Goal
 
@@ -38,7 +44,7 @@ Secondary goals shipped alongside, because they block the two above:
 | Host | Fly.io, single app, `ord` region, **1 GB machine** (512 MB measured too thin for the baked-table copy; downsize later if metrics allow), **10 GB volume** — the full free allowance; ≥2 GB is required (see the WAL-spike note in 7b) |
 | Environments | One production instance only; `dev` branch runs CI, does not deploy |
 | Deploy trigger | Push to `main` (merged PR) → CI → bake + auto `fly deploy`; **plus a scheduled daily cron deploy** that refreshes the baked static data |
-| Access control | Optional `DISPATCH_TOKEN` env: mutating routes require `x-dispatch-token`; all reads stay open |
+| Access control | Basic-auth gate over the entire site (SPA + all endpoints + WS) with `DISPATCH_TOKEN` as the password (Phase 11); `GET /api/health` exempt (Fly's check); `x-dispatch-token` still accepted for scripts; unset token = open (local dev) |
 | Static data | **Baked into the image by CI** — the GTFS parse (~3.5 GB peak) never runs on the Fly machine; runtime copies the baked static tables into the volume DB when the image is newer |
 | Route focus | `focusRouteIds` config (env `FOCUS_ROUTES` seed, default = all routes): the pilot tracks a subset of routes end-to-end — menu, facts, recommendations, logs — runtime-adjustable, no restart |
 | Refresh ticks | Facts at 10 s; decisions flat every 30 s (`DECISION_INTERVAL_SECONDS`) over the focused active terminals |
@@ -796,13 +802,188 @@ current list as `route1, route2`). Test: edit round-trips through
 decision pass; no health-check flapping with the check re-added; 30 s decision
 cadence restored.
 
+## Phase 11 — Basic-auth gate over the whole site (post-launch)
+
+Branch: `feat/site-auth-gate` → merge into `dev`, release to `main`. Owner
+approved option 1 ("conceal everything with the token"): one gate in front
+of the SPA, every `/api` route, and the WS handshake. Motivation: the pilot
+lives on the public internet at a guessable URL (`dispatch-pilot.fly.dev`),
+and today only mutations are gated — every read (schedules, recorded
+arrivals/departures, recommendations) is public.
+
+### 11a. Server gate middleware
+
+A small module (e.g. `server/src/api/authGate.ts`) with the gate plus
+unit-tested helpers, registered in `index.ts` after the `[http]` logging
+middleware and BEFORE `createApi`, `express.static`, and the SPA fallback
+route — so it covers every inbound path.
+
+- `DISPATCH_TOKEN` unset → no-op (local dev unchanged; same rule as the
+  mutating-route gate).
+- Accepts EITHER:
+  - `Authorization: Basic <b64(user:password)>` with password ===
+    `DISPATCH_TOKEN` — any username; constant-time compare
+    (`crypto.timingSafeEqual`), malformed header → 401; or
+  - `x-dispatch-token: <DISPATCH_TOKEN>` — existing scripts (curl /
+    PowerShell recipes) keep working unchanged.
+- Failure → 401. Distinguish the two shapes:
+  - non-`/api` paths (SPA, assets): include
+    `WWW-Authenticate: Basic realm="dispatch"` so the browser shows its
+    native prompt once and caches credentials for the session;
+  - `/api` paths: plain `{"error":"authentication required"}` JSON, no
+    `WWW-Authenticate` (fetch/XHR must not trigger browser dialogs).
+- Exempt exactly one route: `GET /api/health` — Fly's health check probes
+  it without credentials, and gating it would mark the machine unhealthy
+  and unroute the app (the exact failure mode Phase 10 fixed). It exposes
+  liveness/timing only; that trade is deliberate.
+
+### 11b. WS handshake gate
+
+`server/src/api/ws.ts`: express middleware never sees HTTP `upgrade`
+events, so the identical check runs inside the ws upgrade handler — accept
+the basic-auth header or a `?token=` query parameter; otherwise respond 401
+and destroy the socket. Browsers attach cached basic credentials to
+same-origin WS upgrades (primary path); the query param is the reliable
+cross-browser fallback.
+
+### 11c. Web client
+
+- The WS connect URL appends `?token=` from localStorage when the dispatch
+  token is set in Settings.
+- A 401 from any API call surfaces a clear message ("Authentication
+  required — refresh to log in, or set the dispatch token in Settings")
+  instead of a generic error. Most users never see it: the browser's native
+  prompt handles login.
+
+### 11d. Docs
+
+README access-control section + this plan's Decisions table: access is now
+"basic-auth gate over everything except `GET /api/health`;
+`x-dispatch-token` still accepted for scripts" — replacing "reads stay
+open for easy testing".
+
+### Tests
+
+- Gate: no credentials → 401 on a GET API route, on `/` (SPA), and on an
+  asset; correct basic password (any username) → 200; wrong password → 401;
+  `x-dispatch-token` → 200; `DISPATCH_TOKEN` unset → everything open
+  (back-compat; existing tests must keep passing unchanged).
+- `GET /api/health` → 200 with and without credentials.
+- WS: an upgrade without credentials → 401 and socket closed; with
+  `?token=` (and separately with a basic header) → handshake completes
+  (raw `http.request` upgrade against the test server).
+
+### Acceptance
+
+Locally with `DISPATCH_TOKEN` set: the browser prompts once, then the app
+works end-to-end (pages, terminal views, WS live updates); curl without
+credentials → 401; curl with `x-dispatch-token` → 200; `/api/health` open.
+After release: same on the deployed site, and the Fly health check stays
+green through a deploy boot.
+
+### Notes / non-goals
+
+- No brute-force throttling — the token is a long random string; revisit if
+  logs show attempts.
+- The app remains discoverable by name; auth is the barrier, not obscurity.
+- No per-user accounts or identity — one shared token.
+
+## Phase 12 — Fact fidelity fixes (boot fabrications + wrong-terminal layover)
+
+Branch: `fix/fact-baseline-and-flip-geometry` → merge into `dev`, release to
+`main`. Two owner-reported production quirks, both root-caused in code, plus
+one related defect found while tracing.
+
+**Quirk 1 — boot fabricates event times.** A bus already laying over at
+boot gets an "arrival" stamped ~boot (STOPPED_AT at a terminal stop is
+treated as an immediate observed arrival — `engine.ts` recordFacts,
+~line 745); a bus mid-trip at boot gets a "departure" stamped ~boot (the
+in-transit departure path, ~line 786). The same happens at the ~02:40
+service-day rollover (ledger + vehicleTracks both clear). Owner's rule:
+an unobserved transition is unknowable — leave it blank.
+
+**Quirk 2 — wrong-terminal layover.** `buildDepartures` classifies a
+vehicle as laying over at T when VP says its current trip is the outbound
+trip from T (`onOutboundLeg`, `headway.ts:460`) — trip_id trusted with no
+geometric check. CTA flips a vehicle's trip_id to its next trip while it
+is still at the FAR terminal (the documented flip-window behavior); when
+the flip lands on the outbound trip early, the bus renders as "laying
+over" at T counting down to a departure a whole trip + layover away (the
+"65 minutes" symptom).
+
+**Related defect — cross-terminal ledger reads.** The ledger is keyed by
+`trip_id`, but an outbound trip's ARRIVAL fact belongs to the terminal
+where that trip ends (the far one). T reads it as "arrived here"
+(`terminalArrival = record?.arrivalSeconds`, `headway.ts:443`; the
+disjunct at `:466`) and `recordRunEvents` can write cross-terminal
+arrival rows for short trips whose far-end arrival lands inside T's
+30-minute past window.
+
+### 12a. Session-baseline facts (quirk 1)
+
+`engine.ts` recordFacts: the FIRST fresh observation of a vehicle in a
+session (boot or service-day rollover — both clear vehicleTracks)
+establishes its posture baseline only — no fact, arm, or confirmation
+fires from it. From the second observation on, the existing logic runs
+unchanged, making every recorded fact an observed transition by
+construction. Effects: a bus already parked at boot keeps a blank
+(unobserved) arrival — EDT falls back to schedule per the existing EDT
+rule — and its later STOPPED→IN_TRANSIT transition still records a true
+departure; a bus mid-trip at boot gets no fabricated departure.
+Restored `run_facts` are unaffected (ledger already-recorded checks
+still gate re-recording).
+
+Tests (engine.test.ts, existing synthetic-fixture patterns): a first
+observation of a vehicle already STOPPED_AT a terminal stop → no arrival
+fact or run_event (blank), EDT = scheduled; a mid-trip first observation
+→ no departure fact; the same vehicle's later live transitions record
+normally (INCOMING_AT→STOPPED_AT arrival at the stop instant,
+parked→motion departure); the geometric arm/confirm path still records
+after its baseline; a service-date rollover re-baselines.
+
+### 12b. Geometric corroboration for trip-flip layover (quirk 2)
+
+`headway.ts` buildDepartures: `onOutboundLeg` contributes to
+`arrivedAtTerminal` only when corroborated at THIS terminal — the vehicle
+is in T's buffer (`terminalState.inBuffer` for the (vehicle, T) key) or
+has a T-scoped posture for the trip. An ob-assigned vehicle elsewhere
+falls through to the existing ambiguous-posture 'incoming' catch-all
+(`headway.ts:474`): the card then shows the predecessor trip's predicted
+arrival at T (honest: arrives ~X, departs ~Y), never a phantom layover.
+
+Tests: VP carries the vehicle on the outbound trip while positioned at
+the far terminal → state 'incoming' with the predecessor trip's ETA, not
+layover; the same flip with the vehicle inside T's buffer → 'layover'
+with the outbound EDT (existing behavior preserved).
+
+### 12c. Terminal-scope the ledger's arrival/departure facts (hardening)
+
+Add the terminal id to arrival/departure facts: the in-memory
+`RunRecord` (headway.ts) gains arrival/departure terminal ids, persisted
+via additive `run_facts` columns using the existing `ensureColumn`
+migration pattern (schema.ts). Everywhere a fact is read *at* a terminal
+— `buildDepartures`' `terminalArrival`/`arrivedAtTerminal`
+(`headway.ts:443`, `:466`) and `recordRunEvents` — require the fact's
+terminal to match. This closes the cross-terminal class for display and
+for the run_events audit.
+
+Tests: a short-trip block whose far-end arrival lands inside T's past
+window → no arrival row at T for the outbound trip; facts recorded at
+the correct terminal only.
+
+**Acceptance:** boot the local server against the live feed mid-service:
+no arrival/departure rows stamped within each vehicle's first
+observation (spot-check `GET /api/run-events` before/after); the
+"65-minute layover at the wrong terminal" class renders as incoming with
+the predecessor ETA; all 212 existing tests green plus the new ones.
+
 ## Non-goals (explicitly out of scope — do not build)
 
 - No vehicle-ping logging, no per-poll snapshot persistence, no feed-sample
   capture in production (the `data/*_capture_*.csv` files are local dev
   artifacts; the volume only carries `dispatch.db` + the cached GTFS zip).
-- No auth beyond the mutating-route token; reads stay public for easy
-  testing.
+- No auth beyond the Phase 11 basic-auth gate + the shared `DISPATCH_TOKEN`
+  (no per-user accounts or identity; no brute-force throttling).
 - No staging instance, no multi-machine, no Postgres, no Litestream backups
   (Fly snapshots volumes on deploy; revisit if the data becomes precious).
 - No prebuilt-image registry split (GHCR) yet — the baked.db rides the

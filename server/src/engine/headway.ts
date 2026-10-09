@@ -26,6 +26,11 @@ export interface RunRecord {
   arrivalSeconds?: number;
   arrivalSource?: FactSource;
   arrivalEvidence?: FactEvidence;
+  // Terminal the arrival/departure physically occurred at (Phase 12c). A trip's arrival fact
+  // belongs to the terminal where the trip ends, so a different terminal reading the same
+  // trip-keyed record must not treat it as "arrived here". Undefined marks legacy/unscoped facts.
+  arrivalTerminalId?: string;
+  departureTerminalId?: string;
   departureSeconds?: number;
   departureSource?: FactSource;
   departureEvidence?: FactEvidence;
@@ -101,6 +106,10 @@ export interface VehicleTerminalState {
   armTripId?: string;
   layoverTripId?: string;
   departurePending: boolean;
+  // True when this posture comes from the vehicle's first fresh observation of the session
+  // (Phase 12a). The bus is visibly here, but it was already here before we started watching, so
+  // its arrival time is unobservable: EDT must fall back to schedule rather than assume "now".
+  baseline?: boolean;
 }
 
 // Terminal posture is keyed by both vehicle and terminal. A vehicle can be working
@@ -402,6 +411,16 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     }
 
     const record = opts.ledger.get(ob.tripId);
+    // Terminal scoping (12c): a fact only applies to the terminal it physically occurred at.
+    // Legacy records written before terminal ids existed carry no id and are treated as unscoped,
+    // so their behavior is unchanged. This stops an outbound trip's far-terminal arrival from
+    // reading as "arrived here" at the departure terminal.
+    const factAtThisTerminal = (terminalId: string | undefined) =>
+      terminalId === undefined || terminalId === opts.terminal.id;
+    const arrivalAtThisTerminal =
+      record?.arrivalSeconds !== undefined && factAtThisTerminal(record.arrivalTerminalId);
+    const departureAtThisTerminal =
+      record?.departureSeconds !== undefined && factAtThisTerminal(record.departureTerminalId);
     const onPrevLeg =
       vehicleId !== undefined && prevTripId !== undefined && currentTrip === prevTripId;
     const onOutboundLeg = currentTripFromVp && currentTrip === ob.tripId;
@@ -411,6 +430,10 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
     const terminalState = vehicleId
       ? opts.vpTerminalState?.get(vehicleTerminalKey(vehicleId, opts.terminal.id))
       : undefined;
+    // This posture was established by the vehicle's first observation of the session (Phase 12a).
+    // The bus is visibly here, but it was already here before we started watching, so the arrival
+    // time is unobservable and EDT must fall back to schedule.
+    const baselinePosture = terminalState?.baseline === true;
     // A vehicle parked inside the terminal buffer is the timely geometric arrival signal. The
     // scheduled-arm fallback covers a bus that reached the terminal area but never registered as
     // stationary (e.g. staging just beyond the stop or a feed gap), once its scheduled arrival
@@ -437,33 +460,46 @@ export function buildDepartures(db: Database, opts: BuildDeparturesOptions): Out
       scheduledArrival !== undefined &&
       scheduledArrival + grace <= opts.nowSvc;
 
-    const departed = record?.departureSeconds !== undefined;
-    const departedSeconds = record?.departureSeconds;
+    const departed = departureAtThisTerminal;
+    const departedSeconds = departureAtThisTerminal ? record?.departureSeconds : undefined;
 
-    const terminalArrival = record?.arrivalSeconds;
+    const terminalArrival = arrivalAtThisTerminal ? record?.arrivalSeconds : undefined;
     const arrivalSource = terminalArrival !== undefined
       ? 'observed'
-      : parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal || hasArrivalInfo
+      : baselinePosture || parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal || hasArrivalInfo
         ? 'estimated'
         : undefined;
-    const arrivalForEdt = terminalArrival ?? (parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal
-      ? Math.max(scheduledArrival, opts.nowSvc)
-      : onPrevLeg && hasArrivalInfo
-        ? predictedArrival
-        : undefined);
-    // Observed VP arrival wins over an estimate; while parked the bus is physically there, so its
+    // An observed VP arrival wins over an estimate; while parked the bus is physically there, so its
     // estimated arrival is at least the current time. Estimates are used for EDT only while the
-    // bus is demonstrably still on the previous leg.
+    // bus is demonstrably still on the previous leg. A session-baseline posture (already at the
+    // terminal at first sight) is the exception: its arrival time is unobservable, so EDT falls
+    // back to schedule per the EDT rule (an unknown arrival must not delay it).
+    const arrivalForEdt = terminalArrival ?? (
+      baselinePosture
+        ? undefined
+        : (parkedAtTerminal || scheduledArm || hasPostureForTrip || assignedAtTerminal)
+          ? Math.max(scheduledArrival, opts.nowSvc)
+          : onPrevLeg && hasArrivalInfo
+            ? predictedArrival
+            : undefined
+    );
     const edt = expectedDepartureTime(ob.departureTime, arrivalForEdt, opts.minRestSeconds);
 
+    // Quirk 2 (12b): VP's current trip alone must not imply a layover. A vehicle on the outbound
+    // trip counts as arrived here only when corroborated geometrically (in this terminal's buffer)
+    // or by a T-scoped posture already held for the trip. An early trip_id flip landing on an
+    // outbound run while the bus is at the FAR terminal falls through to the ambiguous 'incoming'
+    // catch-all below instead of rendering as a phantom layover counting down a trip away.
+    const outboundAtThisTerminal =
+      onOutboundLeg && (terminalState?.inBuffer === true || hasPostureForTrip);
     const arrivedAtTerminal =
-      onOutboundLeg ||
+      outboundAtThisTerminal ||
       parkedAtTerminal ||
       scheduledArm ||
       hasPostureForTrip ||
       assignedAtTerminal ||
       (onPrevLeg && hasArrivalInfo && predictedArrival <= opts.nowSvc) ||
-      record?.arrivalSeconds !== undefined;
+      arrivalAtThisTerminal;
     let state: VehicleState;
     if (departed) state = 'departed';
     else if (arrivedAtTerminal) state = 'layover';
