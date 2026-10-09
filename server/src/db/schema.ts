@@ -148,6 +148,11 @@ const OPERATIONAL_SCHEMA_SQL = `
     trip_id TEXT NOT NULL,
     arrival_seconds INTEGER,
     departure_seconds INTEGER,
+    -- Terminal scoping (Phase 12c): the terminal the fact physically occurred at. A trip's arrival
+    -- fact belongs to the terminal where the trip ends, which may not be the terminal reading the
+    -- ledger. NULL marks rows written before this migration (legacy) and is treated as unscoped.
+    arrival_terminal_id TEXT,
+    departure_terminal_id TEXT,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (service_date, trip_id)
   );
@@ -197,6 +202,8 @@ export function createDatabase(dbPath: string): Database.Database {
   ensureColumn(db, 'routes', 'text_color', 'TEXT');
   ensureColumn(db, 'block_trips', 'service_id', 'TEXT');
   ensureColumn(db, 'run_events', 'evidence', 'TEXT');
+  ensureColumn(db, 'run_facts', 'arrival_terminal_id', 'TEXT');
+  ensureColumn(db, 'run_facts', 'departure_terminal_id', 'TEXT');
   ensureInterventionEventActions(db);
   db.exec(`
     UPDATE block_trips

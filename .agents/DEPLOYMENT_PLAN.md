@@ -11,11 +11,12 @@ owner's next release PR): basic-auth gate over the whole site — SPA, all
 `x-dispatch-token` still accepted. Known follow-up for the next batch:
 the mutating-route gate should also accept basic auth (basic-only browser
 users can read but cannot apply/decline until they set the Settings
-token). **Phase 12 added** (owner-reported quirks, root-caused:
-session-baseline facts, flip-geometry corroboration, terminal-scoped
-ledger facts). Remaining: the owner's `dev` → `main` release PR, then Phase 9
-(data review) after ~24 h of runtime. Decisions are final; do not
-re-litigate them without the owner. Update PROGRESS.md after each phase.
+token). **Phase 12 complete on `dev`** (merged, 222 tests, awaiting the
+owner's next release PR): session-baseline facts, flip-geometry
+corroboration, terminal-scoped ledger facts. Remaining: the owner's
+`dev` → `main` release PR, then Phase 9 (data review) after ~24 h of runtime.
+Decisions are final; do not re-litigate them without the owner. Update
+PROGRESS.md after each phase.
 
 ## Goal
 

@@ -1083,3 +1083,83 @@ merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
 `dev`→`main` release PR (first browser visit prompts once — username anything,
 password the `DISPATCH_TOKEN`; existing scripts unchanged), then Phase 9's ~24 h
 data review.
+
+## Deployment Phase 12 — Fact fidelity fixes (complete)
+
+Branch `fix/fact-baseline-and-flip-geometry` → merge into `dev`. Two owner-reported
+production quirks plus one related defect, root-caused in the plan.
+
+### 12a — Session-baseline facts (quirk 1: boot fabrications)
+
+- `engine.ts` `recordFacts`: a per-vehicle `VehicleTrack.baselineDone` flag marks the
+  first fresh observation of each vehicle since boot / the service-day rollover.
+  That observation establishes posture only — `factEligible` is false, so no
+  `recordArrival`/`recordDeparture`, arm, or confirmation fires from it. From the
+  second fresh observation the state machine runs unchanged, so every recorded fact
+  is an observed in-session transition. A parked bus keeps a blank (unobserved)
+  arrival; a mid-trip bus keeps a blank departure. `baselineDone` is consumed only on
+  a matched static trip, so a deadhead sighting does not waste the baseline.
+- Baseline posture still classifies honestly: the STOPPED_AT/geometry branches set
+  `track.layoverTripId` (posture, no fact), and `VehicleTerminalState.baseline` tells
+  `buildDepartures` the arrival time is unobservable, so EDT falls back to schedule
+  per the existing EDT rule (an unknown arrival must not delay it). Restored
+  `run_facts` are unaffected: the ledger `arrivalSeconds` checks still gate
+  re-recording.
+
+### 12b — Geometric corroboration for the early trip flip (quirk 2)
+
+- `headway.ts` `buildDepartures`: `onOutboundLeg` now contributes to
+  `arrivedAtTerminal` only when corroborated at THIS terminal — the vehicle is in T's
+  buffer (`terminalState.inBuffer`) or holds a T-scoped posture for the trip
+  (`hasPostureForTrip`). An ob-assigned vehicle elsewhere (CTA's early flip onto an
+  outbound run while the bus is still at the far terminal) falls through to the
+  existing ambiguous-posture `incoming` catch-all instead of rendering as a phantom
+  "65 minutes to departure" layover.
+
+### 12c — Terminal-scoped ledger facts (hardening)
+
+- `RunRecord` (headway.ts) gains `arrivalTerminalId`/`departureTerminalId`, persisted
+  via additive `run_facts.arrival_terminal_id`/`departure_terminal_id` columns using
+  the existing `ensureColumn` migration pattern (no destructive migration). Every
+  `recordArrival`/`recordDeparture` call site threads the physical terminal id.
+- Reads are scoped: `buildDepartures`' `terminalArrival`/`arrivedAtTerminal`/
+  `departed` and `recordRunEvents`' audit inserts require the fact's terminal to
+  match the terminal being rendered. Legacy rows written before the columns existed
+  carry `NULL` and are treated as **unscoped** (they match every terminal), so
+  pre-migration behavior is unchanged; documented in the schema and read paths.
+
+### Tests (212 → 222)
+
+- New 12a tests (6): first-observation STOPPED_AT → blank arrival, EDT on schedule,
+  no `run_events`/`run_facts`; mid-trip first observation → no departure; live
+  arrival and departure transitions after the baseline record normally; geometric
+  arm/confirm still records after its baseline; service-day rollover re-baselines.
+- New 12b tests (2): early flip at the far terminal → `incoming` with the
+  predecessor's prediction; the same flip inside T's buffer → `layover`.
+- New 12c tests (2): a far-terminal arrival fact read at T is ignored (no layover,
+  no cross-terminal `run_events` row); the same fact scoped to T reads normally.
+- **No existing test expectation was changed.** The first refresh of a fresh engine
+  is now a baseline, so the existing tests that assert a fact were given a one-line
+  `primeBaseline(...)` warm-up (an earlier-timestamped copy of the same feed); the
+  assertion refresh then runs the unchanged state machine and records at the feed's
+  own times. This preserves the covered behaviors rather than rewriting them.
+
+### Acceptance evidence (local, live CTA feed, baked static)
+
+- Booted the server against the live feed mid-service in baked-static mode
+  (`BAKED_STATIC_DB=../baked.db`, `FOCUS_ROUTES=9`, fresh volume DB). Static copy
+  `[static] baked copy loaded_at=…` in ~60–90 s, then `[static] ready`.
+- `GET /api/run-events` stayed at **0 rows through the entire boot decision pass**
+  (polled every second for the first ~15 s; the boot `[refresh] complete snapshots=5`
+  decision pass had already run). A later decision pass (~40 s) produced **10 rows,
+  all genuine transitions** — `stopped_at` arrivals and `in_transit_to`/
+  `out_of_buffer` departures at the poll-time service seconds, never a boot-time
+  value. The mass boot fabrication (one row per already-parked / already-mid-trip
+  bus) is gone.
+- The wrong-terminal "65-minute layover" class is deterministic-fixture-tested (12b)
+  rather than reliably reproducible from a single live snapshot.
+
+`npm run typecheck`, `npm run lint`, `npm test` (**222 tests**) all green; branch
+merged into `dev` with `--no-ff` and deleted. Remaining owner work: the
+`dev`→`main` release PR (which also ships Phase 11's auth gate), then Phase 9's data
+review.

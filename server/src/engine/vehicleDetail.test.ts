@@ -30,6 +30,21 @@ function unixAt(hhmm: string): number {
   return Math.floor(nowAt(hhmm).getTime() / 1000);
 }
 
+// Phase 12a: prime a vehicle's session baseline with an earlier-timestamped copy of the feed so the
+// following refresh runs the unchanged state machine and records the observed transition.
+function primeBaseline(engine: Engine, rt: RealtimeSnapshot, now: Date): void {
+  const shift = 60;
+  engine.refresh(
+    {
+      ...rt,
+      timestamp: rt.timestamp - shift,
+      vehiclePositions: rt.vehiclePositions.map((vp) => ({ ...vp, timestamp: vp.timestamp - shift })),
+      tripUpdates: rt.tripUpdates.map((t) => ({ ...t, timestamp: t.timestamp - shift })),
+    },
+    new Date(now.getTime() - shift * 1000),
+  );
+}
+
 function vpAtStop(
   vehicleId: string,
   tripId: string,
@@ -482,6 +497,7 @@ describe('blockTimeline', () => {
       tripUpdates: [tu('L1', 'V1', []), tu('D1', 'V1', [])],
       vehiclePositions: [vpAtStop('V1', 'L1', 'T', '07:40')],
     };
+    primeBaseline(harness.engine, parked, nowAt('07:40'));
     harness.engine.refresh(parked, nowAt('07:40'));
     const departed: RealtimeSnapshot = {
       timestamp: unixAt('08:10'),
